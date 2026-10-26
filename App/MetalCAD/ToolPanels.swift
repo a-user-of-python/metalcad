@@ -1252,6 +1252,11 @@ struct DrillSite {
     let entityID: Int
     let label: String
     let at: Vec2
+    /// Circle sites only: the circle's own diameter. The kit drills a
+    /// circle site at the circle's size, not the panel Diameter —
+    /// and the filtered drill sketch must re-add the site AS a circle
+    /// or it would silently shrink to a point site.
+    let circleDiameter: Double?
 }
 
 struct HolePanel: View {
@@ -1320,11 +1325,11 @@ struct HolePanel: View {
             case .point(let id, let at, _):
                 out.append(DrillSite(entityID: id,
                                      label: "Point #\(id) · (\(mcFmt(at.x)), \(mcFmt(at.y)))",
-                                     at: at))
-            case .circle(let id, let c, _, _):
+                                     at: at, circleDiameter: nil))
+            case .circle(let id, let c, let r, _):
                 out.append(DrillSite(entityID: id,
-                                     label: "Circle #\(id) center · (\(mcFmt(c.x)), \(mcFmt(c.y)))",
-                                     at: c))
+                                     label: "Circle #\(id) · Ø \(mcFmt(2 * r)) — drills at circle size",
+                                     at: c, circleDiameter: 2 * r))
             default:
                 break
             }
@@ -1347,7 +1352,11 @@ struct HolePanel: View {
         guard !drillSites.isEmpty, !allSitesOn, let src = chosenSketch else { return nil }
         var s = Sketch(id: filteredSketchID, name: "Hole sites (auto)", plane: src.plane)
         for site in drillSites where enabledSiteIDs.contains(site.entityID) {
-            s.addPoint(site.at)
+            if let d = site.circleDiameter {
+                s.addCircle(site.at, d / 2)
+            } else {
+                s.addPoint(site.at)
+            }
         }
         return s
     }
@@ -1423,6 +1432,9 @@ struct HolePanel: View {
                     PanelNote(text: "No drill sites are on — switch at least one on to drill.", warning: true)
                 } else {
                     PanelNote(text: "Will drill at \(enabledCount) site\(enabledCount == 1 ? "" : "s")")
+                }
+                if drillSites.contains(where: { $0.circleDiameter != nil }) {
+                    PanelNote(text: "Circles drill at their own diameter — the Diameter field below applies to point sites only.")
                 }
             }
             PanelNumberRow(label: "Diameter (mm)", text: $diameterText)

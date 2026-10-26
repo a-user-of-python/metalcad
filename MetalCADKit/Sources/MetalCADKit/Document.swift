@@ -458,24 +458,43 @@ public enum DocumentEngine {
         case .hole(let sketchID, let diameter, let depth, let kind):
             guard diameter > 0 else { throw CADError.holeSpecInvalid("diameter must be > 0") }
             guard let sketch = part.sketch(sketchID) else { throw CADError.nameNotFound("sketch") }
-            // Drill points: sketch points and circle centers.
-            var points: [Vec2] = []
+            // Drill sites: sketch points drill at the feature's
+            // diameter; sketch circles drill at their OWN diameter
+            // (2 x radius) — a sketched circle is the hole's profile,
+            // not just a center marker. (Device bug, 2026-10-26: a
+            // big circle + Hole produced a small hole at its center,
+            // drilled at the panel diameter.)
+            var sites: [(center: Vec2, diameter: Double)] = []
             for e in sketch.entities where !e.isConstruction {
                 switch e {
-                case .point(_, let at, _): points.append(at)
-                case .circle(_, let c, _, _): points.append(c)
+                case .point(_, let at, _):
+                    sites.append((at, diameter))
+                case .circle(_, let c, let r, _):
+                    sites.append((c, r > 0 ? 2 * r : diameter))
                 default: break
                 }
             }
-            guard !points.isEmpty else { throw CADError.holeSpecInvalid("the hole sketch needs a point or circle center") }
-            let cutDepth = depth > 0 ? depth : 10_000  // 0 = through everything
+            guard !sites.isEmpty else { throw CADError.holeSpecInvalid("the hole sketch needs a point or circle center") }
+            // Depth 0 = through: the cutter is a full column along the
+            // axis (cutDepth each way from the sketch plane), so the
+            // hole really passes through everything on that axis —
+            // including material piled over the sketch plane (the demo
+            // part's boss sits on the very face its sketch came from,
+            // and a plane-anchored cutter left its top half uncut,
+            // i.e. the "through" hole was blind from that side).
+            // A blind hole (depth > 0) starts at the sketch plane and
+            // reaches `depth` into the part, as before.
+            let through = depth <= 0
+            let cutDepth = through ? 10_000.0 : depth
+            let toolHeight = through ? 2 * cutDepth : cutDepth + 1
+            let toolAbove = through ? cutDepth : 1.0
             var tool = Mesh()
-            for p in points {
-                let center3 = sketch.plane.toWorld(p)
-                var cyl = try Tessellation.cylinder(radius: diameter / 2, height: cutDepth + 1, segments: 48)
+            for site in sites {
+                let center3 = sketch.plane.toWorld(site.center)
+                var cyl = try Tessellation.cylinder(radius: site.diameter / 2, height: toolHeight, segments: 48)
                 // Cylinder is built along +Z from z=0; orient it along -normal
                 // starting 1 mm above the plane.
-                cyl = orientCylinder(cyl, plane: sketch.plane, center: center3, above: 1, depth: cutDepth + 1)
+                cyl = orientCylinder(cyl, plane: sketch.plane, center: center3, above: toolAbove, depth: toolHeight)
                 tool.append(cyl)
                 switch kind {
                 case .simple: break
@@ -483,9 +502,16 @@ public enum DocumentEngine {
                     guard cbD > diameter, cbDepth > 0, cbDepth < cutDepth else {
                         throw CADError.holeSpecInvalid("counterbore must be wider and shallower than the hole")
                     }
-                    var cb = try Tessellation.cylinder(radius: cbD / 2, height: cbDepth + 1, segments: 48)
-                    cb = orientCylinder(cb, plane: sketch.plane, center: center3, above: 1, depth: cbDepth + 1)
-                    tool.append(cb)
+                    // The bore keeps the panel's size, measured from
+                    // the sketch plane. Where a circle site is already
+                    // wider than the bore, the bore cutter would be
+                    // buried inside the hole and cut nothing — skip it
+                    // for that site (and never error over it).
+                    if site.diameter < cbD {
+                        var cb = try Tessellation.cylinder(radius: cbD / 2, height: cbDepth + 1, segments: 48)
+                        cb = orientCylinder(cb, plane: sketch.plane, center: center3, above: 1, depth: cbDepth + 1)
+                        tool.append(cb)
+                    }
                 case .countersink(let angle):
                     guard angle > 0, angle < 180 else { throw CADError.holeSpecInvalid("countersink angle 0-180") }
                     let coneH = (diameter / 2) / tan(angle / 2 * .pi / 180)

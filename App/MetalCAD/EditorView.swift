@@ -649,8 +649,11 @@ struct EditorView: View {
     @State private var activeTool: ActiveTool?
     @State private var extrudePresetSketchID: String?
     // Left browser panel width (v4.1): persisted, drag-resizable via
-    // the handle on its trailing edge. 0 = fully collapsed; below 150
-    // the panel renders as a slim icon rail. The header sidebar button
+    // the handle on its trailing edge. 0 = fully collapsed; below 250
+    // the panel renders as a slim icon rail (250 is the full row's
+    // floor: icon + eye + menu + insets leave ~95 pt of text width —
+    // any narrower and row names crushed letter-by-letter instead of
+    // truncating, device report 2026-10-26). The header sidebar button
     // and a double-tap on the handle toggle hidden <-> last width.
     @AppStorage("browserPanelWidth") private var browserPanelWidth: Double = 300
     @AppStorage("browserPanelLastWidth") private var browserPanelLastWidth: Double = 300
@@ -1853,11 +1856,11 @@ struct EditorView: View {
 
     // MARK: Browser (left): sketches + feature timeline
 
-    /// Width dispatcher: below 150 pt the panel is a slim icon rail;
+    /// Width dispatcher: below 250 pt the panel is a slim icon rail;
     /// at/above it, the full browser list at the chosen width.
     private var browserPanel: some View {
         Group {
-            if browserPanelWidth < 150 {
+            if browserPanelWidth < 250 {
                 slimBrowserPanel
             } else {
                 fullBrowserPanel
@@ -1871,7 +1874,7 @@ struct EditorView: View {
         return st.message == "suppressed" ? .gray : .green
     }
 
-    /// Slim rail (panel width < 150): icon + status dot only, no text.
+    /// Slim rail (panel width < 250): icon + status dot only, no text.
     /// Rows stay fully tappable — sketches navigate, features open
     /// their editor — and every row keeps an accessibility label.
     private var slimBrowserPanel: some View {
@@ -1973,14 +1976,20 @@ struct EditorView: View {
                         Text(sketch.name)
                             .mcFont(20, weight: .semibold)
                             .foregroundStyle(.primary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
                         if sketch.isDatumPlane {
                             Text("Datum plane · \(mcPlaneText(sketch.plane))")
                                 .mcFont(17)
                                 .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
                         } else {
                             Text("\(sketch.entities.count) items · \(sketch.constraints.count) constraints")
                                 .mcFont(17)
                                 .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
                         }
                     }
                 }
@@ -2036,9 +2045,13 @@ struct EditorView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(feature.name)
                     .mcFont(20, weight: .semibold)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
                 Text(kindSummary(feature.kind))
                     .mcFont(17)
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
                 if let st = model.status(for: feature.id) {
                     if !st.ok, let code = st.errorCode {
                         Text(code)

@@ -1,4 +1,5 @@
 import SwiftUI
+import CoreText
 
 // MARK: - Snap engine
 
@@ -82,6 +83,12 @@ struct SketchEditorView: View {
         case rectangle = "Rectangle"
         case circle = "Circle"
         case point = "Point"
+        case spline = "Spline"
+        case ellipse = "Ellipse"
+        case polygon = "Polygon"
+        case slot = "Slot"
+        case text = "Text"
+        case trim = "Trim"
         case measure = "Measure"
     }
 
@@ -115,6 +122,40 @@ struct SketchEditorView: View {
     @State private var measureB: SketchPointRef?
     @State private var measureText = ""
 
+    // v4 draw-tool state (one variable per @State — see the note above).
+    @State private var splinePoints: [Vec2] = []
+    @State private var slotTaps: [Vec2] = []
+    @State private var polygonSides = 6
+    // Text tool fields.
+    @State private var textString = "TEXT"
+    @State private var textSize = "20"
+    @State private var textX = "0"
+    @State private var textY = "0"
+    @State private var textFont = "Helvetica-Bold"
+    // Selection-edit fields (move / rotate / scale / mirror / pattern).
+    @State private var opScope = "selected"
+    @State private var moveDX = "10"
+    @State private var moveDY = "0"
+    @State private var rotateDeg = "90"
+    @State private var rotateCX = ""
+    @State private var rotateCY = ""
+    @State private var scaleFactor = "2"
+    @State private var scaleCX = ""
+    @State private var scaleCY = ""
+    @State private var patternMode = "rect"
+    @State private var patRows = "2"
+    @State private var patCols = "3"
+    @State private var patSX = "20"
+    @State private var patSY = "20"
+    @State private var patCount = "6"
+    @State private var patTotal = "360"
+    @State private var patCX = ""
+    @State private var patCY = ""
+    @State private var offsetDist = "5"
+
+    private static let textFonts = ["Helvetica-Bold", "Helvetica", "Courier-Bold",
+                                    "TimesNewRomanPS-Bold", "Menlo-Bold"]
+
     private let bigFont = Font.system(size: 20, weight: .semibold)
 
     init(model: EditorModel, sketchID: String) {
@@ -124,6 +165,11 @@ struct SketchEditorView: View {
     }
 
     private var guideOutline: [Vec2] { model.faceOutlines[sketchID] ?? [] }
+
+    /// Text and projected geometry can push a sketch past a few
+    /// hundred entities; past 250 the solver is skipped so editing
+    /// stays responsive (dimensions then apply as direct edits).
+    private var isHeavy: Bool { working.entities.count > 250 }
 
     // MARK: Coordinate transform (sketch mm <-> view points)
 
@@ -146,6 +192,8 @@ struct SketchEditorView: View {
         var pts: [Vec2] = guideOutline
         for e in working.entities { pts += e.polyline() }
         if let p = pending { pts.append(p) }
+        pts += splinePoints
+        pts += slotTaps
         guard let first = pts.first else {
             return ViewTransform(scale: 6, cx: 0, cy: 0)
         }
@@ -323,12 +371,23 @@ struct SketchEditorView: View {
                     messageRow(text: h.userMessage, code: h.code, color: .orange)
                 }
                 toolBar
+                toolOptionsRow
+                if isHeavy {
+                    Text("Heavy sketch — \(working.entities.count) items. Solver passes are skipped so editing stays responsive; dimensions still apply directly.")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(.orange)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
                 if tool == .measure {
                     measureCard
+                }
+                if tool == .text {
+                    textCard
                 }
                 if let id = selectedID, working.entity(id) != nil {
                     inspector(for: id)
                 }
+                selectionOpsCard
                 if !working.constraints.isEmpty {
                     constraintsSection
                 }
@@ -478,8 +537,16 @@ struct SketchEditorView: View {
             dragChecked = true
             // Drag-to-move wins over placement when a point is grabbed,
             // in Select mode or while no placement is pending. Measure
-            // mode taps pick points instead of dragging them.
-            if pending == nil && tool != .measure {
+            // mode taps pick points instead of dragging them, and the
+            // v4 tap-tools (spline / slot / trim / text) place points —
+            // they never start a drag.
+            let dragOK: Bool = {
+                switch tool {
+                case .select, .line, .rectangle, .circle, .point: return true
+                default: return false
+                }
+            }()
+            if pending == nil && splinePoints.isEmpty && slotTaps.isEmpty && dragOK {
                 let startRaw = ft.toSketch(value.startLocation, in: size)
                 let threshold = 16 / max(ft.scale, 0.001)
                 var bestTarget: DragTarget?
@@ -556,6 +623,45 @@ struct SketchEditorView: View {
         case .point:
             working.addPoint(p)
             changed()
+        case .spline:
+            splinePoints.append(p)
+        case .ellipse:
+            if let center = pending {
+                let rx = abs(p.x - center.x), ry = abs(p.y - center.y)
+                if rx > 0.5 && ry > 0.5 {
+                    addEllipseLoop(center: center, rx: rx, ry: ry)
+                    changed()
+                }
+                pending = nil
+            } else {
+                pending = p
+            }
+        case .polygon:
+            if let center = pending {
+                if center.distance(to: p) > 0.5 {
+                    addPolygonLoop(center: center, vertex: p, sides: polygonSides)
+                    changed()
+                }
+                pending = nil
+            } else {
+                pending = p
+            }
+        case .slot:
+            slotTaps.append(p)
+            if slotTaps.count == 3 {
+                let r = slotTaps[2].distance(to: slotTaps[1])
+                if r > 0.1 && slotTaps[0].distance(to: slotTaps[1]) > 0.5 {
+                    addSlotEntities(a: slotTaps[0], b: slotTaps[1], r: r)
+                    changed()
+                }
+                slotTaps = []
+            }
+        case .text:
+            pending = p
+            textX = mcFmt(p.x)
+            textY = mcFmt(p.y)
+        case .trim:
+            trimTappedLine(at: raw, scale: ft.scale)
         }
     }
 
@@ -659,6 +765,18 @@ struct SketchEditorView: View {
                 let c = t.toView(start, in: size)
                 let r = start.distance(to: live.point) * t.scale
                 preview.addEllipse(in: CGRect(x: c.x - r, y: c.y - r, width: r * 2, height: r * 2))
+            case .ellipse:
+                let c = t.toView(start, in: size)
+                let rx = abs(live.point.x - start.x) * t.scale
+                let ry = abs(live.point.y - start.y) * t.scale
+                preview.addEllipse(in: CGRect(x: c.x - rx, y: c.y - ry, width: rx * 2, height: ry * 2))
+            case .polygon:
+                let verts = polygonVertices(center: start, vertex: live.point, sides: polygonSides)
+                if verts.count > 1 {
+                    preview.move(to: t.toView(verts[0], in: size))
+                    for v in verts.dropFirst() { preview.addLine(to: t.toView(v, in: size)) }
+                    preview.closeSubpath()
+                }
             default:
                 break
             }
@@ -699,6 +817,50 @@ struct SketchEditorView: View {
         }
         if let b = pointB {
             drawMeasureMarker(ctx, at: t.toView(b, in: size), letter: "B", color: .orange)
+        }
+
+        // Spline in progress: the sampled curve through the tapped
+        // points (plus the live pointer as a tentative last point).
+        if !splinePoints.isEmpty {
+            var previewPts = splinePoints
+            if let live = liveSnap { previewPts.append(live.point) }
+            let samples = catmullRomSamples(previewPts)
+            if samples.count > 1 {
+                var path = Path()
+                path.move(to: t.toView(samples[0], in: size))
+                for p in samples.dropFirst() { path.addLine(to: t.toView(p, in: size)) }
+                ctx.stroke(path, with: .color(.yellow.opacity(0.8)),
+                           style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
+            }
+            for p in splinePoints {
+                let c = t.toView(p, in: size)
+                ctx.fill(Path(ellipseIn: CGRect(x: c.x - 5, y: c.y - 5, width: 10, height: 10)),
+                         with: .color(.yellow))
+            }
+        }
+
+        // Slot in progress: centers, then the full outline once the
+        // second center is down (radius follows the pointer).
+        if !slotTaps.isEmpty {
+            for p in slotTaps {
+                let c = t.toView(p, in: size)
+                ctx.fill(Path(ellipseIn: CGRect(x: c.x - 5, y: c.y - 5, width: 10, height: 10)),
+                         with: .color(.yellow))
+            }
+            if slotTaps.count == 2, let live = liveSnap {
+                let r = live.point.distance(to: slotTaps[1])
+                if r > 0.05 {
+                    let outline = slotOutlinePoints(a: slotTaps[0], b: slotTaps[1], r: r)
+                    if outline.count > 1 {
+                        var path = Path()
+                        path.move(to: t.toView(outline[0], in: size))
+                        for p in outline.dropFirst() { path.addLine(to: t.toView(p, in: size)) }
+                        path.closeSubpath()
+                        ctx.stroke(path, with: .color(.yellow.opacity(0.8)),
+                                   style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
+                    }
+                }
+            }
         }
     }
 
@@ -862,6 +1024,200 @@ struct SketchEditorView: View {
         .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.06)))
     }
 
+    // MARK: Text tool (CoreText outlines — emboss / engrave source)
+
+    private var textCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Text — real letter outlines, added as line loops")
+                .font(.system(size: 20, weight: .bold))
+            HStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Text")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    TextField("Text", text: $textString)
+                        .font(.system(size: 20, weight: .semibold))
+                        .frame(minWidth: 160)
+                        .textFieldStyle(.roundedBorder)
+                }
+                field("Height mm", $textSize)
+            }
+            HStack(spacing: 8) {
+                field("Baseline X", $textX)
+                field("Baseline Y", $textY)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Font")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    Picker("Font", selection: $textFont) {
+                        ForEach(Self.textFonts, id: \.self) { name in
+                            Text(name).tag(name)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .font(.system(size: 19, weight: .semibold))
+                }
+            }
+            HStack(spacing: 12) {
+                Button("Add Text") { addTextEntities() }
+                    .font(.system(size: 20, weight: .bold))
+                    .foregroundStyle(.black)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(Capsule().fill(Color.orange))
+                Spacer()
+            }
+            Text("Tap the canvas to set the baseline start. Then Extrude the sketch — Join embosses the letters, Cut engraves them. Text adds many small lines, so the sketch may go “heavy” (solver skipped).")
+                .font(.system(size: 16))
+                .foregroundStyle(.secondary)
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.06)))
+    }
+
+    // MARK: Selection editing (move / rotate / scale / mirror / pattern / offset / project)
+
+    private var selectionOpsCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 12) {
+                Text("Edit geometry")
+                    .font(.system(size: 20, weight: .bold))
+                Spacer()
+                Picker("Applies to", selection: $opScope) {
+                    Text("Selected item").tag("selected")
+                    Text("Whole sketch").tag("all")
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 300)
+            }
+            if opScope == "selected" && selectedID == nil {
+                Text("Nothing is selected — the operations apply to the whole sketch. Tap an item above the canvas or in the list to target just it.")
+                    .font(.system(size: 16))
+                    .foregroundStyle(.secondary)
+            }
+            // Move
+            HStack(spacing: 8) {
+                Text("Move")
+                    .font(bigFont)
+                    .frame(width: 90, alignment: .leading)
+                field("ΔX mm", $moveDX)
+                field("ΔY mm", $moveDY)
+                Button("Apply") { applyMoveSelection() }
+                    .font(bigFont)
+                Spacer()
+            }
+            // Rotate
+            HStack(spacing: 8) {
+                Text("Rotate")
+                    .font(bigFont)
+                    .frame(width: 90, alignment: .leading)
+                field("Degrees", $rotateDeg)
+                field("Center X", $rotateCX)
+                field("Center Y", $rotateCY)
+                Button("Apply") { applyRotateSelection() }
+                    .font(bigFont)
+                Spacer()
+            }
+            Text("A blank rotate/scale center uses the middle of what's being edited.")
+                .font(.system(size: 15))
+                .foregroundStyle(.secondary)
+            // Scale
+            HStack(spacing: 8) {
+                Text("Scale")
+                    .font(bigFont)
+                    .frame(width: 90, alignment: .leading)
+                field("Factor", $scaleFactor)
+                field("Center X", $scaleCX)
+                field("Center Y", $scaleCY)
+                Button("Apply") { applyScaleSelection() }
+                    .font(bigFont)
+                Spacer()
+            }
+            // Mirror
+            HStack(spacing: 10) {
+                Text("Mirror")
+                    .font(bigFont)
+                    .frame(width: 90, alignment: .leading)
+                Button("Vertical axis") { applyMirrorSelection(phi: Double.pi / 2) }
+                    .font(bigFont)
+                Button("Horizontal axis") { applyMirrorSelection(phi: 0) }
+                    .font(bigFont)
+                Button("Across selected line") { mirrorAcrossSelectedLine() }
+                    .font(bigFont)
+                    .disabled(selectedLineID == nil)
+                Spacer()
+            }
+            Text("Vertical/horizontal mirror the edit set across the axis through its middle, in place. “Across selected line” mirrors the whole sketch across the selected line (the line itself stays).")
+                .font(.system(size: 15))
+                .foregroundStyle(.secondary)
+            Divider()
+            // Pattern
+            HStack(spacing: 12) {
+                Text("Pattern selection")
+                    .font(.system(size: 20, weight: .bold))
+                Spacer()
+                Picker("Pattern kind", selection: $patternMode) {
+                    Text("Rectangular").tag("rect")
+                    Text("Circular").tag("circular")
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 280)
+            }
+            if patternMode == "rect" {
+                HStack(spacing: 8) {
+                    field("Rows", $patRows)
+                    field("Columns", $patCols)
+                    field("Spacing X", $patSX)
+                    field("Spacing Y", $patSY)
+                    Button("Apply") { applyPatternSelection() }
+                        .font(bigFont)
+                    Spacer()
+                }
+            } else {
+                HStack(spacing: 8) {
+                    field("Copies", $patCount)
+                    field("Total °", $patTotal)
+                    field("Center X", $patCX)
+                    field("Center Y", $patCY)
+                    Button("Apply") { applyPatternSelection() }
+                        .font(bigFont)
+                    Spacer()
+                }
+                Text("Copies counts the original. A blank center uses the middle of the edit set.")
+                    .font(.system(size: 15))
+                    .foregroundStyle(.secondary)
+            }
+            Divider()
+            // Offset + project
+            HStack(spacing: 8) {
+                Text("Offset profile")
+                    .font(bigFont)
+                field("Distance mm", $offsetDist)
+                Button("Apply") { applyOffsetProfile() }
+                    .font(bigFont)
+                Spacer()
+            }
+            Text("Offsets the first closed profile of the sketch (+ grows it, − shrinks it) into a new line loop.")
+                .font(.system(size: 15))
+                .foregroundStyle(.secondary)
+            HStack(spacing: 10) {
+                Text("Project")
+                    .font(bigFont)
+                Button("Body edges") { projectBodyEdges() }
+                    .font(bigFont)
+                Button("Face outline") { projectFaceOutline() }
+                    .font(bigFont)
+                    .disabled(guideOutline.count < 2)
+                Spacer()
+            }
+            Text("Project Geometry drops the body's sharp edges (or this sketch's host-face outline) into the sketch as gray construction lines to draw against.")
+                .font(.system(size: 15))
+                .foregroundStyle(.secondary)
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.06)))
+    }
+
     // MARK: Driving dimensions (constraint value edits + solver)
 
     private func distanceConstraintIndex(_ a: SketchPointRef, _ b: SketchPointRef) -> Int? {
@@ -903,6 +1259,9 @@ struct SketchEditorView: View {
     /// Returns false (leaving `working` untouched) when the solver
     /// cannot hold the new value, so callers can fall back honestly.
     private func trySolveCopy(_ copyIn: Sketch, note: String) -> Bool {
+        // Heavy sketches skip the solver — callers fall back to the
+        // direct edit, which is the honest behavior there.
+        if isHeavy { return false }
         var copy = copyIn
         do {
             let result = try SketchSolver.solve(&copy)
@@ -1017,18 +1376,21 @@ struct SketchEditorView: View {
 
     private var toolBar: some View {
         VStack(spacing: 8) {
-            HStack(spacing: 8) {
-                ForEach(Tool.allCases, id: \.self) { option in
-                    Button(option.rawValue) {
-                        tool = option
-                        pending = nil
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(Tool.allCases, id: \.self) { option in
+                        Button(option.rawValue) {
+                            tool = option
+                            pending = nil
+                            splinePoints = []
+                            slotTaps = []
+                        }
+                        .font(bigFont)
+                        .foregroundStyle(tool == option ? .black : .accentColor)
+                        .padding(.horizontal, 12).padding(.vertical, 8)
+                        .background(Capsule().fill(tool == option ? Color.yellow : Color.clear))
                     }
-                    .font(bigFont)
-                    .foregroundStyle(tool == option ? .black : .accentColor)
-                    .padding(.horizontal, 12).padding(.vertical, 8)
-                    .background(Capsule().fill(tool == option ? Color.yellow : Color.clear))
                 }
-                Spacer()
             }
             HStack(spacing: 14) {
                 Toggle("Snap", isOn: $snapEnabled)
@@ -1063,6 +1425,63 @@ struct SketchEditorView: View {
                 }
                 .font(bigFont)
             }
+        }
+    }
+
+    /// Contextual options for the tap-tools that need them (spline
+    /// finish, polygon sides, slot progress, trim hint).
+    @ViewBuilder
+    private var toolOptionsRow: some View {
+        switch tool {
+        case .spline:
+            HStack(spacing: 12) {
+                Text(splinePoints.isEmpty
+                     ? "Spline: tap points — the curve flows through them."
+                     : "Spline: \(splinePoints.count) point\(splinePoints.count == 1 ? "" : "s") placed.")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(.yellow)
+                Spacer()
+                if splinePoints.count >= 2 {
+                    Button("Finish Spline") { finishSpline() }
+                        .font(bigFont)
+                        .foregroundStyle(.black)
+                        .padding(.horizontal, 14).padding(.vertical, 7)
+                        .background(Capsule().fill(Color.orange))
+                }
+                if !splinePoints.isEmpty {
+                    Button("Cancel") { splinePoints = [] }
+                        .font(bigFont)
+                }
+            }
+        case .polygon:
+            HStack(spacing: 12) {
+                Stepper("Sides: \(polygonSides)", value: $polygonSides, in: 3...12)
+                    .font(bigFont)
+                    .fixedSize()
+                Text("Tap the center, then a corner.")
+                    .font(.system(size: 18))
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+        case .slot:
+            Text(slotTaps.isEmpty
+                 ? "Slot: tap the first center, then the second center, then a point at the radius."
+                 : (slotTaps.count == 1 ? "Slot: tap the second center." : "Slot: tap a point at the slot's radius."))
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(.yellow)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        case .trim:
+            Text("Trim: tap a line — the piece between its crossings with other lines is removed. Lines only; a line with no crossings is deleted whole.")
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(.yellow)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        case .ellipse:
+            Text("Ellipse: tap the center, then a corner of its bounding box.")
+                .font(.system(size: 18))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        default:
+            EmptyView()
         }
     }
 
@@ -1121,6 +1540,16 @@ struct SketchEditorView: View {
                             .font(bigFont)
                         Spacer()
                     }
+                }
+                HStack(spacing: 10) {
+                    Text("Construction (reference only — not built)")
+                        .font(.system(size: 17, weight: .semibold))
+                    Spacer()
+                    Button(e.isConstruction ? "On" : "Off") { toggleConstruction(id: id) }
+                        .font(bigFont)
+                        .foregroundStyle(.black)
+                        .padding(.horizontal, 14).padding(.vertical, 6)
+                        .background(Capsule().fill(e.isConstruction ? Color.yellow : Color.white.opacity(0.15)))
                 }
                 Text("Type exact numbers, then Apply. Dragging a white point also moves it (with snapping).")
                     .font(.system(size: 16))
@@ -1258,6 +1687,11 @@ struct SketchEditorView: View {
     }
 
     private func solve() {
+        if isHeavy {
+            solveError = nil
+            solveNote = "Heavy sketch (\(working.entities.count) items) — solver passes are skipped."
+            return
+        }
         var copy = working
         do {
             let result = try SketchSolver.solve(&copy)
@@ -1291,6 +1725,580 @@ struct SketchEditorView: View {
         case .arc(let id, _, let r, _, _, _):
             return "Arc #\(id) · r \(mcFmt(r))"
         }
+    }
+
+    // MARK: v4 entity transforms (move / rotate / scale / mirror / copies)
+
+    private func definingPoints(_ e: SketchEntity) -> [Vec2] {
+        switch e {
+        case .point(_, let at, _): return [at]
+        case .line(_, let a, let b, _): return [a, b]
+        case .circle(_, let c, _, _): return [c]
+        case .arc:
+            var pts: [Vec2] = []
+            if let c = e.resolve(.center) { pts.append(c) }
+            if let s = e.resolve(.start) { pts.append(s) }
+            if let en = e.resolve(.end) { pts.append(en) }
+            return pts
+        }
+    }
+
+    private func centroid(of entities: [SketchEntity]) -> Vec2 {
+        var pts: [Vec2] = []
+        for e in entities { pts += definingPoints(e) }
+        guard !pts.isEmpty else { return .zero }
+        return pts.reduce(.zero, +) * (1.0 / Double(pts.count))
+    }
+
+    /// The entities an edit operation applies to: the selection when
+    /// the scope says so and something is selected, else everything.
+    private func scopedEntities() -> [SketchEntity] {
+        if opScope == "selected", let id = selectedID, let e = working.entity(id) {
+            return [e]
+        }
+        return working.entities
+    }
+
+    private func mapScoped(_ f: (SketchEntity) -> SketchEntity) {
+        let ids = Set(scopedEntities().map { $0.id })
+        guard !ids.isEmpty else { return }
+        working.entities = working.entities.map { ids.contains($0.id) ? f($0) : $0 }
+        changed()
+    }
+
+    private func translatedEntity(_ e: SketchEntity, by d: Vec2) -> SketchEntity {
+        switch e {
+        case .point(let id, let at, let c):
+            return .point(id: id, at: at + d, construction: c)
+        case .line(let id, let a, let b, let c):
+            return .line(id: id, a: a + d, b: b + d, construction: c)
+        case .circle(let id, let ctr, let r, let c):
+            return .circle(id: id, center: ctr + d, radius: r, construction: c)
+        case .arc(let id, let ctr, let r, let a0, let a1, let c):
+            return .arc(id: id, center: ctr + d, radius: r,
+                        startAngle: a0, endAngle: a1, construction: c)
+        }
+    }
+
+    private func rotatePoint(_ p: Vec2, center: Vec2, _ th: Double) -> Vec2 {
+        let d = p - center
+        return center + Vec2(d.x * cos(th) - d.y * sin(th),
+                             d.x * sin(th) + d.y * cos(th))
+    }
+
+    private func rotatedEntity(_ e: SketchEntity, center: Vec2, radians th: Double) -> SketchEntity {
+        switch e {
+        case .point(let id, let at, let c):
+            return .point(id: id, at: rotatePoint(at, center: center, th), construction: c)
+        case .line(let id, let a, let b, let c):
+            return .line(id: id, a: rotatePoint(a, center: center, th),
+                         b: rotatePoint(b, center: center, th), construction: c)
+        case .circle(let id, let ctr, let r, let c):
+            return .circle(id: id, center: rotatePoint(ctr, center: center, th),
+                           radius: r, construction: c)
+        case .arc(let id, let ctr, let r, let a0, let a1, let c):
+            return .arc(id: id, center: rotatePoint(ctr, center: center, th), radius: r,
+                        startAngle: a0 + th, endAngle: a1 + th, construction: c)
+        }
+    }
+
+    private func scaledEntity(_ e: SketchEntity, center: Vec2, factor s: Double) -> SketchEntity {
+        func sp(_ p: Vec2) -> Vec2 { center + (p - center) * s }
+        switch e {
+        case .point(let id, let at, let c):
+            return .point(id: id, at: sp(at), construction: c)
+        case .line(let id, let a, let b, let c):
+            return .line(id: id, a: sp(a), b: sp(b), construction: c)
+        case .circle(let id, let ctr, let r, let c):
+            return .circle(id: id, center: sp(ctr), radius: r * abs(s), construction: c)
+        case .arc(let id, let ctr, let r, let a0, let a1, let c):
+            return .arc(id: id, center: sp(ctr), radius: r * abs(s),
+                        startAngle: a0, endAngle: a1, construction: c)
+        }
+    }
+
+    /// Reflect across the line through `linePoint` with direction
+    /// angle `phi`. Arc sweeps flip, so start/end angles swap.
+    private func reflectedEntity(_ e: SketchEntity, linePoint: Vec2, phi: Double) -> SketchEntity {
+        let u = Vec2(cos(phi), sin(phi))
+        func rp(_ p: Vec2) -> Vec2 {
+            let d = p - linePoint
+            let along = u * d.dot(u)
+            return linePoint + along - (d - along)
+        }
+        switch e {
+        case .point(let id, let at, let c):
+            return .point(id: id, at: rp(at), construction: c)
+        case .line(let id, let a, let b, let c):
+            return .line(id: id, a: rp(a), b: rp(b), construction: c)
+        case .circle(let id, let ctr, let r, let c):
+            return .circle(id: id, center: rp(ctr), radius: r, construction: c)
+        case .arc(let id, let ctr, let r, let a0, let a1, let c):
+            return .arc(id: id, center: rp(ctr), radius: r,
+                        startAngle: 2 * phi - a1, endAngle: 2 * phi - a0,
+                        construction: c)
+        }
+    }
+
+    private func entityWithID(_ e: SketchEntity, _ newID: Int) -> SketchEntity {
+        switch e {
+        case .point(_, let at, let c):
+            return .point(id: newID, at: at, construction: c)
+        case .line(_, let a, let b, let c):
+            return .line(id: newID, a: a, b: b, construction: c)
+        case .circle(_, let ctr, let r, let c):
+            return .circle(id: newID, center: ctr, radius: r, construction: c)
+        case .arc(_, let ctr, let r, let a0, let a1, let c):
+            return .arc(id: newID, center: ctr, radius: r,
+                        startAngle: a0, endAngle: a1, construction: c)
+        }
+    }
+
+    private func setConstruction(_ e: SketchEntity, _ flag: Bool) -> SketchEntity {
+        switch e {
+        case .point(let id, let at, _):
+            return .point(id: id, at: at, construction: flag)
+        case .line(let id, let a, let b, _):
+            return .line(id: id, a: a, b: b, construction: flag)
+        case .circle(let id, let ctr, let r, _):
+            return .circle(id: id, center: ctr, radius: r, construction: flag)
+        case .arc(let id, let ctr, let r, let a0, let a1, _):
+            return .arc(id: id, center: ctr, radius: r,
+                        startAngle: a0, endAngle: a1, construction: flag)
+        }
+    }
+
+    private func toggleConstruction(id: Int) {
+        guard let idx = working.entities.firstIndex(where: { $0.id == id }) else { return }
+        let e = working.entities[idx]
+        working.entities[idx] = setConstruction(e, !e.isConstruction)
+        changed()
+    }
+
+    /// Center for rotate/scale/pattern: the typed center when both
+    /// fields parse, else the middle of the edit set.
+    private func opCenter(xText: String, yText: String, scoped: [SketchEntity]) -> Vec2 {
+        if let x = Double(xText), let y = Double(yText) { return Vec2(x, y) }
+        return centroid(of: scoped)
+    }
+
+    private func applyMoveSelection() {
+        let d = Vec2(num(moveDX, fallback: 0), num(moveDY, fallback: 0))
+        mapScoped { translatedEntity($0, by: d) }
+    }
+
+    private func applyRotateSelection() {
+        let scoped = scopedEntities()
+        guard !scoped.isEmpty else { return }
+        let center = opCenter(xText: rotateCX, yText: rotateCY, scoped: scoped)
+        let th = num(rotateDeg, fallback: 0) * Double.pi / 180
+        mapScoped { rotatedEntity($0, center: center, radians: th) }
+    }
+
+    private func applyScaleSelection() {
+        let scoped = scopedEntities()
+        guard !scoped.isEmpty else { return }
+        let s = num(scaleFactor, fallback: 1)
+        guard s > 0 else {
+            solveError = nil
+            solveNote = "Scale factor must be above 0."
+            return
+        }
+        let center = opCenter(xText: scaleCX, yText: scaleCY, scoped: scoped)
+        mapScoped { scaledEntity($0, center: center, factor: s) }
+    }
+
+    /// Mirror the edit set in place across the axis (direction phi)
+    /// through its own middle.
+    private func applyMirrorSelection(phi: Double) {
+        let scoped = scopedEntities()
+        guard !scoped.isEmpty else { return }
+        let mid = centroid(of: scoped)
+        mapScoped { reflectedEntity($0, linePoint: mid, phi: phi) }
+    }
+
+    /// Mirror everything except the selected line across that line.
+    private func mirrorAcrossSelectedLine() {
+        guard let lineID = selectedLineID,
+              let e = working.entity(lineID),
+              case .line(_, let a, let b, _) = e else { return }
+        let phi = atan2(b.y - a.y, b.x - a.x)
+        working.entities = working.entities.map { ent in
+            ent.id == lineID ? ent : reflectedEntity(ent, linePoint: a, phi: phi)
+        }
+        changed()
+    }
+
+    private func applyPatternSelection() {
+        let sources = scopedEntities()
+        guard !sources.isEmpty else { return }
+        var copies: [SketchEntity] = []
+        if patternMode == "rect" {
+            let rows = max(1, Int(patRows) ?? 1)
+            let cols = max(1, Int(patCols) ?? 1)
+            let dx = num(patSX, fallback: 0)
+            let dy = num(patSY, fallback: 0)
+            for r in 0..<rows {
+                for c in 0..<cols where !(r == 0 && c == 0) {
+                    for e in sources {
+                        copies.append(translatedEntity(e, by: Vec2(dx * Double(c), dy * Double(r))))
+                    }
+                }
+            }
+        } else {
+            let count = max(2, Int(patCount) ?? 2)
+            let total = num(patTotal, fallback: 360)
+            let center = opCenter(xText: patCX, yText: patCY, scoped: sources)
+            // A full circle divides by the copy count (no duplicate at
+            // 360°); a partial fan divides by count − 1 so the first
+            // and last copies land on the fan's ends.
+            let step = total >= 359.999
+                ? total / Double(count)
+                : total / Double(max(1, count - 1))
+            for i in 1..<count {
+                let th = step * Double(i) * Double.pi / 180
+                for e in sources {
+                    copies.append(rotatedEntity(e, center: center, radians: th))
+                }
+            }
+        }
+        for copy in copies {
+            working.add(entityWithID(copy, working.allocateID()))
+        }
+        if !copies.isEmpty {
+            solveNote = "Patterned \(copies.count) new item\(copies.count == 1 ? "" : "s")."
+        }
+        changed()
+    }
+
+    private func applyOffsetProfile() {
+        do {
+            let (profiles, _) = try working.extractProfiles()
+            guard let profile = profiles.first else { throw CADError.padNoProfile }
+            let d = num(offsetDist, fallback: 0)
+            guard d != 0 else { return }
+            guard let outer = Tessellation.offsetPolygon(profile.outer, by: d) else {
+                solveError = .booleanFailed("that offset collapses the profile — try a smaller distance")
+                solveNote = nil
+                return
+            }
+            addLoop(outer)
+            for hole in profile.holes {
+                if let h = Tessellation.offsetPolygon(hole, by: -d) { addLoop(h) }
+            }
+            solveError = nil
+            solveNote = "Offset the profile by \(mcFmt(d)) mm into a new loop."
+            changed()
+        } catch let e as CADError {
+            solveError = e
+            solveNote = nil
+            MCLog.shared.log(error: e, category: .sketch)
+        } catch {
+            solveError = .unknown("\(error)")
+            solveNote = nil
+        }
+    }
+
+    private func addLoop(_ pts: [Vec2]) {
+        guard pts.count >= 3 else { return }
+        for i in pts.indices {
+            working.addLine(pts[i], pts[(i + 1) % pts.count])
+        }
+    }
+
+    // MARK: v4 project geometry
+
+    private func projectBodyEdges() {
+        guard let mesh = model.rebuild?.mesh, mesh.triangleCount > 0 else {
+            solveNote = "There is no body to project yet."
+            return
+        }
+        let segs = ProjectGeometry.edgeSegments(body: mesh, onto: working.plane)
+        var added = 0
+        for (a, b) in segs where a.distance(to: b) > 1e-6 {
+            working.addLine(a, b, construction: true)
+            added += 1
+        }
+        solveNote = "Projected \(added) body edge\(added == 1 ? "" : "s") as construction lines."
+        changed()
+    }
+
+    private func projectFaceOutline() {
+        let outline = guideOutline
+        guard outline.count > 1 else {
+            solveNote = "This sketch is not on a model face, so there is no face outline to project."
+            return
+        }
+        for i in outline.indices {
+            working.addLine(outline[i], outline[(i + 1) % outline.count], construction: true)
+        }
+        solveNote = "Projected the host face outline as construction lines."
+        changed()
+    }
+
+    // MARK: v4 shape builders (spline / ellipse / polygon / slot)
+
+    /// Catmull-Rom samples through the points (endpoints duplicated),
+    /// ~8 samples per span — smooth to look at, plain lines to build.
+    private func catmullRomSamples(_ pts: [Vec2], samplesPerSpan: Int = 8) -> [Vec2] {
+        guard pts.count >= 2 else { return pts }
+        if pts.count == 2 { return pts }
+        let ext = [pts[0]] + pts + [pts[pts.count - 1]]
+        var out: [Vec2] = []
+        for i in 1..<(ext.count - 2) {
+            let p0 = ext[i - 1], p1 = ext[i], p2 = ext[i + 1], p3 = ext[i + 2]
+            for s in 0..<samplesPerSpan {
+                let t = Double(s) / Double(samplesPerSpan)
+                let t2 = t * t
+                let t3 = t2 * t
+                let q = (p1 * 2 + (p2 - p0) * t
+                         + (p0 * 2 - p1 * 5 + p2 * 4 - p3) * t2
+                         + (p1 * 3 - p0 - p2 * 3 + p3) * t3) * 0.5
+                out.append(q)
+            }
+        }
+        out.append(pts[pts.count - 1])
+        return out
+    }
+
+    private func finishSpline() {
+        guard splinePoints.count >= 2 else { return }
+        let samples = catmullRomSamples(splinePoints)
+        for i in 0..<(samples.count - 1) {
+            if samples[i].distance(to: samples[i + 1]) > 1e-6 {
+                working.addLine(samples[i], samples[i + 1])
+            }
+        }
+        splinePoints = []
+        changed()
+    }
+
+    private func addEllipseLoop(center: Vec2, rx: Double, ry: Double) {
+        let n = 48
+        var prev = center + Vec2(rx, 0)
+        for i in 1...n {
+            let a = Double(i) / Double(n) * 2 * Double.pi
+            let p = center + Vec2(rx * cos(a), ry * sin(a))
+            working.addLine(prev, p)
+            prev = p
+        }
+    }
+
+    private func polygonVertices(center: Vec2, vertex: Vec2, sides: Int) -> [Vec2] {
+        let r = center.distance(to: vertex)
+        let a0 = atan2(vertex.y - center.y, vertex.x - center.x)
+        return (0..<sides).map { i in
+            let a = a0 + Double(i) * 2 * Double.pi / Double(sides)
+            return center + Vec2(r * cos(a), r * sin(a))
+        }
+    }
+
+    private func addPolygonLoop(center: Vec2, vertex: Vec2, sides: Int) {
+        let verts = polygonVertices(center: center, vertex: vertex, sides: sides)
+        for i in verts.indices {
+            working.addLine(verts[i], verts[(i + 1) % verts.count])
+        }
+    }
+
+    /// Slot geometry shared by the entity builder and the outline
+    /// preview: two straight runs + two semicircular caps, as proper
+    /// line and arc entities.
+    private func slotParts(a: Vec2, b: Vec2, r: Double)
+        -> (topA: Vec2, topB: Vec2, botA: Vec2, botB: Vec2,
+            perpAngle: Double) {
+        let dir = (b - a).normalized
+        let perp = dir.perpendicular
+        return (a + perp * r, b + perp * r, a - perp * r, b - perp * r,
+                atan2(perp.y, perp.x))
+    }
+
+    private func addSlotEntities(a: Vec2, b: Vec2, r: Double) {
+        let parts = slotParts(a: a, b: b, r: r)
+        let pa = parts.perpAngle
+        working.addLine(parts.topB, parts.topA)
+        working.addLine(parts.botA, parts.botB)
+        // Cap at B sweeps CCW from −perp through the outward (+dir)
+        // side to +perp; cap at A from +perp through −dir to −perp.
+        working.add(.arc(id: working.allocateID(), center: b, radius: r,
+                         startAngle: pa - Double.pi, endAngle: pa,
+                         construction: false))
+        working.add(.arc(id: working.allocateID(), center: a, radius: r,
+                         startAngle: pa, endAngle: pa + Double.pi,
+                         construction: false))
+    }
+
+    private func slotOutlinePoints(a: Vec2, b: Vec2, r: Double) -> [Vec2] {
+        let parts = slotParts(a: a, b: b, r: r)
+        let pa = parts.perpAngle
+        let arcB = arcPoints(center: b, radius: r, from: pa - Double.pi, to: pa,
+                             sagitta: 0.05, closed: false)
+        let arcA = arcPoints(center: a, radius: r, from: pa, to: pa + Double.pi,
+                             sagitta: 0.05, closed: false)
+        var pts: [Vec2] = [parts.topA]
+        pts += arcB.reversed()          // top of B around the cap to bottom of B
+        pts += arcA.reversed().dropLast()
+        return pts
+    }
+
+    // MARK: v4 trim (lines only)
+
+    private func pointSegmentDistance(_ p: Vec2, _ a: Vec2, _ b: Vec2) -> Double {
+        let ab = b - a
+        let len2 = ab.lengthSquared
+        if len2 < 1e-12 { return p.distance(to: a) }
+        let t = min(1, max(0, (p - a).dot(ab) / len2))
+        return p.distance(to: a + ab * t)
+    }
+
+    /// Trim: split the tapped line at its crossings with other lines
+    /// and remove the piece that was tapped; the rest stays. A line
+    /// with no crossings is removed whole.
+    private func trimTappedLine(at p: Vec2, scale: Double) {
+        var target: (id: Int, a: Vec2, b: Vec2, cons: Bool, dist: Double)?
+        for e in working.entities {
+            if case .line(let id, let a, let b, let cons) = e {
+                let d = pointSegmentDistance(p, a, b)
+                if target == nil || d < target!.dist {
+                    target = (id, a, b, cons, d)
+                }
+            }
+        }
+        guard let t = target, t.dist <= 16 / max(scale, 0.001) else {
+            solveNote = "Trim: tap a line (lines only)."
+            return
+        }
+        let ab = t.b - t.a
+        let len2 = ab.lengthSquared
+        guard len2 > 1e-12 else { return }
+        var cuts: [Double] = [0, 1]
+        for e in working.entities where e.id != t.id {
+            if case .line(_, let c, let d, _) = e,
+               let hit = segmentsCross(t.a, t.b, c, d) {
+                cuts.append((hit - t.a).dot(ab) / len2)
+            }
+        }
+        cuts.sort()
+        let tTap = min(1, max(0, (p - t.a).dot(ab) / len2))
+        working.removeEntity(t.id)
+        // Trimming can orphan constraints that referenced the line.
+        working.constraints.removeAll { $0.referencedEntities.contains(t.id) }
+        if selectedID == t.id { selectedID = nil }
+        if cuts.count == 2 {
+            solveNote = "Trimmed the whole line — it crossed no other line."
+        } else {
+            for i in 0..<(cuts.count - 1) {
+                let lo = cuts[i], hi = cuts[i + 1]
+                if tTap >= lo && tTap <= hi { continue }  // the tapped piece goes
+                let p0 = t.a + ab * lo
+                let p1 = t.a + ab * hi
+                if p0.distance(to: p1) > 1e-9 {
+                    working.addLine(p0, p1, construction: t.cons)
+                }
+            }
+            solveNote = "Trimmed — the tapped piece is gone, the rest stays."
+        }
+        changed()
+    }
+
+    // MARK: v4 text (CoreText glyph outlines)
+
+    private func addTextEntities() {
+        let size = max(2, num(textSize, fallback: 20))
+        let origin = Vec2(num(textX, fallback: 0), num(textY, fallback: 0))
+        let loops = textOutlines(text: textString, fontName: textFont,
+                                 size: size, origin: origin)
+        var added = 0
+        for loop in loops where loop.count >= 2 {
+            for i in loop.indices {
+                let a = loop[i]
+                let b = loop[(i + 1) % loop.count]
+                if a.distance(to: b) > 0.005 {
+                    working.addLine(a, b)
+                    added += 1
+                }
+            }
+        }
+        if added == 0 {
+            solveNote = "No outlines came out of that text and font — try different words."
+        } else {
+            solveError = nil
+            solveNote = "Added \(added) text segments. Extrude with Join to emboss, Cut to engrave."
+        }
+        changed()
+    }
+
+    /// Flattened glyph outlines for a string, in sketch coordinates
+    /// (CoreText glyph space is y-up, like the sketch). Curves are
+    /// sampled at 8 steps — plenty at text sizes.
+    private func textOutlines(text: String, fontName: String, size: Double,
+                              origin: Vec2) -> [[Vec2]] {
+        let font = CTFontCreateWithName(fontName as CFString, CGFloat(size), nil)
+        var utf16 = Array(text.utf16)
+        guard !utf16.isEmpty else { return [] }
+        var glyphs = [CGGlyph](repeating: 0, count: utf16.count)
+        CTFontGetGlyphsForCharacters(font, &utf16, &glyphs, utf16.count)
+        var advances = [CGSize](repeating: .zero, count: utf16.count)
+        CTFontGetAdvancesForGlyphs(font, .default, glyphs, &advances, utf16.count)
+        var loops: [[Vec2]] = []
+        var penX = 0.0
+        for i in glyphs.indices {
+            if glyphs[i] != 0, let path = CTFontCreatePathForGlyph(font, glyphs[i], nil) {
+                loops += flattenGlyphPath(path, offset: Vec2(origin.x + penX, origin.y))
+            }
+            penX += Double(advances[i].width)
+        }
+        return loops
+    }
+
+    private func flattenGlyphPath(_ path: CGPath, offset: Vec2) -> [[Vec2]] {
+        var loops: [[Vec2]] = []
+        var current: [Vec2] = []
+        var last = Vec2.zero
+        func conv(_ p: CGPoint) -> Vec2 { offset + Vec2(Double(p.x), Double(p.y)) }
+        func flush() {
+            if current.count > 1 { loops.append(current) }
+            current = []
+        }
+        path.applyWithBlock { elementPtr in
+            let el = elementPtr.pointee
+            switch el.type {
+            case .moveToPoint:
+                flush()
+                let p = conv(el.points[0])
+                current = [p]
+                last = p
+            case .addLineToPoint:
+                let p = conv(el.points[0])
+                current.append(p)
+                last = p
+            case .addQuadCurveToPoint:
+                let c = conv(el.points[0])
+                let e = conv(el.points[1])
+                for s in 1...8 {
+                    let t = Double(s) / 8
+                    let u = 1 - t
+                    current.append(last * (u * u) + c * (2 * u * t) + e * (t * t))
+                }
+                last = e
+            case .addCurveToPoint:
+                let c1 = conv(el.points[0])
+                let c2 = conv(el.points[1])
+                let e = conv(el.points[2])
+                for s in 1...8 {
+                    let t = Double(s) / 8
+                    let u = 1 - t
+                    current.append(last * (u * u * u) + c1 * (3 * u * u * t)
+                                   + c2 * (3 * u * t * t) + e * (t * t * t))
+                }
+                last = e
+            case .closeSubpath:
+                flush()
+            @unknown default:
+                break
+            }
+        }
+        flush()
+        return loops
     }
 }
 

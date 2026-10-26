@@ -22,6 +22,34 @@ public enum ExtrudeMode: Codable, Equatable {
     case twoSided(second: Double)
 }
 
+/// How an additive feature combines with the running body (v4).
+public enum BodyOperation: String, Codable, Equatable {
+    case join, cut, intersect, newBody
+}
+
+/// Where an extrude stops (v4).
+public enum ExtrudeEnd: Codable, Equatable {
+    case dimension
+    case throughAll
+    case upToFace(faceIndex: Int)
+}
+
+/// Chamfer sizing modes (v4).
+public enum ChamferMode: Codable, Equatable {
+    case equal(Double)
+    case twoDistances(Double, Double)
+    case distanceAngle(Double, Double)  // distance along face A, angle from face A
+    public var distances: (Double, Double) {
+        switch self {
+        case .equal(let d): return (d, d)
+        case .twoDistances(let a, let b): return (a, b)
+        case .distanceAngle(let d, let deg):
+            let t = tan(deg * Double.pi / 180)
+            return (d, t > 1e-6 ? d / t : d * 1000)
+        }
+    }
+}
+
 public enum FeatureKind: Codable, Equatable {
     case pad(sketchID: String, length: Double)
     case pocket(sketchID: String, depth: Double)
@@ -37,6 +65,17 @@ public enum FeatureKind: Codable, Equatable {
     case extrude(sketchID: String, distance: Double, taperDegrees: Double, mode: ExtrudeMode)
     case loft(sketchA: String, sketchB: String)
     case sweep(profileSketchID: String, pathSketchID: String)
+    // v4 additions (appended — existing cases keep their encoding).
+    case extrude2(sketchID: String, distance: Double, taperDegrees: Double, mode: ExtrudeMode, operation: BodyOperation, end: ExtrudeEnd)
+    case chamfer2(mode: ChamferMode)
+    case coil(radius: Double, pitch: Double, turns: Double, wireRadius: Double)
+    case pipe(pathSketchID: String, radius: Double)
+    case rib(sketchID: String, thickness: Double, depth: Double)
+    case draftBody(angleDegrees: Double, pullAxis: Int)
+    case scaleBody(factors: Vec3)
+    case moveBody(translation: Vec3, rotationAxis: Int, rotationDegrees: Double)
+    case splitBody(axis: Int, offset: Double)
+    case circularPattern(count: Int, axis: Int, totalDegrees: Double)
     case booleanCutPlaceholder
 }
 
@@ -85,6 +124,8 @@ public struct FeatureStatus: Equatable {
 
 public struct RebuildResult {
     public var mesh: Mesh
+    /// All solid bodies (v4 multi-body); `mesh` is their concatenation.
+    public var bodies: [Mesh] = []
     public var statuses: [FeatureStatus]
     public var warnings: [CADError]
     public var firstError: CADError?
@@ -100,6 +141,7 @@ public enum DocumentEngine {
     public static func rebuild(part: Part, logger: MCLog = .shared) -> RebuildResult {
         let start = Date()
         var body = Mesh()
+        var bodies: [Mesh] = []  // completed bodies (v4 multi-body)
         var statuses: [FeatureStatus] = []
         var warnings: [CADError] = []
         var firstError: CADError? = nil
@@ -150,6 +192,87 @@ public enum DocumentEngine {
                     logger.debug(.feature, "shell ok", context: ["feature": feature.name, "wall": "\(thickness)"])
                     continue
                 }
+                if case .extrude2(let sketchID, let distance, let taper, let mode, let op, let end) = feature.kind {
+                    let tool = try DocumentEngine.extrude2Mesh(part: part, sketchID: sketchID, distance: distance, taper: taper, mode: mode, end: end, body: body, warnings: &warnings)
+                    switch op {
+                    case .join:
+                        body = body.triangleCount == 0 ? tool : try CSG.union(body, tool)
+                    case .cut:
+                        guard body.triangleCount > 0 else { throw CADError.booleanEmptyResult }
+                        body = try CSG.subtract(body, tool)
+                    case .intersect:
+                        guard body.triangleCount > 0 else { throw CADError.booleanEmptyResult }
+                        body = try CSG.intersect(body, tool)
+                    case .newBody:
+                        if body.triangleCount > 0 { bodies.append(body) }
+                        body = tool
+                    }
+                    statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
+                    logger.debug(.feature, "extrude2 ok", context: ["feature": feature.name, "op": op.rawValue])
+                    continue
+                }
+                if case .rib(let sketchID, let thickness, let depth) = feature.kind {
+                    body = try DocumentEngine.ribMesh(part: part, sketchID: sketchID, thickness: thickness, depth: depth, body: body)
+                    statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
+                    logger.debug(.feature, "rib ok", context: ["feature": feature.name])
+                    continue
+                }
+                if case .chamfer2(let mode) = feature.kind {
+                    guard body.triangleCount > 0 else { throw CADError.chamferInvalid("no solid to chamfer yet") }
+                    let (dA, dB) = mode.distances
+                    body = try EdgeFinisher.chamfer2(body: body, distanceA: dA, distanceB: dB)
+                    statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
+                    logger.debug(.feature, "chamfer2 ok", context: ["feature": feature.name])
+                    continue
+                }
+                if case .draftBody(let angle, let axis) = feature.kind {
+                    guard body.triangleCount > 0 else { throw CADError.transformInvalid("no solid to draft yet") }
+                    body = try DocumentEngine.draftMesh(body: body, angleDegrees: angle, pullAxis: axis)
+                    statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
+                    logger.debug(.feature, "draft ok", context: ["feature": feature.name])
+                    continue
+                }
+                if case .scaleBody(let f) = feature.kind {
+                    guard body.triangleCount > 0 else { throw CADError.transformInvalid("no solid to scale yet") }
+                    guard f.x > 0, f.y > 0, f.z > 0 else { throw CADError.transformInvalid("scale factors must be > 0") }
+                    body = body.scaled(by: f, center: body.bounds.center)
+                    statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
+                    logger.debug(.feature, "scale ok", context: ["feature": feature.name])
+                    continue
+                }
+                if case .moveBody(let t, let axis, let deg) = feature.kind {
+                    guard body.triangleCount > 0 else { throw CADError.transformInvalid("no solid to move yet") }
+                    if abs(deg) > 1e-9 { body = body.rotatedAround(axis: axis, degrees: deg, center: body.bounds.center) }
+                    body = body.translated(by: t)
+                    statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
+                    logger.debug(.feature, "move ok", context: ["feature": feature.name])
+                    continue
+                }
+                if case .splitBody(let axis, let offset) = feature.kind {
+                    guard body.triangleCount > 0 else { throw CADError.booleanFailed("no solid to split yet") }
+                    let (h1, h2) = try DocumentEngine.splitMesh(body: body, axis: axis, offset: offset)
+                    bodies.append(h2)
+                    body = h1
+                    statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
+                    logger.debug(.feature, "split ok", context: ["feature": feature.name])
+                    continue
+                }
+                if case .circularPattern(let count, let axis, let total) = feature.kind {
+                    guard count >= 2 else { throw CADError.patternCountInvalid(count) }
+                    guard body.triangleCount > 0 else { throw CADError.booleanEmptyResult }
+                    let center = body.bounds.center
+                    let full = total >= 359.999
+                    var acc = body
+                    for i in 1..<count {
+                        let a = full ? total * Double(i) / Double(count)
+                                     : total * Double(i) / Double(count - 1)
+                        acc = try CSG.union(acc, body.rotatedAround(axis: axis, degrees: a, center: center))
+                    }
+                    body = acc
+                    statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
+                    logger.debug(.feature, "circular pattern ok", context: ["feature": feature.name, "count": "\(count)"])
+                    continue
+                }
                 let m = try evaluate(feature: feature, part: part, warnings: &warnings)
                 switch feature.kind {
                 case .pocket, .hole:
@@ -173,13 +296,18 @@ public enum DocumentEngine {
                 firstError = e
             }
         }
-        let mass = body.volume / 1000.0 * part.material.density  // mm^3 -> cm^3 * g/cm^3
+        var allBodies = bodies
+        if body.triangleCount > 0 { allBodies.append(body) }
+        var combined = Mesh()
+        for b in allBodies { combined.append(b) }
+        let mass = combined.volume / 1000.0 * part.material.density  // mm^3 -> cm^3 * g/cm^3
         logger.info(.perf, "rebuild done", context: [
             "ms": String(format: "%.1f", Date().timeIntervalSince(start) * 1000),
-            "tris": "\(body.triangleCount)",
+            "tris": "\(combined.triangleCount)",
+            "bodies": "\(allBodies.count)",
             "ok": firstError == nil ? "1" : "0",
         ])
-        return RebuildResult(mesh: body, statuses: statuses, warnings: warnings,
+        return RebuildResult(mesh: combined, bodies: allBodies, statuses: statuses, warnings: warnings,
                              firstError: firstError, massGrams: mass)
     }
 
@@ -312,8 +440,12 @@ public enum DocumentEngine {
             throw CADError.invariantBroken("pattern must be handled by rebuild, not evaluate")
         case .mirror:
             throw CADError.invariantBroken("mirror must be handled by rebuild, not evaluate")
-        case .fillet, .chamfer, .shell:
-            throw CADError.invariantBroken("edge finishing must be handled by rebuild, not evaluate")
+        case .fillet, .chamfer, .shell, .chamfer2, .extrude2, .rib, .draftBody, .scaleBody, .moveBody, .splitBody, .circularPattern:
+            throw CADError.invariantBroken("body-dependent feature must be handled by rebuild, not evaluate")
+        case .coil(let radius, let pitch, let turns, let wireRadius):
+            return try coilMesh(radius: radius, pitch: pitch, turns: turns, wireRadius: wireRadius)
+        case .pipe(let pathSketchID, let radius):
+            return try pipeMesh(part: part, pathSketchID: pathSketchID, radius: radius)
         case .extrude(let sketchID, let distance, let taper, let mode):
             guard distance > 0 else { throw CADError.padLengthInvalid(distance) }
             guard let sketch = part.sketch(sketchID) else { throw CADError.nameNotFound("sketch") }

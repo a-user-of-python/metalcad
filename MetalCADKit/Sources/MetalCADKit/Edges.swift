@@ -173,7 +173,7 @@ public enum EdgeFinisher {
     /// Tangent/offset points for an edge treatment.
     /// mode: fillet (arc) or chamfer (flat). Returns the 2D region polygon
     /// (section coords) to extrude along the edge, or throws the coded error.
-    static func region(edge: SolidEdge, value: Double, isFillet: Bool) throws -> [Vec2] {
+    static func region(edge: SolidEdge, value: Double, isFillet: Bool, valueB: Double = -1) throws -> [Vec2] {
         let sec = section(for: edge)
         guard sec.valid else {
             throw isFillet ? CADError.filletFailed("edge is not between two usable faces")
@@ -223,7 +223,7 @@ public enum EdgeFinisher {
             arc = midDist(ccw) <= midDist(cw) ? ccw : cw
         } else {
             tA = s1 * value
-            tB = s2 * value
+            tB = s2 * (valueB >= 0 ? valueB : value)
         }
         // Validate tangent points sit on their faces (mid + both ends),
         // and that the treatment's strip fits the face: the face outline
@@ -285,16 +285,17 @@ public enum EdgeFinisher {
         return out
     }
 
-    static func finish(body: Mesh, value: Double, isFillet: Bool) throws -> Mesh {
+    static func finish(body: Mesh, value: Double, isFillet: Bool, valueB: Double = -1) throws -> Mesh {
         guard value > 0 else {
             throw isFillet ? CADError.filletFailed("radius must be > 0")
                            : CADError.chamferInvalid("distance must be > 0")
         }
+        let vmax = max(value, valueB)
         let allEdges = SolidEdgeExtractor.edges(of: body).filter { $0.length >= 0.5 }
         // Skip edges touching a face too small to hold the treatment —
         // CSG output can carry sliver faces that no real edge finish
         // could ever land on.
-        let edges = allEdges.filter { min($0.faceA.area, $0.faceB.area) >= value * value }
+        let edges = allEdges.filter { min($0.faceA.area, $0.faceB.area) >= vmax * vmax }
         guard edges.count <= 240 else {
             throw isFillet ? CADError.filletFailed("\(edges.count) sharp edges — too many to finish at once")
                            : CADError.chamferInvalid("\(edges.count) sharp edges — too many to finish at once")
@@ -303,7 +304,7 @@ public enum EdgeFinisher {
         for e in edges {
             let region: [Vec2]
             do {
-                region = try self.region(edge: e, value: value, isFillet: isFillet)
+                region = try self.region(edge: e, value: value, isFillet: isFillet, valueB: valueB)
             } catch let err as CADError {
                 // Find the largest value that fits every edge, so the error
                 // can name a radius/distance that would have worked.
@@ -322,7 +323,7 @@ public enum EdgeFinisher {
                 }
                 throw err
             }
-            let p = prism(edge: e, region: region, overshoot: value)
+            let p = prism(edge: e, region: region, overshoot: vmax)
             if e.isConvex { cutters.append(p) } else { adders.append(p) }
         }
         var result = body
@@ -337,6 +338,35 @@ public enum EdgeFinisher {
 
     public static func chamfer(body: Mesh, distance: Double) throws -> Mesh {
         try finish(body: body, value: distance, isFillet: false)
+    }
+
+    /// Chamfer with per-face distances (v4 modes). Pre-validates every
+    /// edge region (cheap); if the pair runs off a face, binary searches
+    /// a uniform scale over the region checks only, so the thrown error
+    /// can name a pair that fits.
+    public static func chamfer2(body: Mesh, distanceA: Double, distanceB: Double) throws -> Mesh {
+        let edges = SolidEdgeExtractor.edges(of: body).filter { $0.length >= 0.5 }
+        func fits(_ a: Double, _ b: Double) -> Bool {
+            for e in edges {
+                do { _ = try region(edge: e, value: a, isFillet: false, valueB: b) }
+                catch { return false }
+            }
+            return true
+        }
+        if !edges.isEmpty && !fits(distanceA, distanceB) {
+            var lo = 0.0, hi = 1.0
+            for _ in 0..<20 {
+                let mid = (lo + hi) / 2
+                if fits(distanceA * mid, distanceB * mid) { lo = mid } else { hi = mid }
+            }
+            if lo > 0.01 {
+                throw CADError.chamferInvalid(
+                    "too large for the faces — largest that fits ≈ " +
+                    "\(String(format: "%.2f", distanceA * lo)) / \(String(format: "%.2f", distanceB * lo)) mm")
+            }
+            throw CADError.chamferInvalid("distances run off a face at any scale")
+        }
+        return try finish(body: body, value: distanceA, isFillet: false, valueB: distanceB)
     }
 
     /// Hollow the body with a uniform wall. The cutter is the body offset

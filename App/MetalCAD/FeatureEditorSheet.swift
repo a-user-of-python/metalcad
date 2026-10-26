@@ -50,14 +50,17 @@ struct MaterialPickerSheet: View {
     }
 }
 
-// MARK: - Feature editor (every parameter editable, all 15 kinds)
+// MARK: - Feature editor (every parameter editable, all 25 kinds)
 
 /// Full editor for one feature: every parameter of its kind is a field.
 /// Nothing is prefixed — Apply writes the numbers back and the part
-/// rebuilds. Covers all 15 FeatureKind cases of kit v3.
+/// rebuilds. Covers all 25 FeatureKind cases of kit v4.
 struct FeatureEditorSheet: View {
     let feature: Feature
     let sketches: [Sketch]
+    /// Planar faces of the part as built now, in kernel order — the
+    /// index space ExtrudeEnd.upToFace refers to (extrude2 editor).
+    var currentFaces: [PlanarFace] = []
     /// When this fillet currently fails with MCAD-FT408, the largest
     /// radius the kernel says fits — shown as a one-tap fix.
     var filletMaxFeasible: Double? = nil
@@ -111,6 +114,49 @@ struct FeatureEditorSheet: View {
     @State private var profileAngleText: String = "60"
     @State private var taperText: String = "0"
     @State private var clearanceText: String = "0"
+    // extrude2 (v4)
+    @State private var ex2DistanceText: String = "10"
+    @State private var ex2TaperText: String = "0"
+    @State private var ex2ModeChoice: String = "one"
+    @State private var ex2SecondText: String = "10"
+    @State private var ex2Operation: String = "join"
+    @State private var ex2EndChoice: String = "dimension"
+    @State private var ex2FaceIndex: Int = 0
+    // chamfer2 (v4)
+    @State private var chamferModeChoice: String = "equal"
+    @State private var chamferAText: String = "2"
+    @State private var chamferBText: String = "1"
+    @State private var chamferAngleText: String = "45"
+    // coil (v4)
+    @State private var coilRadiusText: String = "15"
+    @State private var coilPitchText: String = "8"
+    @State private var coilTurnsText: String = "5"
+    @State private var coilWireText: String = "2"
+    // pipe (v4) — path sketch uses the shared sketchID state
+    @State private var pipeRadiusText: String = "4"
+    // rib (v4) — profile sketch uses the shared sketchID state
+    @State private var ribThicknessText: String = "3"
+    @State private var ribDepthText: String = "12"
+    // draft (v4)
+    @State private var draftAngleText: String = "3"
+    @State private var draftAxis: Int = 2
+    // scale (v4)
+    @State private var scaleXText: String = "1"
+    @State private var scaleYText: String = "1"
+    @State private var scaleZText: String = "1"
+    // move body (v4)
+    @State private var moveXText: String = "0"
+    @State private var moveYText: String = "0"
+    @State private var moveZText: String = "0"
+    @State private var moveAxis: Int = 2
+    @State private var moveDegreesText: String = "0"
+    // split body (v4)
+    @State private var splitAxis: Int = 2
+    @State private var splitOffsetText: String = "0"
+    // circular pattern (v4)
+    @State private var circCountText: String = "6"
+    @State private var circAxis: Int = 2
+    @State private var circTotalText: String = "360"
 
     private static let presetNames = ["M3", "M4", "M5", "M6", "M8", "M10", "M12", "M16", "M20",
                                       "1/4-20", "5/16-18", "3/8-16", "1/2-13",
@@ -119,11 +165,13 @@ struct FeatureEditorSheet: View {
     private static let kinds: [ThreadKind] = [.external, .internal]
     private static let hands: [ThreadHand] = [.right, .left]
 
-    init(feature: Feature, sketches: [Sketch], filletMaxFeasible: Double? = nil,
+    init(feature: Feature, sketches: [Sketch], currentFaces: [PlanarFace] = [],
+         filletMaxFeasible: Double? = nil,
          onSave: @escaping (String, FeatureKind) -> Void,
          onCancel: @escaping () -> Void) {
         self.feature = feature
         self.sketches = sketches
+        self.currentFaces = currentFaces
         self.filletMaxFeasible = filletMaxFeasible
         self.onSave = onSave
         self.onCancel = onCancel
@@ -200,6 +248,80 @@ struct FeatureEditorSheet: View {
             _profileAngleText = State(initialValue: mcFmt(s.profileAngleDegrees))
             _taperText = State(initialValue: mcFmt(s.taperDegrees))
             _clearanceText = State(initialValue: mcFmt(s.clearance))
+        case .extrude2(let sid, let distance, let taper, let mode, let op, let end):
+            initialSketch = sid
+            _ex2DistanceText = State(initialValue: mcFmt(distance))
+            _ex2TaperText = State(initialValue: mcFmt(taper))
+            switch mode {
+            case .one:
+                _ex2ModeChoice = State(initialValue: "one")
+            case .symmetric:
+                _ex2ModeChoice = State(initialValue: "symmetric")
+            case .twoSided(let second):
+                _ex2ModeChoice = State(initialValue: "twoSided")
+                _ex2SecondText = State(initialValue: mcFmt(second))
+            }
+            switch op {
+            case .join: _ex2Operation = State(initialValue: "join")
+            case .cut: _ex2Operation = State(initialValue: "cut")
+            case .intersect: _ex2Operation = State(initialValue: "intersect")
+            case .newBody: _ex2Operation = State(initialValue: "newBody")
+            }
+            switch end {
+            case .dimension:
+                _ex2EndChoice = State(initialValue: "dimension")
+            case .throughAll:
+                _ex2EndChoice = State(initialValue: "throughAll")
+            case .upToFace(let faceIndex):
+                _ex2EndChoice = State(initialValue: "upToFace")
+                _ex2FaceIndex = State(initialValue: faceIndex)
+            }
+        case .chamfer2(let mode):
+            switch mode {
+            case .equal(let d):
+                _chamferModeChoice = State(initialValue: "equal")
+                _chamferAText = State(initialValue: mcFmt(d))
+            case .twoDistances(let a, let b):
+                _chamferModeChoice = State(initialValue: "two")
+                _chamferAText = State(initialValue: mcFmt(a))
+                _chamferBText = State(initialValue: mcFmt(b))
+            case .distanceAngle(let d, let deg):
+                _chamferModeChoice = State(initialValue: "angle")
+                _chamferAText = State(initialValue: mcFmt(d))
+                _chamferAngleText = State(initialValue: mcFmt(deg))
+            }
+        case .coil(let radius, let pitch, let turns, let wire):
+            _coilRadiusText = State(initialValue: mcFmt(radius))
+            _coilPitchText = State(initialValue: mcFmt(pitch))
+            _coilTurnsText = State(initialValue: mcFmt(turns))
+            _coilWireText = State(initialValue: mcFmt(wire))
+        case .pipe(let pathID, let radius):
+            initialSketch = pathID
+            _pipeRadiusText = State(initialValue: mcFmt(radius))
+        case .rib(let sid, let thickness, let depth):
+            initialSketch = sid
+            _ribThicknessText = State(initialValue: mcFmt(thickness))
+            _ribDepthText = State(initialValue: mcFmt(depth))
+        case .draftBody(let angle, let axis):
+            _draftAngleText = State(initialValue: mcFmt(angle))
+            _draftAxis = State(initialValue: axis)
+        case .scaleBody(let f):
+            _scaleXText = State(initialValue: mcFmt(f.x))
+            _scaleYText = State(initialValue: mcFmt(f.y))
+            _scaleZText = State(initialValue: mcFmt(f.z))
+        case .moveBody(let t, let axis, let degrees):
+            _moveXText = State(initialValue: mcFmt(t.x))
+            _moveYText = State(initialValue: mcFmt(t.y))
+            _moveZText = State(initialValue: mcFmt(t.z))
+            _moveAxis = State(initialValue: axis)
+            _moveDegreesText = State(initialValue: mcFmt(degrees))
+        case .splitBody(let axis, let offset):
+            _splitAxis = State(initialValue: axis)
+            _splitOffsetText = State(initialValue: mcFmt(offset))
+        case .circularPattern(let count, let axis, let total):
+            _circCountText = State(initialValue: "\(count)")
+            _circAxis = State(initialValue: axis)
+            _circTotalText = State(initialValue: mcFmt(total))
         case .booleanCutPlaceholder:
             break
         }
@@ -390,6 +512,170 @@ struct FeatureEditorSheet: View {
                 Text("Placeholder boolean — kept for older documents.")
                     .font(.system(size: 18))
             }
+        case .extrude2:
+            Section("Extrude") {
+                sketchPicker
+                Picker("Operation", selection: $ex2Operation) {
+                    Text("Join (add)").tag("join")
+                    Text("Cut (remove)").tag("cut")
+                    Text("Intersect (keep overlap)").tag("intersect")
+                    Text("New Body").tag("newBody")
+                }
+                .font(.system(size: 20, weight: .semibold))
+                Picker("End", selection: $ex2EndChoice) {
+                    Text("Dimension").tag("dimension")
+                    Text("Through All").tag("throughAll")
+                    Text("Up to Face").tag("upToFace")
+                }
+                .font(.system(size: 20, weight: .semibold))
+                if ex2EndChoice == "dimension" {
+                    numberRow("Distance (mm)", $ex2DistanceText)
+                }
+                if ex2EndChoice == "upToFace" {
+                    if currentFaces.isEmpty {
+                        Text("The part has no faces right now — Up to Face will fail until a body exists before this feature.")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(.orange)
+                    } else {
+                        Picker("Target face (part as built now)", selection: $ex2FaceIndex) {
+                            ForEach(Array(currentFaces.enumerated()), id: \.offset) { i, face in
+                                Text("Face \(i + 1) · \(mcFaceLabel(face))").tag(i)
+                            }
+                        }
+                        .font(.system(size: 20, weight: .semibold))
+                    }
+                }
+                Picker("Type", selection: $ex2ModeChoice) {
+                    Text("One side").tag("one")
+                    Text("Symmetric").tag("symmetric")
+                    Text("Two sides").tag("twoSided")
+                }
+                .font(.system(size: 20, weight: .semibold))
+                if ex2ModeChoice == "twoSided" {
+                    numberRow("Second distance (mm)", $ex2SecondText)
+                }
+                numberRow("Taper angle (degrees)", $ex2TaperText)
+                Text("Join adds, Cut removes, Intersect keeps only the overlap, New Body keeps the solid separate.")
+                    .font(.system(size: 16))
+                    .foregroundStyle(.secondary)
+            }
+        case .chamfer2:
+            Section("Chamfer") {
+                Picker("Mode", selection: $chamferModeChoice) {
+                    Text("Equal").tag("equal")
+                    Text("Two distances").tag("two")
+                    Text("Distance + Angle").tag("angle")
+                }
+                .font(.system(size: 20, weight: .semibold))
+                numberRow(chamferModeChoice == "two" ? "Distance A (mm)" : "Distance (mm)", $chamferAText)
+                if chamferModeChoice == "two" {
+                    numberRow("Distance B (mm)", $chamferBText)
+                }
+                if chamferModeChoice == "angle" {
+                    numberRow("Angle (degrees)", $chamferAngleText)
+                }
+                Text("Cuts a flat bevel across every sharp edge of the body built so far.")
+                    .font(.system(size: 16))
+                    .foregroundStyle(.secondary)
+            }
+        case .coil:
+            Section("Coil") {
+                numberRow("Coil radius (mm)", $coilRadiusText)
+                numberRow("Pitch (mm / turn)", $coilPitchText)
+                numberRow("Turns", $coilTurnsText)
+                numberRow("Wire radius (mm)", $coilWireText)
+                Text("A spring wound around the Z axis from the origin.")
+                    .font(.system(size: 16))
+                    .foregroundStyle(.secondary)
+            }
+        case .pipe:
+            Section("Pipe") {
+                Picker("Path sketch", selection: $sketchID) {
+                    ForEach(sketches) { sk in
+                        Text(sk.name).tag(sk.id)
+                    }
+                }
+                .font(.system(size: 20, weight: .semibold))
+                numberRow("Pipe radius (mm)", $pipeRadiusText)
+                Text("A round tube swept along the path sketch's connected lines.")
+                    .font(.system(size: 16))
+                    .foregroundStyle(.secondary)
+            }
+        case .rib:
+            Section("Rib") {
+                sketchPicker
+                numberRow("Thickness (mm)", $ribThicknessText)
+                numberRow("Depth into body (mm)", $ribDepthText)
+                Text("A thin wall grown from the profile line toward the body. Trimmed approximately at curved surfaces — exact against flat ones.")
+                    .font(.system(size: 16))
+                    .foregroundStyle(.secondary)
+            }
+        case .draftBody:
+            Section("Draft") {
+                numberRow("Angle (degrees)", $draftAngleText)
+                Picker("Pull axis", selection: $draftAxis) {
+                    Text("X").tag(0)
+                    Text("Y").tag(1)
+                    Text("Z").tag(2)
+                }
+                .font(.system(size: 20, weight: .semibold))
+                Text("Mold-release taper: a positive angle narrows the body toward the top of the pull axis. Between −30° and 30°.")
+                    .font(.system(size: 16))
+                    .foregroundStyle(.secondary)
+            }
+        case .scaleBody:
+            Section("Scale") {
+                numberRow("Factor X", $scaleXText)
+                numberRow("Factor Y", $scaleYText)
+                numberRow("Factor Z", $scaleZText)
+                Text("Scales the body built so far about its center.")
+                    .font(.system(size: 16))
+                    .foregroundStyle(.secondary)
+            }
+        case .moveBody:
+            Section("Move Body") {
+                numberRow("Move X (mm)", $moveXText)
+                numberRow("Move Y (mm)", $moveYText)
+                numberRow("Move Z (mm)", $moveZText)
+                Picker("Rotate around", selection: $moveAxis) {
+                    Text("X").tag(0)
+                    Text("Y").tag(1)
+                    Text("Z").tag(2)
+                }
+                .font(.system(size: 20, weight: .semibold))
+                numberRow("Rotation (degrees)", $moveDegreesText)
+                Text("Moves the whole body, then rotates it around the axis through its center.")
+                    .font(.system(size: 16))
+                    .foregroundStyle(.secondary)
+            }
+        case .splitBody:
+            Section("Split Body") {
+                Picker("Axis", selection: $splitAxis) {
+                    Text("X").tag(0)
+                    Text("Y").tag(1)
+                    Text("Z").tag(2)
+                }
+                .font(.system(size: 20, weight: .semibold))
+                numberRow("Offset (mm, world)", $splitOffsetText)
+                Text("Cuts the body into two bodies at a plane perpendicular to the axis at this offset.")
+                    .font(.system(size: 16))
+                    .foregroundStyle(.secondary)
+            }
+        case .circularPattern:
+            Section("Circular pattern") {
+                Stepper("Copies: \(Int(circCountText) ?? 1)", value: circCountBinding, in: 2...36)
+                    .font(.system(size: 20, weight: .semibold))
+                Picker("Around axis", selection: $circAxis) {
+                    Text("X").tag(0)
+                    Text("Y").tag(1)
+                    Text("Z").tag(2)
+                }
+                .font(.system(size: 20, weight: .semibold))
+                numberRow("Total angle (degrees)", $circTotalText)
+                Text("Repeats the whole body built so far around the axis through its center.")
+                    .font(.system(size: 16))
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -522,6 +808,13 @@ struct FeatureEditorSheet: View {
         )
     }
 
+    private var circCountBinding: Binding<Int> {
+        Binding(
+            get: { Int(circCountText) ?? 1 },
+            set: { circCountText = "\($0)" }
+        )
+    }
+
     private func primitiveKeys(_ kind: PrimitiveKind) -> [String] {
         switch kind {
         case .box: return ["width", "depth", "height"]
@@ -629,6 +922,81 @@ struct FeatureEditorSheet: View {
         case .sweep(let oldProfile, let oldPath):
             return .sweep(profileSketchID: sweepProfileID.isEmpty ? oldProfile : sweepProfileID,
                           pathSketchID: sweepPathID.isEmpty ? oldPath : sweepPathID)
+        case .extrude2(let oldSketch, let oldDistance, let oldTaper, let oldMode, _, _):
+            let mode: ExtrudeMode
+            switch ex2ModeChoice {
+            case "symmetric":
+                mode = .symmetric
+            case "twoSided":
+                let oldSecond: Double
+                if case .twoSided(let s) = oldMode { oldSecond = s } else { oldSecond = 10 }
+                mode = .twoSided(second: num(ex2SecondText, fallback: oldSecond))
+            default:
+                mode = .one
+            }
+            let op: BodyOperation
+            switch ex2Operation {
+            case "cut": op = .cut
+            case "intersect": op = .intersect
+            case "newBody": op = .newBody
+            default: op = .join
+            }
+            let end: ExtrudeEnd
+            switch ex2EndChoice {
+            case "throughAll": end = .throughAll
+            case "upToFace": end = .upToFace(faceIndex: ex2FaceIndex)
+            default: end = .dimension
+            }
+            return .extrude2(sketchID: sketchID.isEmpty ? oldSketch : sketchID,
+                             distance: num(ex2DistanceText, fallback: oldDistance),
+                             taperDegrees: num(ex2TaperText, fallback: oldTaper),
+                             mode: mode, operation: op, end: end)
+        case .chamfer2(let oldMode):
+            let old = oldMode.distances
+            switch chamferModeChoice {
+            case "two":
+                return .chamfer2(mode: .twoDistances(num(chamferAText, fallback: old.0),
+                                                     num(chamferBText, fallback: old.1)))
+            case "angle":
+                let oldAngle: Double
+                if case .distanceAngle(_, let deg) = oldMode { oldAngle = deg } else { oldAngle = 45 }
+                return .chamfer2(mode: .distanceAngle(num(chamferAText, fallback: old.0),
+                                                      num(chamferAngleText, fallback: oldAngle)))
+            default:
+                return .chamfer2(mode: .equal(num(chamferAText, fallback: old.0)))
+            }
+        case .coil(let oldR, let oldP, let oldT, let oldW):
+            return .coil(radius: num(coilRadiusText, fallback: oldR),
+                         pitch: num(coilPitchText, fallback: oldP),
+                         turns: num(coilTurnsText, fallback: oldT),
+                         wireRadius: num(coilWireText, fallback: oldW))
+        case .pipe(let oldPath, let oldRadius):
+            return .pipe(pathSketchID: sketchID.isEmpty ? oldPath : sketchID,
+                         radius: num(pipeRadiusText, fallback: oldRadius))
+        case .rib(let oldSketch, let oldThickness, let oldDepth):
+            return .rib(sketchID: sketchID.isEmpty ? oldSketch : sketchID,
+                        thickness: num(ribThicknessText, fallback: oldThickness),
+                        depth: num(ribDepthText, fallback: oldDepth))
+        case .draftBody(let oldAngle, _):
+            return .draftBody(angleDegrees: num(draftAngleText, fallback: oldAngle),
+                              pullAxis: draftAxis)
+        case .scaleBody(let old):
+            return .scaleBody(factors: Vec3(num(scaleXText, fallback: old.x),
+                                            num(scaleYText, fallback: old.y),
+                                            num(scaleZText, fallback: old.z)))
+        case .moveBody(let oldT, _, let oldDegrees):
+            return .moveBody(translation: Vec3(num(moveXText, fallback: oldT.x),
+                                               num(moveYText, fallback: oldT.y),
+                                               num(moveZText, fallback: oldT.z)),
+                             rotationAxis: moveAxis,
+                             rotationDegrees: num(moveDegreesText, fallback: oldDegrees))
+        case .splitBody(_, let oldOffset):
+            return .splitBody(axis: splitAxis,
+                              offset: num(splitOffsetText, fallback: oldOffset))
+        case .circularPattern(_, _, let oldTotal):
+            return .circularPattern(count: max(2, Int(circCountText) ?? 2),
+                                    axis: circAxis,
+                                    totalDegrees: num(circTotalText, fallback: oldTotal))
         case .booleanCutPlaceholder:
             return .booleanCutPlaceholder
         }

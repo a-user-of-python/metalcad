@@ -17,6 +17,14 @@ struct SketchNav: Identifiable, Hashable {
     let id: String
 }
 
+extension Sketch {
+    /// A datum (construction) plane: kit v4 has no datum type, so the
+    /// app encodes one as an entity-free sketch whose name starts with
+    /// "⌖ ". Datums are offered as sketch planes and construct-tool
+    /// sources, never as feature profiles.
+    var isDatumPlane: Bool { name.hasPrefix("⌖ ") && entities.isEmpty }
+}
+
 /// Editing session for one open document. Owns the document value, the
 /// latest rebuild, and transient action errors. Every kit call goes
 /// through here so a failure becomes a coded CADError banner — the UI
@@ -35,6 +43,16 @@ final class EditorModel: ObservableObject {
     /// Set by the sketch editor's "Finish & Extrude": the editor opens
     /// the Extrude panel pre-filled with this sketch.
     @Published var pendingExtrudeSketchID: String?
+    /// The New Sketch panel's plane selection (kept here so it
+    /// survives the panel closing while a face is picked).
+    @Published var planeChoice: PlaneChoice = .none
+    /// The Redefine Plane panel's selection, same reasoning.
+    @Published var redefineChoice: PlaneChoice = .none
+    /// Last face picked for Construct ▸ Offset Plane.
+    @Published var constructFace: PlanarFace?
+    /// Faces picked for Construct ▸ Midplane.
+    @Published var midplaneFaceA: PlanarFace?
+    @Published var midplaneFaceB: PlanarFace?
     let fileURL: URL
 
     init(document: CADDocument, url: URL) {
@@ -68,6 +86,17 @@ final class EditorModel: ObservableObject {
 
     func sketch(withID id: String) -> Sketch? { part?.sketch(id) }
 
+    /// Sketches usable as feature profiles/paths — datum planes are
+    /// NOT sketches to build from, so every feature picker uses this.
+    var featureSketches: [Sketch] {
+        part?.sketches.filter { !$0.isDatumPlane } ?? []
+    }
+
+    /// Datum (construct) planes of the current part.
+    var datumSketches: [Sketch] {
+        part?.sketches.filter { $0.isDatumPlane } ?? []
+    }
+
     func feature(withID id: String) -> Feature? { part?.features.first { $0.id == id } }
 
     func replaceSketch(_ sketch: Sketch) {
@@ -75,12 +104,6 @@ final class EditorModel: ObservableObject {
             if let i = part.sketches.firstIndex(where: { $0.id == sketch.id }) {
                 part.sketches[i] = sketch
             }
-        }
-    }
-
-    func addSketch() {
-        mutate { part in
-            part.sketches.append(Sketch(name: "Sketch \(part.sketches.count + 1)", plane: .xy))
         }
     }
 
@@ -93,6 +116,34 @@ final class EditorModel: ObservableObject {
         MCLog.shared.info(.sketch, "sketch created",
                           context: ["name": name])
         return sketch
+    }
+
+    /// Create a datum (construct) plane — an entity-free sketch whose
+    /// name carries the ⌖ prefix that marks it as a datum.
+    @discardableResult
+    func addDatum(plane: Plane3, name: String) -> Sketch {
+        let marked = name.hasPrefix("⌖ ") ? name : "⌖ " + name
+        let datum = Sketch(name: marked, plane: plane)
+        mutate { $0.sketches.append(datum) }
+        MCLog.shared.info(.sketch, "datum plane created",
+                          context: ["name": marked])
+        return datum
+    }
+
+    /// Redefine a sketch's plane (Redefine Plane panel / face pick).
+    func setSketchPlane(id: String, plane: Plane3, outline: [Vec2]?) {
+        if let outline { faceOutlines[id] = outline }
+        mutate { part in
+            if let i = part.sketches.firstIndex(where: { $0.id == id }) {
+                part.sketches[i].plane = plane
+            }
+        }
+        MCLog.shared.info(.sketch, "sketch plane redefined", context: ["id": id])
+    }
+
+    func deleteSketch(_ id: String) {
+        faceOutlines[id] = nil
+        mutate { $0.sketches.removeAll { $0.id == id } }
     }
 
     func setMaterial(_ materialID: String) {
@@ -133,9 +184,10 @@ final class EditorModel: ObservableObject {
         return appendFeature(name: label, kind: .primitive(kind: kind, params: params))
     }
 
-    /// First sketch of the part, or a coded error if there is none yet.
+    /// First profile sketch of the part, or a coded error if there is
+    /// none yet. Datum planes don't count — they hold no drawing.
     private func firstSketchOrError() -> Sketch? {
-        if let sk = part?.sketches.first { return sk }
+        if let sk = featureSketches.first { return sk }
         actionError = .padNoProfile
         MCLog.shared.log(error: .padNoProfile, category: .feature)
         return nil
@@ -208,13 +260,13 @@ final class EditorModel: ObservableObject {
         }
     }
 
-    // MARK: Sketch on a face
+    // MARK: Picking a face of the solid
 
-    /// Create a sketch on the planar face that owns welded-mesh triangle
-    /// `triangleIndex` (the SceneKit hit-test face index — the display
-    /// soup uses the same triangle order). Returns the new sketch's id,
-    /// or nil with `actionError` set (MCAD-SK201 when no face matches).
-    func sketchOnFace(triangleIndex: Int) -> String? {
+    /// Resolve a SceneKit hit-test triangle (the display soup uses the
+    /// welded mesh's triangle order) to the planar face that owns it.
+    /// Returns nil with `actionError` set (MCAD-SK201 when no face
+    /// matches) so every pick flow reports failures the same way.
+    func resolvePickedFace(triangleIndex: Int) -> PlanarFace? {
         guard let mesh = rebuild?.mesh, mesh.triangleCount > 0 else {
             actionError = .kernelShapeInvalid("there is no solid to pick a face on yet")
             return nil
@@ -238,6 +290,13 @@ final class EditorModel: ObservableObject {
             MCLog.shared.log(error: .sketchPlaneLost(sketch: "picked face"), category: .sketch)
             return nil
         }
+        return face
+    }
+
+    /// Create a sketch on an already-resolved face and remember its
+    /// outline as the editor guide. Returns the new sketch's id.
+    @discardableResult
+    func addSketchOnFace(_ face: PlanarFace) -> String {
         let sketch = Sketch(name: "Face sketch", plane: face.plane)
         faceOutlines[sketch.id] = face.outline2D
         mutate { $0.sketches.append(sketch) }
@@ -294,6 +353,7 @@ struct EditorView: View {
     @State private var featureToEdit: Feature?
     @State private var showMaterialPicker = false
     @State private var pickingFace = false
+    @State private var pickPurpose: FacePickPurpose = .sketchOnFace
     @State private var sketchNav: SketchNav?
     @State private var activeTool: ActiveTool?
     @State private var extrudePresetSketchID: String?
@@ -336,9 +396,13 @@ struct EditorView: View {
                                     extrudePresetSketchID = nil
                                 },
                                 openSketch: { id in sketchNav = SketchNav(id: id) },
-                                pickFace: {
+                                pickFace: { purpose in
+                                    pickPurpose = purpose
                                     activeTool = nil
                                     startFacePicking()
+                                },
+                                switchTool: { newTool in
+                                    activeTool = newTool
                                 }
                             )
                         }
@@ -372,7 +436,8 @@ struct EditorView: View {
             .sheet(item: $featureToEdit) { feature in
                 FeatureEditorSheet(
                     feature: feature,
-                    sketches: model.part?.sketches ?? [],
+                    sketches: model.featureSketches,
+                    currentFaces: currentFaces,
                     filletMaxFeasible: filletMaxFeasible(for: feature),
                     onSave: { name, kind in
                         model.updateFeature(id: feature.id, name: name, kind: kind)
@@ -406,6 +471,13 @@ struct EditorView: View {
     // MARK: Mesh / section plumbing
 
     private var baseMesh: Mesh { model.rebuild?.mesh ?? Mesh() }
+
+    /// Planar faces of the current body in the kernel's order — the
+    /// index space ExtrudeEnd.upToFace refers to.
+    private var currentFaces: [PlanarFace] {
+        guard baseMesh.triangleCount > 0 else { return [] }
+        return FaceExtractor.planarFaces(of: baseMesh)
+    }
 
     private var baseMeshKey: String {
         "\(baseMesh.triangleCount)-\(baseMesh.volume)"
@@ -496,6 +568,9 @@ struct EditorView: View {
             .buttonStyle(.plain)
             headerStat("Volume", "\(String(format: "%.2f", baseMesh.volume / 1000)) cm³")
             headerStat("Mass", model.rebuild?.massGrams.map(mcMass) ?? "—")
+            if let bodies = model.rebuild?.bodies, bodies.count > 1 {
+                headerStat("Bodies", "\(bodies.count)")
+            }
             headerStat("Size", sizeText)
         }
         .padding(.horizontal, 14)
@@ -533,9 +608,21 @@ struct EditorView: View {
                     ribbonButton("New Sketch", icon: "square.and.pencil", active: activeTool == .newSketch) {
                         selectTool(.newSketch)
                     }
-                    ribbonButton("On Face", icon: "square.on.square.dashed", active: pickingFace) {
+                    ribbonButton("On Face", icon: "square.on.square.dashed", active: pickingFace && pickPurpose == .sketchOnFace) {
+                        pickPurpose = .sketchOnFace
                         activeTool = nil
                         startFacePicking()
+                    }
+                }
+                ribbonGroup("CONSTRUCT") {
+                    ribbonButton("Offset Plane", icon: "square.on.square", active: activeTool == .offsetPlane) {
+                        selectTool(.offsetPlane)
+                    }
+                    ribbonButton("Angle Plane", icon: "triangle", active: activeTool == .anglePlane) {
+                        selectTool(.anglePlane)
+                    }
+                    ribbonButton("Midplane", icon: "rectangle.split.3x1", active: activeTool == .midplane) {
+                        selectTool(.midplane)
                     }
                 }
                 ribbonGroup("CREATE") {
@@ -558,6 +645,15 @@ struct EditorView: View {
                     ribbonButton("Sweep", icon: "lasso", active: activeTool == .sweep) {
                         selectTool(.sweep)
                     }
+                    ribbonButton("Coil", icon: "tornado", active: activeTool == .coil) {
+                        selectTool(.coil)
+                    }
+                    ribbonButton("Pipe", icon: "waveform.path", active: activeTool == .pipe) {
+                        selectTool(.pipe)
+                    }
+                    ribbonButton("Rib", icon: "square.split.2x1", active: activeTool == .rib) {
+                        selectTool(.rib)
+                    }
                     primitivesMenu
                 }
                 ribbonGroup("MODIFY") {
@@ -575,6 +671,21 @@ struct EditorView: View {
                     }
                     ribbonButton("Pattern", icon: "square.grid.2x2", active: activeTool == .pattern) {
                         selectTool(.pattern)
+                    }
+                    ribbonButton("Circ. Pattern", icon: "arrow.triangle.2.circlepath", active: activeTool == .circularPattern) {
+                        selectTool(.circularPattern)
+                    }
+                    ribbonButton("Draft", icon: "pyramid", active: activeTool == .draft) {
+                        selectTool(.draft)
+                    }
+                    ribbonButton("Scale", icon: "arrow.up.and.down.and.arrow.left.and.right", active: activeTool == .scaleBody) {
+                        selectTool(.scaleBody)
+                    }
+                    ribbonButton("Move", icon: "move.3d", active: activeTool == .moveBody) {
+                        selectTool(.moveBody)
+                    }
+                    ribbonButton("Split", icon: "rectangle.split.2x1", active: activeTool == .splitBody) {
+                        selectTool(.splitBody)
                     }
                 }
                 ribbonGroup("INSPECT") {
@@ -742,7 +853,7 @@ struct EditorView: View {
         HStack(spacing: 12) {
             Image(systemName: "hand.tap.fill")
                 .font(.system(size: 26))
-            Text("Tap a flat face on the model to sketch on it.")
+            Text(pickBannerText)
                 .font(.system(size: 20, weight: .semibold))
             Spacer()
             Button("Cancel") { pickingFace = false }
@@ -752,6 +863,23 @@ struct EditorView: View {
         .background(RoundedRectangle(cornerRadius: 12).fill(Color.orange.opacity(0.25)))
     }
 
+    private var pickBannerText: String {
+        switch pickPurpose {
+        case .sketchOnFace:
+            return "Tap a flat face on the model to sketch on it."
+        case .newSketchFace:
+            return "Tap a flat face — the new sketch will lie on it."
+        case .offsetDatumFace:
+            return "Tap a flat face to offset a datum plane from."
+        case .midplaneA:
+            return "Tap the first of two parallel faces for the midplane."
+        case .midplaneB:
+            return "Tap the second parallel face for the midplane."
+        case .redefineFace:
+            return "Tap a flat face — the sketch will move onto it."
+        }
+    }
+
     private func startFacePicking() {
         if sectionOn { toggleSection() }
         pickingFace = true
@@ -759,8 +887,26 @@ struct EditorView: View {
 
     private func handleFacePicked(_ triangleIndex: Int) {
         pickingFace = false
-        if let sketchID = model.sketchOnFace(triangleIndex: triangleIndex) {
-            sketchNav = SketchNav(id: sketchID)
+        guard let face = model.resolvePickedFace(triangleIndex: triangleIndex) else { return }
+        switch pickPurpose {
+        case .sketchOnFace:
+            sketchNav = SketchNav(id: model.addSketchOnFace(face))
+        case .newSketchFace:
+            model.planeChoice = .face(face)
+            activeTool = .newSketch
+        case .offsetDatumFace:
+            model.constructFace = face
+            activeTool = .offsetPlane
+        case .midplaneA:
+            model.midplaneFaceA = face
+            activeTool = .midplane
+        case .midplaneB:
+            model.midplaneFaceB = face
+            activeTool = .midplane
+        case .redefineFace(let sketchID):
+            model.setSketchPlane(id: sketchID, plane: face.plane, outline: face.outline2D)
+            model.redefineChoice = .face(face)
+            activeTool = .redefinePlane(sketchID)
         }
     }
 
@@ -812,25 +958,15 @@ struct EditorView: View {
 
     private var browserPanel: some View {
         List {
-            Section("Sketches") {
+            Section("Sketches & datum planes") {
                 if let part = model.part {
                     if part.sketches.isEmpty {
-                        Text("No sketches yet — use Sketch ▸ New Sketch in the toolbar.")
+                        Text("No sketches yet — use Sketch ▸ New Sketch in the toolbar and pick a plane.")
                             .font(rowFont)
                             .foregroundStyle(.secondary)
                     }
                     ForEach(part.sketches) { sketch in
-                        NavigationLink {
-                            SketchEditorView(model: model, sketchID: sketch.id)
-                        } label: {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(sketch.name)
-                                    .font(.system(size: 20, weight: .semibold))
-                                Text("\(sketch.entities.count) items · \(sketch.constraints.count) constraints")
-                                    .font(.system(size: 17))
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
+                        sketchRow(sketch)
                     }
                 }
             }
@@ -848,6 +984,58 @@ struct EditorView: View {
             }
         }
         .listStyle(.plain)
+    }
+
+    /// One browser row for a sketch or datum plane. Datums get the ⌖
+    /// plane treatment (icon + plane description, no item counts);
+    /// every row carries a menu with Redefine Plane and Delete.
+    private func sketchRow(_ sketch: Sketch) -> some View {
+        HStack(spacing: 10) {
+            NavigationLink {
+                SketchEditorView(model: model, sketchID: sketch.id)
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: sketch.isDatumPlane ? "square.on.square" : "square.and.pencil")
+                        .font(.system(size: 22))
+                        .foregroundStyle(sketch.isDatumPlane ? .teal : .orange)
+                        .frame(width: 30)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(sketch.name)
+                            .font(.system(size: 20, weight: .semibold))
+                            .foregroundStyle(.primary)
+                        if sketch.isDatumPlane {
+                            Text("Datum plane · \(mcPlaneText(sketch.plane))")
+                                .font(.system(size: 17))
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Text("\(sketch.entities.count) items · \(sketch.constraints.count) constraints")
+                                .font(.system(size: 17))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+            Spacer()
+            Menu {
+                Button {
+                    model.redefineChoice = .none
+                    activeTool = .redefinePlane(sketch.id)
+                } label: {
+                    Label("Redefine plane…", systemImage: "square.on.square.dashed")
+                }
+                Button(role: .destructive) {
+                    model.deleteSketch(sketch.id)
+                } label: {
+                    Label(sketch.isDatumPlane ? "Delete datum" : "Delete sketch",
+                          systemImage: "trash")
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .font(.system(size: 24))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.vertical, 2)
     }
 
     private func featureRow(_ feature: Feature) -> some View {
@@ -976,6 +1164,16 @@ struct EditorView: View {
         case .extrude: return "rectangle.expand.vertical"
         case .loft: return "square.2.layers.3d"
         case .sweep: return "lasso"
+        case .extrude2: return "rectangle.expand.vertical"
+        case .chamfer2: return "octagon"
+        case .coil: return "tornado"
+        case .pipe: return "waveform.path"
+        case .rib: return "square.split.2x1"
+        case .draftBody: return "pyramid"
+        case .scaleBody: return "arrow.up.and.down.and.arrow.left.and.right"
+        case .moveBody: return "move.3d"
+        case .splitBody: return "rectangle.split.2x1"
+        case .circularPattern: return "arrow.triangle.2.circlepath"
         case .booleanCutPlaceholder: return "scissors"
         }
     }
@@ -1035,6 +1233,57 @@ struct EditorView: View {
             return "Loft · two profiles"
         case .sweep:
             return "Sweep · profile along path"
+        case .extrude2(_, let distance, let taper, let mode, let op, let end):
+            let opText: String
+            switch op {
+            case .join: opText = "join"
+            case .cut: opText = "cut"
+            case .intersect: opText = "intersect"
+            case .newBody: opText = "new body"
+            }
+            var text = "Extrude · \(opText)"
+            switch end {
+            case .dimension: text += " · \(mcFmt(distance)) mm"
+            case .throughAll: text += " · through all"
+            case .upToFace(let i): text += " · up to face \(i + 1)"
+            }
+            switch mode {
+            case .one: break
+            case .symmetric: text += " · symmetric"
+            case .twoSided(let second): text += " + \(mcFmt(second)) mm back"
+            }
+            if taper != 0 { text += " · taper \(mcFmt(taper))°" }
+            return text
+        case .chamfer2(let mode):
+            switch mode {
+            case .equal(let d):
+                return "Chamfer · \(mcFmt(d)) mm both sides"
+            case .twoDistances(let a, let b):
+                return "Chamfer · \(mcFmt(a)) × \(mcFmt(b)) mm"
+            case .distanceAngle(let d, let deg):
+                return "Chamfer · \(mcFmt(d)) mm at \(mcFmt(deg))°"
+            }
+        case .coil(let radius, let pitch, let turns, let wire):
+            return "Coil · R\(mcFmt(radius)) · pitch \(mcFmt(pitch)) · \(mcFmt(turns)) turns · wire r\(mcFmt(wire))"
+        case .pipe(_, let radius):
+            return "Pipe · r \(mcFmt(radius)) along path"
+        case .rib(_, let thickness, let depth):
+            return "Rib · \(mcFmt(thickness)) thick · \(mcFmt(depth)) deep"
+        case .draftBody(let angle, let axis):
+            return "Draft · \(mcFmt(angle))° · pull \(axis == 0 ? "X" : (axis == 1 ? "Y" : "Z"))"
+        case .scaleBody(let f):
+            if f.x == f.y && f.y == f.z { return "Scale · ×\(mcFmt(f.x))" }
+            return "Scale · ×(\(mcFmt(f.x)), \(mcFmt(f.y)), \(mcFmt(f.z)))"
+        case .moveBody(let t, let axis, let degrees):
+            var text = "Move · (\(mcFmt(t.x)), \(mcFmt(t.y)), \(mcFmt(t.z)))"
+            if degrees != 0 {
+                text += " · rotate \(mcFmt(degrees))° around \(axis == 0 ? "X" : (axis == 1 ? "Y" : "Z"))"
+            }
+            return text
+        case .splitBody(let axis, let offset):
+            return "Split · \(axis == 0 ? "X" : (axis == 1 ? "Y" : "Z")) at \(mcFmt(offset)) mm"
+        case .circularPattern(let count, let axis, let total):
+            return "Circular pattern · ×\(count) around \(axis == 0 ? "X" : (axis == 1 ? "Y" : "Z")) over \(mcFmt(total))°"
         case .booleanCutPlaceholder:
             return "Boolean cut"
         }

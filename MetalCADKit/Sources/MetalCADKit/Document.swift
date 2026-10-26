@@ -76,6 +76,10 @@ public enum FeatureKind: Codable, Equatable {
     case moveBody(translation: Vec3, rotationAxis: Int, rotationDegrees: Double)
     case splitBody(axis: Int, offset: Double)
     case circularPattern(count: Int, axis: Int, totalDegrees: Double)
+    // v4.1 additions (appended — existing cases keep their encoding).
+    case filletEdges(radius: Double, midpoints: [Vec3])
+    case chamferEdges(distance: Double, midpoints: [Vec3])
+    case threadOnShaft(spec: ThreadSpec, origin: Vec3, axis: Vec3)
     case booleanCutPlaceholder
 }
 
@@ -273,6 +277,85 @@ public enum DocumentEngine {
                     logger.debug(.feature, "circular pattern ok", context: ["feature": feature.name, "count": "\(count)"])
                     continue
                 }
+                if case .threadShaft(let spec) = feature.kind {
+                    // Threads merge WITHOUT a raw CSG union of the ridge:
+                    // BSP clipping dices body faces against the helix and
+                    // explodes the triangle count (169k for one M10 shaft
+                    // on a plate). Union only the plain core cylinder,
+                    // then append the ridge trimmed where it dives below
+                    // the body's surface along the shaft column.
+                    let (vspec, tw) = try spec.validated()
+                    warnings += tw
+                    let core = try Tessellation.cylinder(radius: vspec.minorDiameter / 2,
+                                                         height: vspec.length, baseZ: 0,
+                                                         taperDegrees: vspec.taperDegrees)
+                    var ridge = try ThreadTessellator.ridgeMesh(spec: vspec)
+                    if body.triangleCount > 0 {
+                        let rLim = vspec.majorDiameter / 2 + 0.5
+                        var zTop = -Double.infinity
+                        for v in body.vertices where v.x * v.x + v.y * v.y < rLim * rLim {
+                            zTop = max(zTop, v.z)
+                        }
+                        if zTop.isFinite {
+                            ridge = ridge.keepingTriangles(aboveZ: zTop - vspec.pitch * 0.5)
+                        }
+                        body = try CSG.union(body, core)
+                        body.append(ridge)
+                    } else {
+                        body = core
+                        body.append(ridge)
+                    }
+                    statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
+                    logger.debug(.feature, "thread ok", context: ["feature": feature.name])
+                    continue
+                }
+                if case .filletEdges(let radius, let midpoints) = feature.kind {
+                    guard body.triangleCount > 0 else { throw CADError.filletFailed("no solid to fillet yet") }
+                    body = try EdgeFinisher.fillet(body: body, radius: radius, onlyMidpoints: midpoints)
+                    statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
+                    logger.debug(.feature, "fillet edges ok", context: ["feature": feature.name, "edges": "\(midpoints.count)"])
+                    continue
+                }
+                if case .chamferEdges(let distance, let midpoints) = feature.kind {
+                    guard body.triangleCount > 0 else { throw CADError.chamferInvalid("no solid to chamfer yet") }
+                    body = try EdgeFinisher.chamfer(body: body, distance: distance, onlyMidpoints: midpoints)
+                    statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
+                    logger.debug(.feature, "chamfer edges ok", context: ["feature": feature.name, "edges": "\(midpoints.count)"])
+                    continue
+                }
+                if case .threadOnShaft(let spec, let origin, let axis) = feature.kind {
+                    // Thread an EXISTING shaft (fitted by the app from a
+                    // tapped pillar): cut the plain cylinder out, union
+                    // the threaded core, append the ridge trimmed to
+                    // the shaft's span — the same low-triangle merge as
+                    // .threadShaft (never raw-union a ridge).
+                    guard body.triangleCount > 0 else { throw CADError.booleanEmptyResult }
+                    guard spec.kind == .external else {
+                        throw CADError.threadProfileInvalid("threading a hole wall is not supported yet — pick an outside shaft")
+                    }
+                    let (vspec, tw) = try spec.validated()
+                    warnings += tw
+                    let ax = axis.normalized
+                    let rOut = vspec.majorDiameter / 2
+                    var cutter = try Tessellation.cylinder(radius: rOut, height: vspec.length + 2, baseZ: -1)
+                    cutter = cutter.placed(axis: ax, origin: origin)
+                    var rest = try CSG.subtract(body, cutter)
+                    let core = try Tessellation.cylinder(radius: vspec.minorDiameter / 2,
+                                                         height: vspec.length, baseZ: 0,
+                                                         taperDegrees: vspec.taperDegrees)
+                        .placed(axis: ax, origin: origin)
+                    rest = try CSG.union(rest, core)
+                    var ridge = try ThreadTessellator.ridgeMesh(spec: vspec)
+                    ridge = ridge.placed(axis: ax, origin: origin)
+                    ridge = ridge.keepingTriangles(axis: origin, axis: ax,
+                                                   between: -vspec.pitch * 0.5,
+                                                   and: vspec.length + vspec.pitch * 0.5)
+                    rest.append(ridge)
+                    body = rest
+                    statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
+                    logger.debug(.feature, "thread on shaft ok", context: ["feature": feature.name])
+                    continue
+                }
                 let m = try evaluate(feature: feature, part: part, warnings: &warnings)
                 switch feature.kind {
                 case .pocket, .hole:
@@ -434,13 +517,13 @@ public enum DocumentEngine {
             case .torus:
                 return try Tessellation.torus(ringRadius: p["ringRadius"] ?? 15, tubeRadius: p["tubeRadius"] ?? 5)
             }
-        case .threadShaft(let spec):
-            return try ThreadTessellator.threadedShaft(spec: spec)
+        case .threadShaft:
+            throw CADError.invariantBroken("thread shafts must be handled by rebuild, not evaluate")
         case .linearPattern:
             throw CADError.invariantBroken("pattern must be handled by rebuild, not evaluate")
         case .mirror:
             throw CADError.invariantBroken("mirror must be handled by rebuild, not evaluate")
-        case .fillet, .chamfer, .shell, .chamfer2, .extrude2, .rib, .draftBody, .scaleBody, .moveBody, .splitBody, .circularPattern:
+        case .fillet, .chamfer, .shell, .chamfer2, .extrude2, .rib, .draftBody, .scaleBody, .moveBody, .splitBody, .circularPattern, .filletEdges, .chamferEdges, .threadOnShaft:
             throw CADError.invariantBroken("body-dependent feature must be handled by rebuild, not evaluate")
         case .coil(let radius, let pitch, let turns, let wireRadius):
             return try coilMesh(radius: radius, pitch: pitch, turns: turns, wireRadius: wireRadius)

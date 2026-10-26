@@ -97,6 +97,13 @@ enum ActiveTool: Identifiable, Equatable {
     case moveBody
     case splitBody
     case measure
+    // Selection-first panels (v4.3): opened from the picked-action
+    // bar; each reads its target (face / edge / shaft) from
+    // EditorModel.picked in its initializer.
+    case pullFace
+    case filletEdge
+    case chamferEdge
+    case threadShaft
 
     var id: String {
         switch self {
@@ -125,6 +132,10 @@ enum ActiveTool: Identifiable, Equatable {
         case .moveBody: return "moveBody"
         case .splitBody: return "splitBody"
         case .measure: return "measure"
+        case .pullFace: return "pullFace"
+        case .filletEdge: return "filletEdge"
+        case .chamferEdge: return "chamferEdge"
+        case .threadShaft: return "threadShaft"
         }
     }
 
@@ -155,6 +166,10 @@ enum ActiveTool: Identifiable, Equatable {
         case .moveBody: return "Move Body"
         case .splitBody: return "Split Body"
         case .measure: return "Measure"
+        case .pullFace: return "Pull Face"
+        case .filletEdge: return "Fillet Edge"
+        case .chamferEdge: return "Chamfer Edge"
+        case .threadShaft: return "Thread Shaft"
         }
     }
 }
@@ -218,6 +233,35 @@ struct PanelNote: View {
     }
 }
 
+/// Live draft feedback: while a panel is drafting, the pending
+/// feature is rebuilt in the background and ghosted in the 3D view.
+/// If that rebuild fails, the reason shows HERE, before the user
+/// commits — no surprise error after OK.
+struct PanelDraftError: View {
+    @ObservedObject var model: EditorModel
+
+    var body: some View {
+        if model.draftFeatures != nil, let err = model.previewError {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .mcFont(18)
+                    .foregroundStyle(.orange)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Preview: \(err.userMessage)")
+                        .mcFont(16, weight: .semibold)
+                    Text(err.code)
+                        .mcFont(13, design: .monospaced)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+            .padding(9)
+            .background(RoundedRectangle(cornerRadius: 9).fill(Color.orange.opacity(0.14)))
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
 struct PanelOKBar: View {
     var okTitle = "OK"
     var okEnabled = true
@@ -251,6 +295,12 @@ struct ToolPanelView: View {
     /// Sketch to pre-select (set when a sketch is finished with
     /// "Finish & Extrude").
     var extrudeSketchID: String? = nil
+    /// Sketch tool panels should pre-select (the 3D selection, or the
+    /// selection action bar's explicit choice).
+    var panelSketchID: String? = nil
+    /// Operation an Extrude panel should start with ("cut" when it
+    /// was opened as Pocket from the selection action bar).
+    var panelOperation: String? = nil
     let close: () -> Void
     let openSketch: (String) -> Void
     /// Enter face-pick mode for the given purpose; the picked face is
@@ -295,11 +345,13 @@ struct ToolPanelView: View {
         case .midplane:
             MidplanePanel(model: model, close: close, pickFace: pickFace, switchTool: switchTool)
         case .extrude:
-            ExtrudePanel(model: model, initialSketchID: extrudeSketchID, close: close)
+            ExtrudePanel(model: model, initialSketchID: extrudeSketchID ?? panelSketchID,
+                         initialOperation: panelOperation, close: close)
         case .revolve:
-            RevolvePanel(model: model, close: close)
+            RevolvePanel(model: model, initialSketchID: panelSketchID, close: close)
         case .hole:
-            HolePanel(model: model, close: close)
+            HolePanel(model: model, initialSketchID: panelSketchID,
+                      generatedSketch: model.pendingHoleSketch, close: close)
         case .loft:
             LoftPanel(model: model, close: close)
         case .sweep:
@@ -307,9 +359,9 @@ struct ToolPanelView: View {
         case .coil:
             CoilPanel(model: model, close: close)
         case .pipe:
-            PipePanel(model: model, close: close)
+            PipePanel(model: model, initialSketchID: panelSketchID, close: close)
         case .rib:
-            RibPanel(model: model, close: close)
+            RibPanel(model: model, initialSketchID: panelSketchID, close: close)
         case .primitive(let kind):
             PrimitivePanel(model: model, kind: kind, close: close)
         case .fillet:
@@ -334,6 +386,14 @@ struct ToolPanelView: View {
             SplitBodyPanel(model: model, close: close)
         case .measure:
             MeasurePanel(model: model)
+        case .pullFace:
+            PullFacePanel(model: model, close: close)
+        case .filletEdge:
+            FilletEdgePanel(model: model, close: close)
+        case .chamferEdge:
+            ChamferEdgePanel(model: model, close: close)
+        case .threadShaft:
+            ThreadShaftPanel(model: model, close: close)
         }
     }
 }
@@ -886,14 +946,62 @@ struct ExtrudePanel: View {
     @State private var endChoice = "dimension"
     @State private var faceIndex = 0
 
-    init(model: EditorModel, initialSketchID: String?, close: @escaping () -> Void) {
+    init(model: EditorModel, initialSketchID: String?, initialOperation: String? = nil,
+         close: @escaping () -> Void) {
         _model = ObservedObject(wrappedValue: model)
         self.close = close
         let fallback = model.featureSketches.first?.id ?? ""
         _sketchID = State(initialValue: initialSketchID ?? fallback)
+        if let initialOperation {
+            _operation = State(initialValue: initialOperation)
+        }
     }
 
     private var sketches: [Sketch] { model.featureSketches }
+
+    /// The feature these fields describe — used for BOTH the live
+    /// draft preview and the commit, so what you see is what you get.
+    private var candidateKind: FeatureKind {
+        let mode: ExtrudeMode
+        switch typeChoice {
+        case "symmetric": mode = .symmetric
+        case "twoSided": mode = .twoSided(second: panelNum(secondText, fallback: 10))
+        default: mode = .one
+        }
+        let op: BodyOperation
+        switch operation {
+        case "cut": op = .cut
+        case "intersect": op = .intersect
+        case "newBody": op = .newBody
+        default: op = .join
+        }
+        let end: ExtrudeEnd
+        switch endChoice {
+        case "throughAll": end = .throughAll
+        case "upToFace": end = .upToFace(faceIndex: faceIndex)
+        default: end = .dimension
+        }
+        return .extrude2(sketchID: sketchID,
+                         distance: panelNum(distanceText, fallback: 10),
+                         taperDegrees: panelNum(taperText, fallback: 0),
+                         mode: mode, operation: op, end: end)
+    }
+
+    private var draftSignature: String {
+        "\(sketchID)|\(distanceText)|\(typeChoice)|\(secondText)|\(taperText)|\(operation)|\(endChoice)|\(faceIndex)"
+    }
+
+    private func refreshDraft() {
+        if sketches.isEmpty { model.setDraft(nil) } else {
+            model.draftAppend(Feature(name: "Extrude", kind: candidateKind))
+        }
+    }
+
+    /// Slider ⇄ text field binding for scrubbing the distance live.
+    private var distanceValue: Binding<Double> {
+        Binding(get: { panelNum(distanceText, fallback: 10) },
+                set: { distanceText = mcFmt($0) })
+    }
 
     /// Faces of the body as built NOW, in the kernel's own order —
     /// the index chosen here is the index ExtrudeEnd.upToFace uses.
@@ -933,6 +1041,10 @@ struct ExtrudePanel: View {
             .mcFont(19, weight: .semibold)
             if endChoice == "dimension" {
                 PanelNumberRow(label: "Distance (mm)", text: $distanceText)
+                // Scrub the length and watch the ghost grow/shrink in
+                // the 3D view before committing.
+                Slider(value: distanceValue, in: 1...200, step: 0.5)
+                    .accessibilityLabel("Extrude distance")
             }
             if endChoice == "throughAll" {
                 PanelNote(text: "The prism runs past the whole body in the sketch direction — no distance needed.")
@@ -972,36 +1084,17 @@ struct ExtrudePanel: View {
             if operation == "newBody" {
                 PanelNote(text: "New Body keeps this solid separate from the existing body — the part can hold several bodies.")
             }
+            PanelDraftError(model: model)
             PanelOKBar(okEnabled: !sketches.isEmpty && (endChoice != "upToFace" || !faces.isEmpty),
                        onOK: apply, onCancel: close)
         }
+        .onAppear { refreshDraft() }
+        .onChange(of: draftSignature) { _, _ in refreshDraft() }
     }
 
     private func apply() {
-        let mode: ExtrudeMode
-        switch typeChoice {
-        case "symmetric": mode = .symmetric
-        case "twoSided": mode = .twoSided(second: panelNum(secondText, fallback: 10))
-        default: mode = .one
-        }
-        let op: BodyOperation
-        switch operation {
-        case "cut": op = .cut
-        case "intersect": op = .intersect
-        case "newBody": op = .newBody
-        default: op = .join
-        }
-        let end: ExtrudeEnd
-        switch endChoice {
-        case "throughAll": end = .throughAll
-        case "upToFace": end = .upToFace(faceIndex: faceIndex)
-        default: end = .dimension
-        }
-        model.appendFeature(name: "Extrude",
-                            kind: .extrude2(sketchID: sketchID,
-                                            distance: panelNum(distanceText, fallback: 10),
-                                            taperDegrees: panelNum(taperText, fallback: 0),
-                                            mode: mode, operation: op, end: end))
+        model.appendFeature(name: "Extrude", kind: candidateKind)
+        model.setDraft(nil)
         close()
     }
 }
@@ -1016,10 +1109,10 @@ struct RevolvePanel: View {
     @State private var axisEntityID: Int = 0
     @State private var angleText = "360"
 
-    init(model: EditorModel, close: @escaping () -> Void) {
+    init(model: EditorModel, initialSketchID: String? = nil, close: @escaping () -> Void) {
         _model = ObservedObject(wrappedValue: model)
         self.close = close
-        _sketchID = State(initialValue: model.featureSketches.first?.id ?? "")
+        _sketchID = State(initialValue: initialSketchID ?? model.featureSketches.first?.id ?? "")
     }
 
     private var sketches: [Sketch] { model.featureSketches }
@@ -1027,6 +1120,19 @@ struct RevolvePanel: View {
         (sketches.first { $0.id == sketchID }?.entities ?? []).filter { e in
             if case .line = e { return true }
             return false
+        }
+    }
+
+    private var candidateKind: FeatureKind {
+        .revolve(sketchID: sketchID, axisEntityID: axisEntityID,
+                 angleDegrees: panelNum(angleText, fallback: 360))
+    }
+
+    private var draftSignature: String { "\(sketchID)|\(axisEntityID)|\(angleText)" }
+
+    private func refreshDraft() {
+        if sketches.isEmpty || axisLines.isEmpty { model.setDraft(nil) } else {
+            model.draftAppend(Feature(name: "Revolve", kind: candidateKind))
         }
     }
 
@@ -1054,17 +1160,19 @@ struct RevolvePanel: View {
                 }
             }
             PanelNumberRow(label: "Angle (degrees)", text: $angleText)
+            PanelDraftError(model: model)
             PanelOKBar(okEnabled: !sketches.isEmpty && !axisLines.isEmpty, onOK: apply, onCancel: close)
                 .onAppear {
                     if axisEntityID == 0, let first = axisLines.first { axisEntityID = first.id }
                 }
         }
+        .onAppear { refreshDraft() }
+        .onChange(of: draftSignature) { _, _ in refreshDraft() }
     }
 
     private func apply() {
-        model.appendFeature(name: "Revolve",
-                            kind: .revolve(sketchID: sketchID, axisEntityID: axisEntityID,
-                                           angleDegrees: panelNum(angleText, fallback: 360)))
+        model.appendFeature(name: "Revolve", kind: candidateKind)
+        model.setDraft(nil)
         close()
     }
 }
@@ -1074,6 +1182,11 @@ struct RevolvePanel: View {
 struct HolePanel: View {
     @ObservedObject var model: EditorModel
     let close: () -> Void
+    /// The generated one-point drill sketch from the picked-face bar
+    /// ("Hole Here…"), if this panel was opened that way. Drafts with
+    /// the sketch injected into the preview part; committed with the
+    /// hole on Apply.
+    let generatedSketch: Sketch?
 
     @State private var sketchID: String
     @State private var diameterText = "6"
@@ -1084,13 +1197,63 @@ struct HolePanel: View {
     @State private var cbDepthText = "3"
     @State private var csAngleText = "90"
 
-    init(model: EditorModel, close: @escaping () -> Void) {
+    init(model: EditorModel, initialSketchID: String? = nil,
+         generatedSketch: Sketch? = nil, close: @escaping () -> Void) {
         _model = ObservedObject(wrappedValue: model)
         self.close = close
-        _sketchID = State(initialValue: model.featureSketches.first?.id ?? "")
+        self.generatedSketch = generatedSketch
+        _sketchID = State(initialValue: generatedSketch?.id
+                          ?? initialSketchID
+                          ?? model.featureSketches.first?.id ?? "")
     }
 
-    private var sketches: [Sketch] { model.featureSketches }
+    private var sketches: [Sketch] {
+        var list = model.featureSketches
+        if let gen = generatedSketch, !list.contains(where: { $0.id == gen.id }) {
+            list.append(gen)
+        }
+        return list
+    }
+
+    /// True while the generated sketch is the chosen drill pattern:
+    /// drafts must inject it into the preview part, and Apply commits
+    /// it (once) before the hole feature.
+    private var usesGenerated: Bool {
+        guard let gen = generatedSketch else { return false }
+        return sketchID == gen.id
+    }
+
+    private var candidateKind: FeatureKind {
+        let hk: HoleKind
+        switch kindChoice {
+        case "counterbore":
+            hk = .counterbore(diameter: panelNum(cbDiameterText, fallback: 10),
+                              depth: panelNum(cbDepthText, fallback: 3))
+        case "countersink":
+            hk = .countersink(angleDegrees: panelNum(csAngleText, fallback: 90))
+        default:
+            hk = .simple
+        }
+        return .hole(sketchID: sketchID,
+                     diameter: panelNum(diameterText, fallback: 6),
+                     depth: through ? 0 : panelNum(depthText, fallback: 10),
+                     kind: hk)
+    }
+
+    private var draftSignature: String {
+        "\(sketchID)|\(diameterText)|\(through)|\(depthText)|\(kindChoice)|\(cbDiameterText)|\(cbDepthText)|\(csAngleText)"
+    }
+
+    private func refreshDraft() {
+        if sketches.isEmpty {
+            model.setDraft(nil)
+        } else if usesGenerated, let gen = generatedSketch {
+            model.draftAppendWithSketches((model.part?.sketches ?? []) + [gen],
+                                          Feature(name: "Hole", kind: candidateKind))
+        } else {
+            model.draftAppend(Feature(name: "Hole", kind: candidateKind))
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -1098,6 +1261,9 @@ struct HolePanel: View {
                 PanelNote(text: "There is no sketch yet. Holes drill at the points and circle centers of a sketch.", warning: true)
             } else {
                 PanelSketchPicker(label: "Drill-point sketch", sketches: sketches, selection: $sketchID)
+            }
+            if usesGenerated {
+                PanelNote(text: "The drill-point sketch “Hole point (auto)” is created with the hole.")
             }
             PanelNumberRow(label: "Diameter (mm)", text: $diameterText)
             Toggle("Through (all the way)", isOn: $through)
@@ -1121,26 +1287,19 @@ struct HolePanel: View {
             if kindChoice == "countersink" {
                 PanelNumberRow(label: "Sink angle (degrees)", text: $csAngleText)
             }
+            PanelDraftError(model: model)
             PanelOKBar(okEnabled: !sketches.isEmpty, onOK: apply, onCancel: close)
         }
+        .onAppear { refreshDraft() }
+        .onChange(of: draftSignature) { _, _ in refreshDraft() }
     }
 
     private func apply() {
-        let hk: HoleKind
-        switch kindChoice {
-        case "counterbore":
-            hk = .counterbore(diameter: panelNum(cbDiameterText, fallback: 10),
-                              depth: panelNum(cbDepthText, fallback: 3))
-        case "countersink":
-            hk = .countersink(angleDegrees: panelNum(csAngleText, fallback: 90))
-        default:
-            hk = .simple
+        if usesGenerated, let gen = generatedSketch {
+            model.addGeneratedSketch(gen)
         }
-        model.appendFeature(name: "Hole",
-                            kind: .hole(sketchID: sketchID,
-                                        diameter: panelNum(diameterText, fallback: 6),
-                                        depth: through ? 0 : panelNum(depthText, fallback: 10),
-                                        kind: hk))
+        model.appendFeature(name: "Hole", kind: candidateKind)
+        model.setDraft(nil)
         close()
     }
 }
@@ -1164,6 +1323,18 @@ struct LoftPanel: View {
 
     private var sketches: [Sketch] { model.featureSketches }
 
+    private var candidateKind: FeatureKind { .loft(sketchA: sketchA, sketchB: sketchB) }
+
+    private var draftSignature: String { "\(sketchA)|\(sketchB)" }
+
+    private func refreshDraft() {
+        if sketches.count >= 2 && sketchA != sketchB {
+            model.draftAppend(Feature(name: "Loft", kind: candidateKind))
+        } else {
+            model.setDraft(nil)
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             if sketches.count < 2 {
@@ -1172,12 +1343,16 @@ struct LoftPanel: View {
             PanelSketchPicker(label: "First profile", sketches: sketches, selection: $sketchA)
             PanelSketchPicker(label: "Second profile", sketches: sketches, selection: $sketchB)
             PanelNote(text: "Blends the first closed profile into the second. Both need the same number of corners.")
+            PanelDraftError(model: model)
             PanelOKBar(okEnabled: sketches.count >= 2 && sketchA != sketchB, onOK: apply, onCancel: close)
         }
+        .onAppear { refreshDraft() }
+        .onChange(of: draftSignature) { _, _ in refreshDraft() }
     }
 
     private func apply() {
-        model.appendFeature(name: "Loft", kind: .loft(sketchA: sketchA, sketchB: sketchB))
+        model.appendFeature(name: "Loft", kind: candidateKind)
+        model.setDraft(nil)
         close()
     }
 }
@@ -1199,6 +1374,20 @@ struct SweepPanel: View {
 
     private var sketches: [Sketch] { model.featureSketches }
 
+    private var candidateKind: FeatureKind {
+        .sweep(profileSketchID: profileID, pathSketchID: pathID)
+    }
+
+    private var draftSignature: String { "\(profileID)|\(pathID)" }
+
+    private func refreshDraft() {
+        if sketches.count >= 2 && profileID != pathID {
+            model.draftAppend(Feature(name: "Sweep", kind: candidateKind))
+        } else {
+            model.setDraft(nil)
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             if sketches.count < 2 {
@@ -1207,13 +1396,16 @@ struct SweepPanel: View {
             PanelSketchPicker(label: "Profile sketch", sketches: sketches, selection: $profileID)
             PanelSketchPicker(label: "Path sketch", sketches: sketches, selection: $pathID)
             PanelNote(text: "The profile is swept along the path's connected lines.")
+            PanelDraftError(model: model)
             PanelOKBar(okEnabled: sketches.count >= 2 && profileID != pathID, onOK: apply, onCancel: close)
         }
+        .onAppear { refreshDraft() }
+        .onChange(of: draftSignature) { _, _ in refreshDraft() }
     }
 
     private func apply() {
-        model.appendFeature(name: "Sweep",
-                            kind: .sweep(profileSketchID: profileID, pathSketchID: pathID))
+        model.appendFeature(name: "Sweep", kind: candidateKind)
+        model.setDraft(nil)
         close()
     }
 }
@@ -1268,14 +1460,43 @@ struct PrimitivePanel: View {
         }
     }
 
+    private var candidateKind: FeatureKind {
+        var params: [String: Double] = [:]
+        for key in Self.keys(kind) {
+            params[key] = panelNum(values[key] ?? "", fallback: Self.defaults(kind)[key] ?? 10)
+        }
+        return .primitive(kind: kind, params: params)
+    }
+
+    private var candidateName: String {
+        switch kind {
+        case .box: return "Box"
+        case .cylinder: return "Cylinder"
+        case .sphere: return "Sphere"
+        case .cone: return "Cone"
+        case .torus: return "Torus"
+        }
+    }
+
+    private var draftSignature: String {
+        Self.keys(kind).map { "\($0)=\(values[$0] ?? "")" }.joined(separator: "|")
+    }
+
+    private func refreshDraft() {
+        model.draftAppend(Feature(name: candidateName, kind: candidateKind))
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             ForEach(Self.keys(kind), id: \.self) { key in
                 PanelNumberRow(label: Self.label(key), text: binding(for: key))
             }
             PanelNote(text: "Built at the origin: boxes and cylinders rise from the XY plane, spheres and toruses are centered on it.")
+            PanelDraftError(model: model)
             PanelOKBar(okTitle: "Create", onOK: apply, onCancel: close)
         }
+        .onAppear { refreshDraft() }
+        .onChange(of: draftSignature) { _, _ in refreshDraft() }
     }
 
     private func binding(for key: String) -> Binding<String> {
@@ -1283,19 +1504,8 @@ struct PrimitivePanel: View {
     }
 
     private func apply() {
-        var params: [String: Double] = [:]
-        for key in Self.keys(kind) {
-            params[key] = panelNum(values[key] ?? "", fallback: Self.defaults(kind)[key] ?? 10)
-        }
-        let name: String
-        switch kind {
-        case .box: name = "Box"
-        case .cylinder: name = "Cylinder"
-        case .sphere: name = "Sphere"
-        case .cone: name = "Cone"
-        case .torus: name = "Torus"
-        }
-        model.appendFeature(name: name, kind: .primitive(kind: kind, params: params))
+        model.appendFeature(name: candidateName, kind: candidateKind)
+        model.setDraft(nil)
         close()
     }
 }
@@ -1311,9 +1521,34 @@ struct FilletPanel: View {
     @State private var tooLargeMax: Double?
     @State private var sharpEdgeCount: Int?
 
+    private var candidateKind: FeatureKind {
+        .fillet(radius: panelNum(radiusText, fallback: 2))
+    }
+
+    /// Before OK the draft is an appended fillet; once the panel has
+    /// created its feature (the FT408 stay-open flow), the draft
+    /// replaces that feature in place instead.
+    private func refreshDraft() {
+        if let id = createdFeatureID,
+           let idx = model.part?.features.firstIndex(where: { $0.id == id }) {
+            model.draftReplacing(index: idx,
+                                 with: Feature(id: id, name: "Fillet", kind: candidateKind))
+        } else {
+            model.draftAppend(Feature(name: "Fillet", kind: candidateKind))
+        }
+    }
+
+    /// Slider ⇄ text field binding for scrubbing the radius live.
+    private var radiusValue: Binding<Double> {
+        Binding(get: { panelNum(radiusText, fallback: 2) },
+                set: { radiusText = mcFmt($0) })
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             PanelNumberRow(label: "Radius (mm)", text: $radiusText)
+            Slider(value: radiusValue, in: 0.5...20, step: 0.5)
+                .accessibilityLabel("Fillet radius")
             if let n = sharpEdgeCount {
                 PanelNote(text: "The body built so far has \(n) sharp edge\(n == 1 ? "" : "s") — a fillet rounds all of them.")
             } else {
@@ -1330,13 +1565,16 @@ struct FilletPanel: View {
                 .padding(.vertical, 10)
                 .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.10)))
             }
+            PanelDraftError(model: model)
             PanelOKBar(okTitle: createdFeatureID == nil ? "OK" : "Apply", onOK: apply, onCancel: close)
         }
         .onAppear {
             if let mesh = model.rebuild?.mesh, mesh.triangleCount > 0 {
                 sharpEdgeCount = SolidEdgeExtractor.edges(of: mesh).count
             }
+            refreshDraft()
         }
+        .onChange(of: radiusText) { _, _ in refreshDraft() }
     }
 
     private func apply() {
@@ -1356,8 +1594,10 @@ struct FilletPanel: View {
            let err = model.rebuild?.firstError,
            case .filletRadiusTooLarge(_, let maxFeasible) = err {
             tooLargeMax = maxFeasible
+            refreshDraft()
             return
         }
+        model.setDraft(nil)
         close()
     }
 }
@@ -1371,6 +1611,27 @@ struct ChamferPanel: View {
     @State private var distanceText = "2"
     @State private var distanceBText = "1"
     @State private var angleText = "45"
+
+    private var candidateKind: FeatureKind {
+        let mode: ChamferMode
+        switch modeChoice {
+        case "two":
+            mode = .twoDistances(panelNum(distanceText, fallback: 2),
+                                 panelNum(distanceBText, fallback: 1))
+        case "angle":
+            mode = .distanceAngle(panelNum(distanceText, fallback: 2),
+                                  panelNum(angleText, fallback: 45))
+        default:
+            mode = .equal(panelNum(distanceText, fallback: 2))
+        }
+        return .chamfer2(mode: mode)
+    }
+
+    private var draftSignature: String { "\(modeChoice)|\(distanceText)|\(distanceBText)|\(angleText)" }
+
+    private func refreshDraft() {
+        model.draftAppend(Feature(name: "Chamfer", kind: candidateKind))
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -1396,23 +1657,16 @@ struct ChamferPanel: View {
                 PanelNumberRow(label: "Angle (degrees)", text: $angleText)
                 PanelNote(text: "The bevel runs this far along the first face of each edge, tilted at the angle from that face.")
             }
+            PanelDraftError(model: model)
             PanelOKBar(onOK: apply, onCancel: close)
         }
+        .onAppear { refreshDraft() }
+        .onChange(of: draftSignature) { _, _ in refreshDraft() }
     }
 
     private func apply() {
-        let mode: ChamferMode
-        switch modeChoice {
-        case "two":
-            mode = .twoDistances(panelNum(distanceText, fallback: 2),
-                                 panelNum(distanceBText, fallback: 1))
-        case "angle":
-            mode = .distanceAngle(panelNum(distanceText, fallback: 2),
-                                  panelNum(angleText, fallback: 45))
-        default:
-            mode = .equal(panelNum(distanceText, fallback: 2))
-        }
-        model.appendFeature(name: "Chamfer", kind: .chamfer2(mode: mode))
+        model.appendFeature(name: "Chamfer", kind: candidateKind)
+        model.setDraft(nil)
         close()
     }
 }
@@ -1422,17 +1676,28 @@ struct ShellPanel: View {
     let close: () -> Void
     @State private var thicknessText = "2"
 
+    private var candidateKind: FeatureKind {
+        .shell(thickness: panelNum(thicknessText, fallback: 2))
+    }
+
+    private func refreshDraft() {
+        model.draftAppend(Feature(name: "Shell", kind: candidateKind))
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             PanelNumberRow(label: "Wall thickness (mm)", text: $thicknessText)
             PanelNote(text: "Hollows the body built so far, leaving walls of this thickness — like turning a block into an open box.")
+            PanelDraftError(model: model)
             PanelOKBar(onOK: apply, onCancel: close)
         }
+        .onAppear { refreshDraft() }
+        .onChange(of: thicknessText) { _, _ in refreshDraft() }
     }
 
     private func apply() {
-        model.appendFeature(name: "Shell",
-                            kind: .shell(thickness: panelNum(thicknessText, fallback: 2)))
+        model.appendFeature(name: "Shell", kind: candidateKind)
+        model.setDraft(nil)
         close()
     }
 }
@@ -1441,6 +1706,12 @@ struct MirrorPanel: View {
     @ObservedObject var model: EditorModel
     let close: () -> Void
     @State private var plane: MirrorPlane = .yz
+
+    private var candidateKind: FeatureKind { .mirror(plane: plane) }
+
+    private func refreshDraft() {
+        model.draftAppend(Feature(name: "Mirror", kind: candidateKind))
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -1454,12 +1725,16 @@ struct MirrorPanel: View {
             }
             .pickerStyle(.segmented)
             PanelNote(text: "Duplicates the body built so far, mirrored across the chosen base plane, and joins the two halves.")
+            PanelDraftError(model: model)
             PanelOKBar(onOK: apply, onCancel: close)
         }
+        .onAppear { refreshDraft() }
+        .onChange(of: plane) { _, _ in refreshDraft() }
     }
 
     private func apply() {
-        model.appendFeature(name: "Mirror", kind: .mirror(plane: plane))
+        model.appendFeature(name: "Mirror", kind: candidateKind)
+        model.setDraft(nil)
         close()
     }
 }
@@ -1472,6 +1747,19 @@ struct PatternPanel: View {
     @State private var spacingY = "0"
     @State private var spacingZ = "0"
 
+    private var candidateKind: FeatureKind {
+        .linearPattern(count: count,
+                       spacing: Vec3(panelNum(spacingX, fallback: 15),
+                                     panelNum(spacingY, fallback: 0),
+                                     panelNum(spacingZ, fallback: 0)))
+    }
+
+    private var draftSignature: String { "\(count)|\(spacingX)|\(spacingY)|\(spacingZ)" }
+
+    private func refreshDraft() {
+        model.draftAppend(Feature(name: "Linear Pattern", kind: candidateKind))
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Stepper("Copies: \(count)", value: $count, in: 1...24)
@@ -1480,16 +1768,16 @@ struct PatternPanel: View {
             PanelNumberRow(label: "Spacing Y (mm)", text: $spacingY)
             PanelNumberRow(label: "Spacing Z (mm)", text: $spacingZ)
             PanelNote(text: "Repeats the whole body built so far — copy 1 is the original, each next copy steps by the spacing.")
+            PanelDraftError(model: model)
             PanelOKBar(onOK: apply, onCancel: close)
         }
+        .onAppear { refreshDraft() }
+        .onChange(of: draftSignature) { _, _ in refreshDraft() }
     }
 
     private func apply() {
-        model.appendFeature(name: "Linear Pattern",
-                            kind: .linearPattern(count: count,
-                                                 spacing: Vec3(panelNum(spacingX, fallback: 15),
-                                                               panelNum(spacingY, fallback: 0),
-                                                               panelNum(spacingZ, fallback: 0))))
+        model.appendFeature(name: "Linear Pattern", kind: candidateKind)
+        model.setDraft(nil)
         close()
     }
 }
@@ -1504,6 +1792,19 @@ struct CoilPanel: View {
     @State private var turnsText = "5"
     @State private var wireText = "2"
 
+    private var candidateKind: FeatureKind {
+        .coil(radius: panelNum(radiusText, fallback: 15),
+              pitch: panelNum(pitchText, fallback: 8),
+              turns: panelNum(turnsText, fallback: 5),
+              wireRadius: panelNum(wireText, fallback: 2))
+    }
+
+    private var draftSignature: String { "\(radiusText)|\(pitchText)|\(turnsText)|\(wireText)" }
+
+    private func refreshDraft() {
+        model.draftAppend(Feature(name: "Coil", kind: candidateKind))
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             PanelNumberRow(label: "Coil radius (mm)", text: $radiusText)
@@ -1511,16 +1812,16 @@ struct CoilPanel: View {
             PanelNumberRow(label: "Turns", text: $turnsText)
             PanelNumberRow(label: "Wire radius (mm)", text: $wireText)
             PanelNote(text: "A spring: wire wound in a helix. It starts at the origin and winds around the Z axis, rising by the pitch each turn.")
+            PanelDraftError(model: model)
             PanelOKBar(okTitle: "Create", onOK: apply, onCancel: close)
         }
+        .onAppear { refreshDraft() }
+        .onChange(of: draftSignature) { _, _ in refreshDraft() }
     }
 
     private func apply() {
-        model.appendFeature(name: "Coil",
-                            kind: .coil(radius: panelNum(radiusText, fallback: 15),
-                                        pitch: panelNum(pitchText, fallback: 8),
-                                        turns: panelNum(turnsText, fallback: 5),
-                                        wireRadius: panelNum(wireText, fallback: 2)))
+        model.appendFeature(name: "Coil", kind: candidateKind)
+        model.setDraft(nil)
         close()
     }
 }
@@ -1532,13 +1833,25 @@ struct PipePanel: View {
     @State private var pathID: String
     @State private var radiusText = "4"
 
-    init(model: EditorModel, close: @escaping () -> Void) {
+    init(model: EditorModel, initialSketchID: String? = nil, close: @escaping () -> Void) {
         _model = ObservedObject(wrappedValue: model)
         self.close = close
-        _pathID = State(initialValue: model.featureSketches.first?.id ?? "")
+        _pathID = State(initialValue: initialSketchID ?? model.featureSketches.first?.id ?? "")
     }
 
     private var sketches: [Sketch] { model.featureSketches }
+
+    private var candidateKind: FeatureKind {
+        .pipe(pathSketchID: pathID, radius: panelNum(radiusText, fallback: 4))
+    }
+
+    private var draftSignature: String { "\(pathID)|\(radiusText)" }
+
+    private func refreshDraft() {
+        if sketches.isEmpty { model.setDraft(nil) } else {
+            model.draftAppend(Feature(name: "Pipe", kind: candidateKind))
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -1549,14 +1862,16 @@ struct PipePanel: View {
             }
             PanelNumberRow(label: "Pipe radius (mm)", text: $radiusText)
             PanelNote(text: "A round tube swept along the path — the profile is automatic, perpendicular to the path's start.")
+            PanelDraftError(model: model)
             PanelOKBar(okEnabled: !sketches.isEmpty, onOK: apply, onCancel: close)
         }
+        .onAppear { refreshDraft() }
+        .onChange(of: draftSignature) { _, _ in refreshDraft() }
     }
 
     private func apply() {
-        model.appendFeature(name: "Pipe",
-                            kind: .pipe(pathSketchID: pathID,
-                                        radius: panelNum(radiusText, fallback: 4)))
+        model.appendFeature(name: "Pipe", kind: candidateKind)
+        model.setDraft(nil)
         close()
     }
 }
@@ -1569,13 +1884,27 @@ struct RibPanel: View {
     @State private var thicknessText = "3"
     @State private var depthText = "12"
 
-    init(model: EditorModel, close: @escaping () -> Void) {
+    init(model: EditorModel, initialSketchID: String? = nil, close: @escaping () -> Void) {
         _model = ObservedObject(wrappedValue: model)
         self.close = close
-        _sketchID = State(initialValue: model.featureSketches.first?.id ?? "")
+        _sketchID = State(initialValue: initialSketchID ?? model.featureSketches.first?.id ?? "")
     }
 
     private var sketches: [Sketch] { model.featureSketches }
+
+    private var candidateKind: FeatureKind {
+        .rib(sketchID: sketchID,
+             thickness: panelNum(thicknessText, fallback: 3),
+             depth: panelNum(depthText, fallback: 12))
+    }
+
+    private var draftSignature: String { "\(sketchID)|\(thicknessText)|\(depthText)" }
+
+    private func refreshDraft() {
+        if sketches.isEmpty { model.setDraft(nil) } else {
+            model.draftAppend(Feature(name: "Rib", kind: candidateKind))
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -1587,15 +1916,16 @@ struct RibPanel: View {
             PanelNumberRow(label: "Thickness (mm)", text: $thicknessText)
             PanelNumberRow(label: "Depth into body (mm)", text: $depthText)
             PanelNote(text: "A thin reinforcing wall grown from the profile line, extending toward the body. It is trimmed approximately at curved surfaces — exact against flat ones.")
+            PanelDraftError(model: model)
             PanelOKBar(okEnabled: !sketches.isEmpty, onOK: apply, onCancel: close)
         }
+        .onAppear { refreshDraft() }
+        .onChange(of: draftSignature) { _, _ in refreshDraft() }
     }
 
     private func apply() {
-        model.appendFeature(name: "Rib",
-                            kind: .rib(sketchID: sketchID,
-                                       thickness: panelNum(thicknessText, fallback: 3),
-                                       depth: panelNum(depthText, fallback: 12)))
+        model.appendFeature(name: "Rib", kind: candidateKind)
+        model.setDraft(nil)
         close()
     }
 }
@@ -1608,6 +1938,17 @@ struct CircularPatternPanel: View {
     @State private var count = 6
     @State private var axis = 2
     @State private var totalText = "360"
+
+    private var candidateKind: FeatureKind {
+        .circularPattern(count: count, axis: axis,
+                         totalDegrees: panelNum(totalText, fallback: 360))
+    }
+
+    private var draftSignature: String { "\(count)|\(axis)|\(totalText)" }
+
+    private func refreshDraft() {
+        model.draftAppend(Feature(name: "Circular Pattern", kind: candidateKind))
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -1625,14 +1966,16 @@ struct CircularPatternPanel: View {
             .mcFont(20, weight: .semibold)
             PanelNumberRow(label: "Total angle (degrees)", text: $totalText)
             PanelNote(text: "Repeats the whole body built so far around the axis through the body's center — copy 1 is the original; 360° spreads the copies evenly all the way around.")
+            PanelDraftError(model: model)
             PanelOKBar(onOK: apply, onCancel: close)
         }
+        .onAppear { refreshDraft() }
+        .onChange(of: draftSignature) { _, _ in refreshDraft() }
     }
 
     private func apply() {
-        model.appendFeature(name: "Circular Pattern",
-                            kind: .circularPattern(count: count, axis: axis,
-                                                   totalDegrees: panelNum(totalText, fallback: 360)))
+        model.appendFeature(name: "Circular Pattern", kind: candidateKind)
+        model.setDraft(nil)
         close()
     }
 }
@@ -1642,6 +1985,16 @@ struct DraftPanel: View {
     let close: () -> Void
     @State private var angleText = "3"
     @State private var axis = 2
+
+    private var candidateKind: FeatureKind {
+        .draftBody(angleDegrees: panelNum(angleText, fallback: 3), pullAxis: axis)
+    }
+
+    private var draftSignature: String { "\(angleText)|\(axis)" }
+
+    private func refreshDraft() {
+        model.draftAppend(Feature(name: "Draft", kind: candidateKind))
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -1657,14 +2010,16 @@ struct DraftPanel: View {
             .pickerStyle(.segmented)
             .mcFont(20, weight: .semibold)
             PanelNote(text: "Mold-release taper: a positive angle narrows the body toward the top of the pull axis, measured from its base. Between −30° and 30°.")
+            PanelDraftError(model: model)
             PanelOKBar(onOK: apply, onCancel: close)
         }
+        .onAppear { refreshDraft() }
+        .onChange(of: draftSignature) { _, _ in refreshDraft() }
     }
 
     private func apply() {
-        model.appendFeature(name: "Draft",
-                            kind: .draftBody(angleDegrees: panelNum(angleText, fallback: 3),
-                                             pullAxis: axis))
+        model.appendFeature(name: "Draft", kind: candidateKind)
+        model.setDraft(nil)
         close()
     }
 }
@@ -1676,6 +2031,18 @@ struct ScalePanel: View {
     @State private var fy = "1"
     @State private var fz = "1"
     @State private var uniform = true
+
+    private var candidateKind: FeatureKind {
+        .scaleBody(factors: Vec3(panelNum(fx, fallback: 1),
+                                 panelNum(fy, fallback: 1),
+                                 panelNum(fz, fallback: 1)))
+    }
+
+    private var draftSignature: String { "\(fx)|\(fy)|\(fz)" }
+
+    private func refreshDraft() {
+        model.draftAppend(Feature(name: "Scale", kind: candidateKind))
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -1690,15 +2057,16 @@ struct ScalePanel: View {
                 PanelNumberRow(label: "Factor Z", text: $fz)
             }
             PanelNote(text: "Scales the body built so far about its center — 2 doubles every size, 0.5 halves it.")
+            PanelDraftError(model: model)
             PanelOKBar(onOK: apply, onCancel: close)
         }
+        .onAppear { refreshDraft() }
+        .onChange(of: draftSignature) { _, _ in refreshDraft() }
     }
 
     private func apply() {
-        model.appendFeature(name: "Scale",
-                            kind: .scaleBody(factors: Vec3(panelNum(fx, fallback: 1),
-                                                           panelNum(fy, fallback: 1),
-                                                           panelNum(fz, fallback: 1))))
+        model.appendFeature(name: "Scale", kind: candidateKind)
+        model.setDraft(nil)
         close()
     }
 }
@@ -1711,6 +2079,20 @@ struct MoveBodyPanel: View {
     @State private var tz = "0"
     @State private var axis = 2
     @State private var degreesText = "0"
+
+    private var candidateKind: FeatureKind {
+        .moveBody(translation: Vec3(panelNum(tx, fallback: 0),
+                                    panelNum(ty, fallback: 0),
+                                    panelNum(tz, fallback: 0)),
+                  rotationAxis: axis,
+                  rotationDegrees: panelNum(degreesText, fallback: 0))
+    }
+
+    private var draftSignature: String { "\(tx)|\(ty)|\(tz)|\(axis)|\(degreesText)" }
+
+    private func refreshDraft() {
+        model.draftAppend(Feature(name: "Move Body", kind: candidateKind))
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -1729,17 +2111,16 @@ struct MoveBodyPanel: View {
             .mcFont(20, weight: .semibold)
             PanelNumberRow(label: "Rotation (degrees)", text: $degreesText)
             PanelNote(text: "Moves the whole body built so far, then rotates it around the chosen axis through its center. Rotation 0 just moves it.")
+            PanelDraftError(model: model)
             PanelOKBar(onOK: apply, onCancel: close)
         }
+        .onAppear { refreshDraft() }
+        .onChange(of: draftSignature) { _, _ in refreshDraft() }
     }
 
     private func apply() {
-        model.appendFeature(name: "Move Body",
-                            kind: .moveBody(translation: Vec3(panelNum(tx, fallback: 0),
-                                                              panelNum(ty, fallback: 0),
-                                                              panelNum(tz, fallback: 0)),
-                                            rotationAxis: axis,
-                                            rotationDegrees: panelNum(degreesText, fallback: 0)))
+        model.appendFeature(name: "Move Body", kind: candidateKind)
+        model.setDraft(nil)
         close()
     }
 }
@@ -1802,5 +2183,448 @@ struct SplitBodyPanel: View {
                             kind: .splitBody(axis: axis,
                                              offset: panelNum(offsetText, fallback: 0)))
         close()
+    }
+}
+
+// MARK: - Selection-first panels (opened from the picked-action bar)
+
+/// Build the drill-point sketch for Face → "Hole Here…": one point on
+/// the face's plane, exactly under the tapped spot (plane-local
+/// coordinates). The Hole panel drafts with it and commits it with
+/// the hole.
+func mcHolePointSketch(face: PlanarFace, point: Vec3) -> Sketch {
+    let plane = face.plane
+    let rel = point - plane.origin
+    var sketch = Sketch(name: "Hole point (auto)", plane: plane)
+    sketch.addPoint(Vec2(rel.dot(plane.xAxis), rel.dot(plane.yAxis)))
+    return sketch
+}
+
+/// Build the outline sketch for Face → "Pull Face…". Join: the face
+/// outline on the face's own plane, extruded outward along the face
+/// normal. Cut: the SAME outline on a flipped plane (axes swapped →
+/// normal points INTO the body), so a one-sided extrude cuts inward.
+func mcFacePullSketch(id: String, face: PlanarFace, cut: Bool) -> Sketch {
+    let points = dropCollinear(face.outline2D)
+    let plane: Plane3
+    let outline: [Vec2]
+    if cut {
+        plane = Plane3(origin: face.plane.origin,
+                       xAxis: face.plane.yAxis, yAxis: face.plane.xAxis)
+        outline = points.map { Vec2($0.y, $0.x) }
+    } else {
+        plane = face.plane
+        outline = points
+    }
+    var sketch = Sketch(id: id, name: "Face pull (auto)", plane: plane)
+    guard outline.count >= 3 else { return sketch }
+    for i in outline.indices {
+        sketch.addLine(outline[i], outline[(i + 1) % outline.count])
+    }
+    return sketch
+}
+
+/// Pull a picked face straight out (or cut it straight in) along its
+/// normal. The feature is an extrude2 on a generated outline sketch
+/// of the face; drafts inject the (not yet committed) sketch into the
+/// preview part, and Apply commits the sketch + feature together.
+struct PullFacePanel: View {
+    @ObservedObject var model: EditorModel
+    let close: () -> Void
+
+    /// The face picked when the panel was opened (snapshot).
+    private let face: PlanarFace?
+    /// Stable id for the generated outline sketch (created once for
+    /// the life of the panel — NOT regenerated per view update).
+    @State private var scratchID: String = UUID().uuidString
+    @State private var distanceText: String = "10"
+    @State private var operation: String = "join"
+
+    init(model: EditorModel, close: @escaping () -> Void) {
+        _model = ObservedObject(wrappedValue: model)
+        self.close = close
+        if case .face(_, let f, _) = model.picked { face = f } else { face = nil }
+    }
+
+    private var candidateSketch: Sketch? {
+        guard let face else { return nil }
+        return mcFacePullSketch(id: scratchID, face: face, cut: operation == "cut")
+    }
+
+    private var candidateKind: FeatureKind? {
+        guard candidateSketch != nil else { return nil }
+        return .extrude2(sketchID: scratchID,
+                         distance: panelNum(distanceText, fallback: 10),
+                         taperDegrees: 0,
+                         mode: .one,
+                         operation: operation == "cut" ? .cut : .join,
+                         end: .dimension)
+    }
+
+    private var draftSignature: String { "\(distanceText)|\(operation)" }
+
+    private func refreshDraft() {
+        guard let kind = candidateKind, let sketch = candidateSketch else {
+            model.setDraft(nil)
+            return
+        }
+        model.draftAppendWithSketches((model.part?.sketches ?? []) + [sketch],
+                                      Feature(name: "Face pull", kind: kind))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if face == nil {
+                PanelNote(text: "No face is selected. Tap a flat face of the model, then choose Pull Face.", warning: true)
+            } else {
+                Text("Direction")
+                    .mcFont(17, weight: .semibold)
+                    .foregroundStyle(.secondary)
+                Picker("Direction", selection: $operation) {
+                    Text("Out (add)").tag("join")
+                    Text("In (cut)").tag("cut")
+                }
+                .pickerStyle(.segmented)
+                PanelNumberRow(label: "Distance (mm)", text: $distanceText)
+                Slider(value: Binding(
+                    get: { min(max(panelNum(distanceText, fallback: 10), 1), 200) },
+                    set: { distanceText = mcFmt($0) }
+                ), in: 1...200, step: 0.5)
+                PanelNote(text: "The preview shows the result live. The face outline is saved as a sketch named “Face pull (auto)” when you tap OK.")
+                PanelDraftError(model: model)
+            }
+            PanelOKBar(okEnabled: candidateKind != nil && panelNum(distanceText, fallback: 0) > 0,
+                       onOK: apply, onCancel: close)
+        }
+        .onAppear { refreshDraft() }
+        .onChange(of: draftSignature) { _, _ in refreshDraft() }
+    }
+
+    private func apply() {
+        guard let kind = candidateKind, let sketch = candidateSketch else { return }
+        model.addGeneratedSketch(sketch)
+        model.appendFeature(name: "Face pull", kind: kind)
+        model.setDraft(nil)
+        close()
+    }
+}
+
+/// Fillet exactly the one picked edge (ribbon Fillet rounds all
+/// sharp edges; this panel rounds just this one).
+struct FilletEdgePanel: View {
+    @ObservedObject var model: EditorModel
+    let close: () -> Void
+
+    private let midpoint: Vec3?
+    private let edgeLength: Double
+
+    @State private var radiusText: String = "2"
+
+    init(model: EditorModel, close: @escaping () -> Void) {
+        _model = ObservedObject(wrappedValue: model)
+        self.close = close
+        if case .edge(let mid, _, _, let len) = model.picked {
+            midpoint = mid
+            edgeLength = len
+        } else {
+            midpoint = nil
+            edgeLength = 0
+        }
+    }
+
+    private var candidateKind: FeatureKind? {
+        guard let mid = midpoint else { return nil }
+        return .filletEdges(radius: panelNum(radiusText, fallback: 2), midpoints: [mid])
+    }
+
+    private var draftSignature: String { radiusText }
+
+    private func refreshDraft() {
+        guard let kind = candidateKind else { model.setDraft(nil); return }
+        model.draftAppend(Feature(name: "Fillet edge", kind: kind))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if midpoint == nil {
+                PanelNote(text: "No edge is selected. Tap an edge of the model, then choose Fillet This Edge.", warning: true)
+            } else {
+                PanelNote(text: "Edge length \(mcFmt(edgeLength)) mm — only this edge is filleted.")
+                PanelNumberRow(label: "Radius (mm)", text: $radiusText)
+                Slider(value: Binding(
+                    get: { min(max(panelNum(radiusText, fallback: 2), 0.5), 20) },
+                    set: { radiusText = mcFmt($0) }
+                ), in: 0.5...20, step: 0.25)
+                PanelDraftError(model: model)
+            }
+            PanelOKBar(okEnabled: candidateKind != nil && panelNum(radiusText, fallback: 0) > 0,
+                       onOK: apply, onCancel: close)
+        }
+        .onAppear { refreshDraft() }
+        .onChange(of: draftSignature) { _, _ in refreshDraft() }
+    }
+
+    private func apply() {
+        guard let kind = candidateKind else { return }
+        model.appendFeature(name: "Fillet edge", kind: kind)
+        model.setDraft(nil)
+        close()
+    }
+}
+
+/// Chamfer exactly the one picked edge.
+struct ChamferEdgePanel: View {
+    @ObservedObject var model: EditorModel
+    let close: () -> Void
+
+    private let midpoint: Vec3?
+    private let edgeLength: Double
+
+    @State private var distanceText: String = "2"
+
+    init(model: EditorModel, close: @escaping () -> Void) {
+        _model = ObservedObject(wrappedValue: model)
+        self.close = close
+        if case .edge(let mid, _, _, let len) = model.picked {
+            midpoint = mid
+            edgeLength = len
+        } else {
+            midpoint = nil
+            edgeLength = 0
+        }
+    }
+
+    private var candidateKind: FeatureKind? {
+        guard let mid = midpoint else { return nil }
+        return .chamferEdges(distance: panelNum(distanceText, fallback: 2), midpoints: [mid])
+    }
+
+    private var draftSignature: String { distanceText }
+
+    private func refreshDraft() {
+        guard let kind = candidateKind else { model.setDraft(nil); return }
+        model.draftAppend(Feature(name: "Chamfer edge", kind: kind))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if midpoint == nil {
+                PanelNote(text: "No edge is selected. Tap an edge of the model, then choose Chamfer This Edge.", warning: true)
+            } else {
+                PanelNote(text: "Edge length \(mcFmt(edgeLength)) mm — only this edge is chamfered.")
+                PanelNumberRow(label: "Distance (mm)", text: $distanceText)
+                Slider(value: Binding(
+                    get: { min(max(panelNum(distanceText, fallback: 2), 0.5), 20) },
+                    set: { distanceText = mcFmt($0) }
+                ), in: 0.5...20, step: 0.25)
+                PanelDraftError(model: model)
+            }
+            PanelOKBar(okEnabled: candidateKind != nil && panelNum(distanceText, fallback: 0) > 0,
+                       onOK: apply, onCancel: close)
+        }
+        .onAppear { refreshDraft() }
+        .onChange(of: draftSignature) { _, _ in refreshDraft() }
+    }
+
+    private func apply() {
+        guard let kind = candidateKind else { return }
+        model.appendFeature(name: "Chamfer edge", kind: kind)
+        model.setDraft(nil)
+        close()
+    }
+}
+
+/// Cut threads onto exactly the picked shaft. The fields mirror the
+/// feature editor's thread editor; the spec is prefilled from the
+/// fitted cylinder: a preset within 2% of the shaft diameter wins
+/// (keeping its pitch), otherwise major = the measured diameter and
+/// the pitch comes from the nearest smaller preset.
+struct ThreadShaftPanel: View {
+    @ObservedObject var model: EditorModel
+    let close: () -> Void
+
+    private let fit: CylinderFit?
+
+    @State private var spec: ThreadSpec
+    @State private var presetName: String
+    @State private var majorText: String
+    @State private var pitchText: String
+    @State private var threadLengthText: String
+    @State private var profileAngleText: String
+    @State private var taperText: String
+    @State private var clearanceText: String
+
+    private static let presetNames = ["M3", "M4", "M5", "M6", "M8", "M10", "M12", "M16", "M20",
+                                      "1/4-20", "5/16-18", "3/8-16", "1/2-13",
+                                      "NPT 1/4", "NPT 3/8", "NPT 1/2"]
+    private static let standards: [ThreadStandard] = [.isoMetric, .unc, .npt, .custom]
+    private static let kinds: [ThreadKind] = [.external, .internal]
+    private static let hands: [ThreadHand] = [.right, .left]
+
+    init(model: EditorModel, close: @escaping () -> Void) {
+        _model = ObservedObject(wrappedValue: model)
+        self.close = close
+        var fitted: CylinderFit? = nil
+        if case .shaft(let f) = model.picked { fitted = f }
+        fit = fitted
+        var prefilled = ThreadSpec()
+        var preset = ""
+        if let f = fitted {
+            let diameter = f.radius * 2
+            prefilled = Self.prefillSpec(diameter: diameter, length: f.height)
+            preset = prefilled.presetName(diameter: diameter)
+        }
+        _spec = State(initialValue: prefilled)
+        _presetName = State(initialValue: preset)
+        _majorText = State(initialValue: mcFmt(prefilled.majorDiameter))
+        _pitchText = State(initialValue: mcFmt(prefilled.pitch))
+        _threadLengthText = State(initialValue: mcFmt(prefilled.length))
+        _profileAngleText = State(initialValue: mcFmt(prefilled.profileAngleDegrees))
+        _taperText = State(initialValue: mcFmt(prefilled.taperDegrees))
+        _clearanceText = State(initialValue: mcFmt(prefilled.clearance))
+    }
+
+    /// Prefill rule: the first preset (list order) whose major
+    /// diameter is within 2% of the shaft's measured diameter wins,
+    /// keeping its pitch; otherwise a custom external spec with
+    /// major = measured diameter and the pitch of the nearest
+    /// smaller preset. Length = the shaft's height either way.
+    private static func prefillSpec(diameter: Double, length: Double) -> ThreadSpec {
+        var bestSmaller: ThreadSpec?
+        for name in presetNames {
+            guard let p = try? ThreadSpec.preset(name) else { continue }
+            if abs(p.majorDiameter - diameter) <= 0.02 * diameter {
+                var match = p
+                match.kind = .external
+                match.length = length
+                return match
+            }
+            if p.majorDiameter < diameter,
+               bestSmaller == nil || p.majorDiameter > bestSmaller!.majorDiameter {
+                bestSmaller = p
+            }
+        }
+        var custom = ThreadSpec()
+        custom.kind = .external
+        custom.majorDiameter = diameter
+        custom.pitch = bestSmaller?.pitch ?? 1.5
+        if let smaller = bestSmaller { custom.standard = smaller.standard }
+        custom.length = length
+        return custom
+    }
+
+    private func applyPreset(_ name: String) {
+        guard let p = try? ThreadSpec.preset(name) else { return }
+        spec = p
+        spec.kind = .external
+        majorText = mcFmt(p.majorDiameter)
+        pitchText = mcFmt(p.pitch)
+        taperText = mcFmt(p.taperDegrees)
+    }
+
+    private var previewSpec: ThreadSpec {
+        var s = spec
+        s.majorDiameter = panelNum(majorText, fallback: s.majorDiameter)
+        s.pitch = panelNum(pitchText, fallback: s.pitch)
+        s.length = panelNum(threadLengthText, fallback: s.length)
+        s.profileAngleDegrees = panelNum(profileAngleText, fallback: s.profileAngleDegrees)
+        s.taperDegrees = panelNum(taperText, fallback: s.taperDegrees)
+        s.clearance = panelNum(clearanceText, fallback: s.clearance)
+        return s
+    }
+
+    private var candidateKind: FeatureKind? {
+        guard let fit else { return nil }
+        return .threadOnShaft(spec: previewSpec, origin: fit.origin, axis: fit.axis)
+    }
+
+    private var draftSignature: String {
+        [presetName, majorText, pitchText, threadLengthText, profileAngleText,
+         taperText, clearanceText, "\(spec.standard)", "\(spec.kind)", "\(spec.hand)",
+         "\(spec.starts)", "\(spec.modeled)"].joined(separator: "|")
+    }
+
+    private func refreshDraft() {
+        guard let kind = candidateKind else { model.setDraft(nil); return }
+        model.draftAppend(Feature(name: "Thread", kind: kind))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if let fit {
+                PanelNote(text: "Picked shaft: Ø \(mcFmt(fit.radius * 2)) × \(mcFmt(fit.height)) mm long. The thread starts at the shaft's low end and runs along its axis.")
+                Picker("Preset", selection: $presetName) {
+                    Text("Custom").tag("")
+                    ForEach(Self.presetNames, id: \.self) { name in
+                        Text(name).tag(name)
+                    }
+                }
+                .pickerStyle(.menu)
+                .mcFont(19, weight: .semibold)
+                .onChange(of: presetName) { _, name in
+                    if !name.isEmpty { applyPreset(name) }
+                }
+                PanelNumberRow(label: "Major Ø (mm)", text: $majorText)
+                PanelNumberRow(label: "Pitch (mm)", text: $pitchText)
+                PanelNumberRow(label: "Length (mm)", text: $threadLengthText)
+                Stepper(value: $spec.starts, in: 1...4) {
+                    Text("Starts: \(spec.starts)").mcFont(19)
+                }
+                PanelNumberRow(label: "Profile angle (°)", text: $profileAngleText)
+                PanelNumberRow(label: "Taper (°) — NPT ≈ 1.79", text: $taperText)
+                PanelNumberRow(label: "Clearance (mm)", text: $clearanceText)
+                Picker("Standard", selection: $spec.standard) {
+                    ForEach(Self.standards, id: \.self) { s in Text("\(s)").tag(s) }
+                }
+                .pickerStyle(.menu)
+                .mcFont(19)
+                Picker("Kind", selection: $spec.kind) {
+                    ForEach(Self.kinds, id: \.self) { k in Text("\(k)").tag(k) }
+                }
+                .pickerStyle(.menu)
+                .mcFont(19)
+                Picker("Hand", selection: $spec.hand) {
+                    ForEach(Self.hands, id: \.self) { h in Text("\(h)").tag(h) }
+                }
+                .pickerStyle(.menu)
+                .mcFont(19)
+                Toggle("Modeled thread (real geometry)", isOn: $spec.modeled)
+                    .mcFont(19)
+                Text("Minor Ø \(mcFmt(previewSpec.minorDiameter)) · Pitch Ø \(mcFmt(previewSpec.pitchDiameter))")
+                    .mcFont(16)
+                    .foregroundStyle(.secondary)
+                PanelDraftError(model: model)
+            } else {
+                PanelNote(text: "No shaft is selected. Tap a round shaft on the model, then choose Thread This Shaft.", warning: true)
+            }
+            PanelOKBar(okEnabled: candidateKind != nil, onOK: apply, onCancel: close)
+        }
+        .onAppear { refreshDraft() }
+        .onChange(of: draftSignature) { _, _ in refreshDraft() }
+    }
+
+    private func apply() {
+        guard let kind = candidateKind else { return }
+        model.appendFeature(name: "Thread", kind: kind)
+        model.setDraft(nil)
+        close()
+    }
+}
+
+private extension ThreadSpec {
+    /// The preset used to prefill this spec, if the diameter match
+    /// that produced it still holds (major within 2% of the shaft).
+    func presetName(diameter: Double) -> String {
+        for name in ["M3", "M4", "M5", "M6", "M8", "M10", "M12", "M16", "M20",
+                     "1/4-20", "5/16-18", "3/8-16", "1/2-13",
+                     "NPT 1/4", "NPT 3/8", "NPT 1/2"] {
+            guard let p = try? ThreadSpec.preset(name) else { continue }
+            if abs(p.majorDiameter - diameter) <= 0.02 * diameter,
+               abs(p.majorDiameter - majorDiameter) < 1e-9,
+               abs(p.pitch - pitch) < 1e-9 {
+                return name
+            }
+        }
+        return ""
     }
 }

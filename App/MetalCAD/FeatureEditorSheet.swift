@@ -50,11 +50,11 @@ struct MaterialPickerSheet: View {
     }
 }
 
-// MARK: - Feature editor (every parameter editable, all 25 kinds)
+// MARK: - Feature editor (every parameter editable, all 28 kinds)
 
 /// Full editor for one feature: every parameter of its kind is a field.
 /// Nothing is prefixed — Apply writes the numbers back and the part
-/// rebuilds. Covers all 25 FeatureKind cases of kit v4.
+/// rebuilds. Covers all 28 FeatureKind cases of kit v4.1.
 struct FeatureEditorSheet: View {
     let feature: Feature
     let sketches: [Sketch]
@@ -66,6 +66,19 @@ struct FeatureEditorSheet: View {
     var filletMaxFeasible: Double? = nil
     let onSave: (String, FeatureKind) -> Void
     let onCancel: () -> Void
+    /// Live draft hooks (v4.2 preview): called with the in-progress
+    /// kind on appear and on every field change, and when the sheet
+    /// disappears — EditorView turns them into a ghost preview of the
+    /// edited feature. (These were referenced by the body but never
+    /// declared; added with the v4.3 editors below.)
+    var onDraft: ((FeatureKind) -> Void)? = nil
+    var onDraftEnd: (() -> Void)? = nil
+    /// Picked-edge midpoints carried by .filletEdges / .chamferEdges
+    /// (read-only here — reselect edges in the 3D view to change them).
+    private var edgeMidpoints: [Vec3] = []
+    /// Shaft placement carried by .threadOnShaft (read-only here).
+    private var threadOrigin: Vec3 = .zero
+    private var threadAxis: Vec3 = Vec3(0, 0, 1)
 
     @State private var nameText: String
     // pad / pocket / revolve / hole / extrude shared
@@ -322,10 +335,56 @@ struct FeatureEditorSheet: View {
             _circCountText = State(initialValue: "\(count)")
             _circAxis = State(initialValue: axis)
             _circTotalText = State(initialValue: mcFmt(total))
+        case .filletEdges(let radius, let midpoints):
+            _filletRadiusText = State(initialValue: mcFmt(radius))
+            edgeMidpoints = midpoints
+        case .chamferEdges(let distance, let midpoints):
+            _chamferDistanceText = State(initialValue: mcFmt(distance))
+            edgeMidpoints = midpoints
+        case .threadOnShaft(let s, let origin, let axis):
+            _spec = State(initialValue: s)
+            _majorText = State(initialValue: mcFmt(s.majorDiameter))
+            _pitchText = State(initialValue: mcFmt(s.pitch))
+            _threadLengthText = State(initialValue: mcFmt(s.length))
+            _profileAngleText = State(initialValue: mcFmt(s.profileAngleDegrees))
+            _taperText = State(initialValue: mcFmt(s.taperDegrees))
+            _clearanceText = State(initialValue: mcFmt(s.clearance))
+            threadOrigin = origin
+            threadAxis = axis
         case .booleanCutPlaceholder:
             break
         }
         _sketchID = State(initialValue: initialSketch)
+    }
+
+    /// Every field state that feeds buildKind() — when any of them
+    /// changes, the draft preview refreshes. (Name is excluded: it
+    /// doesn't change the geometry.)
+    private var draftSignature: String {
+        let params = paramValues.keys.sorted().map { "\($0)=\(paramValues[$0] ?? "")" }
+            .joined(separator: ",")
+        return [sketchID, lengthText, depthText, angleText,
+                axisEntityID.description, params, countText,
+                spacingX, spacingY, spacingZ, holeDiameterText,
+                holeDepthText, holeThrough.description, holeKindChoice,
+                cbDiameterText, cbDepthText, csAngleText,
+                String(describing: mirrorPlane), filletRadiusText,
+                chamferDistanceText, shellThicknessText,
+                extrudeDistanceText, extrudeTaperText, extrudeModeChoice,
+                extrudeSecondText, loftAID, loftBID, sweepProfileID,
+                sweepPathID, String(describing: spec), presetName,
+                majorText, pitchText, threadLengthText, profileAngleText,
+                taperText, clearanceText, ex2DistanceText, ex2TaperText,
+                ex2ModeChoice, ex2SecondText, ex2Operation, ex2EndChoice,
+                ex2FaceIndex.description, chamferModeChoice, chamferAText,
+                chamferBText, chamferAngleText, coilRadiusText,
+                coilPitchText, coilTurnsText, coilWireText, pipeRadiusText,
+                ribThicknessText, ribDepthText, draftAngleText,
+                draftAxis.description, scaleXText, scaleYText, scaleZText,
+                moveXText, moveYText, moveZText, moveAxis.description,
+                moveDegreesText, splitAxis.description, splitOffsetText,
+                circCountText, circAxis.description, circTotalText]
+            .joined(separator: "|")
     }
 
     var body: some View {
@@ -351,6 +410,9 @@ struct FeatureEditorSheet: View {
             }
         }
         .preferredColorScheme(.dark)
+        .onAppear { onDraft?(buildKind()) }
+        .onChange(of: draftSignature) { _, _ in onDraft?(buildKind()) }
+        .onDisappear { onDraftEnd?() }
     }
 
     @ViewBuilder
@@ -676,6 +738,27 @@ struct FeatureEditorSheet: View {
                     .mcFont(16)
                     .foregroundStyle(.secondary)
             }
+        case .filletEdges:
+            Section("Fillet — picked edges") {
+                numberRow("Radius (mm)", $filletRadiusText)
+                Text("\(edgeMidpoints.count) picked edge\(edgeMidpoints.count == 1 ? "" : "s") — tap different edges in the 3D view to change which ones are rounded.")
+                    .mcFont(16)
+                    .foregroundStyle(.secondary)
+            }
+        case .chamferEdges:
+            Section("Chamfer — picked edges") {
+                numberRow("Distance (mm)", $chamferDistanceText)
+                Text("\(edgeMidpoints.count) picked edge\(edgeMidpoints.count == 1 ? "" : "s") — tap different edges in the 3D view to change which ones are chamfered.")
+                    .mcFont(16)
+                    .foregroundStyle(.secondary)
+            }
+        case .threadOnShaft:
+            Section("Thread — picked shaft") {
+                Text("Shaft origin (\(mcFmt(threadOrigin.x)), \(mcFmt(threadOrigin.y)), \(mcFmt(threadOrigin.z))), axis (\(mcFmt(threadAxis.x)), \(mcFmt(threadAxis.y)), \(mcFmt(threadAxis.z))) — fixed by the picked shaft.")
+                    .mcFont(16)
+                    .foregroundStyle(.secondary)
+            }
+            threadFields
         }
     }
 
@@ -997,6 +1080,21 @@ struct FeatureEditorSheet: View {
             return .circularPattern(count: max(2, Int(circCountText) ?? 2),
                                     axis: circAxis,
                                     totalDegrees: num(circTotalText, fallback: oldTotal))
+        case .filletEdges(let oldRadius, _):
+            return .filletEdges(radius: num(filletRadiusText, fallback: oldRadius),
+                                midpoints: edgeMidpoints)
+        case .chamferEdges(let oldDistance, _):
+            return .chamferEdges(distance: num(chamferDistanceText, fallback: oldDistance),
+                                  midpoints: edgeMidpoints)
+        case .threadOnShaft:
+            var s = spec
+            s.majorDiameter = num(majorText, fallback: s.majorDiameter)
+            s.pitch = num(pitchText, fallback: s.pitch)
+            s.length = num(threadLengthText, fallback: s.length)
+            s.profileAngleDegrees = num(profileAngleText, fallback: s.profileAngleDegrees)
+            s.taperDegrees = num(taperText, fallback: s.taperDegrees)
+            s.clearance = num(clearanceText, fallback: s.clearance)
+            return .threadOnShaft(spec: s, origin: threadOrigin, axis: threadAxis)
         case .booleanCutPlaceholder:
             return .booleanCutPlaceholder
         }

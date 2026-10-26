@@ -382,3 +382,145 @@ extension DocumentEngine {
         }
     }
 }
+
+extension Mesh {
+    /// Keep only triangles whose centroid is at or above `z` (used to
+    /// trim a thread ridge where it dives into the body).
+    public func keepingTriangles(aboveZ z: Double) -> Mesh {
+        var idx: [UInt32] = []
+        for t in 0..<triangleCount {
+            let a = vertices[Int(indices[t * 3])]
+            let b = vertices[Int(indices[t * 3 + 1])]
+            let c = vertices[Int(indices[t * 3 + 2])]
+            if (a.z + b.z + c.z) / 3 >= z {
+                idx += [indices[t * 3], indices[t * 3 + 1], indices[t * 3 + 2]]
+            }
+        }
+        return Mesh(vertices: vertices, indices: idx)
+    }
+}
+
+// MARK: - Cylinder fitting (tap a pillar -> thread it)
+
+/// A fitted cylinder: a point on its axis at the low end, the unit
+/// axis, radius, axial height, and whether the surface is a hole wall
+/// (normals pointing at the axis) rather than a shaft.
+public struct CylinderFit: Equatable {
+    public var origin: Vec3
+    public var axis: Vec3
+    public var radius: Double
+    public var height: Double
+    public var isInternal: Bool
+}
+
+public enum CylinderFitter {
+    /// Region-grow a smooth patch from a seed triangle of the welded
+    /// mesh and fit a cylinder to it. Returns nil when the patch is
+    /// not cylindrical (a flat face, a sphere, too small...).
+    public static func fit(mesh: Mesh, seedTriangle: Int) -> CylinderFit? {
+        let m = mesh.welded()
+        guard seedTriangle >= 0, seedTriangle < m.triangleCount else { return nil }
+        let normals = m.faceNormals()
+        // Triangle adjacency through shared welded edges.
+        var edgeTris: [String: [Int]] = [:]
+        func key(_ a: Int, _ b: Int) -> String { a < b ? "\(a)-\(b)" : "\(b)-\(a)" }
+        for t in 0..<m.triangleCount {
+            let v = [Int(m.indices[t * 3]), Int(m.indices[t * 3 + 1]), Int(m.indices[t * 3 + 2])]
+            for i in 0..<3 {
+                edgeTris[key(v[i], v[(i + 1) % 3]), default: []].append(t)
+            }
+        }
+        // Grow across edges whose normals differ by < 25 degrees.
+        var patch = Set<Int>([seedTriangle])
+        var frontier = [seedTriangle]
+        while let t = frontier.popLast() {
+            let v = [Int(m.indices[t * 3]), Int(m.indices[t * 3 + 1]), Int(m.indices[t * 3 + 2])]
+            for i in 0..<3 {
+                for nb in edgeTris[key(v[i], v[(i + 1) % 3])] ?? [] where !patch.contains(nb) {
+                    if normals[t].dot(normals[nb]) > cos(25 * Double.pi / 180) {
+                        patch.insert(nb)
+                        frontier.append(nb)
+                    }
+                }
+            }
+        }
+        guard patch.count >= 8 else { return nil }
+        // Axis: the direction every patch normal is perpendicular to.
+        // Deterministic search over normal cross products.
+        let ns = patch.map { normals[$0] }
+        var axis: Vec3? = nil
+        outer: for i in 0..<min(ns.count, 24) {
+            for j in (i + 1)..<min(ns.count, 24) {
+                let c = ns[i].cross(ns[j])
+                if c.length > 0.2 {
+                    let cand = c.normalized
+                    if ns.allSatisfy({ abs($0.dot(cand)) < 0.25 }) { axis = cand; break outer }
+                }
+            }
+        }
+        guard let ax = axis else { return nil }
+        // Patch centroid + radial distances.
+        var verts = Set<Int>()
+        for t in patch { for k in 0..<3 { verts.insert(Int(m.indices[t * 3 + k])) } }
+        var centroid = Vec3.zero
+        for vi in verts { centroid = centroid + m.vertices[vi] }
+        centroid = centroid * (1.0 / Double(verts.count))
+        var rSum = 0.0, rMax = 0.0
+        var hMin = Double.infinity, hMax = -Double.infinity
+        for vi in verts {
+            let d = m.vertices[vi] - centroid
+            let along = d.dot(ax)
+            let radial = (d - ax * along).length
+            rSum += radial
+            rMax = max(rMax, abs(radial))
+            hMin = min(hMin, along); hMax = max(hMax, along)
+        }
+        let radius = rSum / Double(verts.count)
+        guard radius > 0.05 else { return nil }
+        // Residual check: every vertex must hug the cylinder.
+        for vi in verts {
+            let d = m.vertices[vi] - centroid
+            let radial = (d - ax * d.dot(ax)).length
+            if abs(radial - radius) > max(0.06, 0.03 * radius) { return nil }
+        }
+        let origin = centroid + ax * hMin
+        // Internal if a patch normal points TOWARD the axis.
+        let t0 = patch.first!
+        let tc = (m.vertices[Int(m.indices[t0 * 3])] + m.vertices[Int(m.indices[t0 * 3 + 1])] + m.vertices[Int(m.indices[t0 * 3 + 2])]) * (1.0 / 3)
+        let radialDir = (tc - (origin + ax * (tc - origin).dot(ax)))
+        let isInternal = normals[t0].dot(radialDir) < 0
+        _ = rMax
+        return CylinderFit(origin: origin, axis: ax, radius: radius,
+                           height: hMax - hMin, isInternal: isInternal)
+    }
+}
+
+extension Mesh {
+    /// Rigid placement: local +Z becomes `axis`, local origin lands on
+    /// `origin` (a proper rotation via an orthonormal basis).
+    public func placed(axis: Vec3, origin: Vec3) -> Mesh {
+        let ax = axis.normalized
+        let helper = abs(ax.z) < 0.9 ? Vec3(0, 0, 1) : Vec3(1, 0, 0)
+        let u = helper.cross(ax).normalized
+        let v = ax.cross(u).normalized
+        return Mesh(vertices: vertices.map { origin + u * $0.x + v * $0.y + ax * $0.z },
+                    indices: indices)
+    }
+
+    /// Keep triangles whose centroid's coordinate along `axis` from
+    /// `origin` lies in [lo, hi].
+    public func keepingTriangles(axis origin: Vec3, axis: Vec3, between lo: Double, and hi: Double) -> Mesh {
+        var idx: [UInt32] = []
+        for t in 0..<triangleCount {
+            let a = vertices[Int(indices[t * 3])]
+            let b = vertices[Int(indices[t * 3 + 1])]
+            let c = vertices[Int(indices[t * 3 + 2])]
+            let cen = (a + b + c) * (1.0 / 3)
+            let s = (cen - origin).dot(axis)
+            if s >= lo && s <= hi {
+                idx += [indices[t * 3], indices[t * 3 + 1], indices[t * 3 + 2]]
+            }
+        }
+        return Mesh(vertices: vertices, indices: idx)
+    }
+}

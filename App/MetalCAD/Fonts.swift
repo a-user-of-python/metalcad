@@ -8,6 +8,12 @@ import SwiftUI
 /// app text now scales with Settings ▸ Display & Brightness ▸ Text
 /// Size (and the larger accessibility sizes).
 enum MCTypeScale {
+    /// The app's own default text scale, applied on top of the
+    /// device's Dynamic Type ratio (user-tuned 2026-10-26: text should
+    /// start noticeably smaller than the raw designed sizes; the
+    /// device setting still multiplies from here).
+    static let appTextScale: CGFloat = 0.80
+
     /// UIFontMetrics-for-body ratios, keyed by Dynamic Type size.
     static func ratio(for size: DynamicTypeSize) -> CGFloat {
         switch size {
@@ -31,7 +37,7 @@ enum MCTypeScale {
     /// where a raw `Font` value is needed (e.g. Canvas-drawn `Text`,
     /// which cannot take a view modifier).
     static func scaled(_ base: CGFloat, for size: DynamicTypeSize) -> CGFloat {
-        base * ratio(for: size)
+        base * appTextScale * ratio(for: size)
     }
 }
 

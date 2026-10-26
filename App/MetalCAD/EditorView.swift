@@ -17,6 +17,20 @@ struct SketchNav: Identifiable, Hashable {
     let id: String
 }
 
+/// What a normal-mode tap on the 3D model selected (v4.3,
+/// selection-first): a flat face, one sharp edge, a cylindrical
+/// shaft, or the wall of a cylindrical hole. Drives the highlight in
+/// SceneKitView and the floating picked-action bar in EditorView.
+/// Mutually exclusive with the sketch selection — picking one clears
+/// the other.
+enum PickedSelection {
+    /// Index into FaceExtractor.groupedFaces(of:) of the result mesh.
+    case face(index: Int, face: PlanarFace, point: Vec3)
+    case edge(midpoint: Vec3, start: Vec3, end: Vec3, length: Double)
+    case shaft(CylinderFit)
+    case holeWall(CylinderFit)
+}
+
 extension Sketch {
     /// A datum (construction) plane: kit v4 has no datum type, so the
     /// app encodes one as an entity-free sketch whose name starts with
@@ -43,6 +57,57 @@ final class EditorModel: ObservableObject {
     /// Set by the sketch editor's "Finish & Extrude": the editor opens
     /// the Extrude panel pre-filled with this sketch.
     @Published var pendingExtrudeSketchID: String?
+    /// Sketch a tool panel should pre-select when it opens (set from
+    /// the 3D selection / browser selection just before the panel
+    /// appears). Panels consume it in their initializers.
+    @Published var pendingPanelSketchID: String?
+    /// Operation an Extrude panel opened from the selection action
+    /// bar should start with (e.g. "cut" for Pocket). Same consume-on-
+    /// open pattern as pendingPanelSketchID.
+    @Published var pendingPanelOperation: String?
+    /// The sketch currently selected in the 3D view (tap a sketch
+    /// overlay, Fusion-style) — drives the overlay highlight, the
+    /// browser-row highlight, and the selection action bar.
+    @Published var selectedSketchID: String?
+    /// Sketches whose 3D overlay is hidden (browser eye toggles).
+    /// Session-only by design.
+    @Published var hiddenSketchIDs: Set<String> = []
+    /// Master switch for sketch overlays in the 3D view.
+    @Published var showsSketches: Bool = true
+    /// What a normal-mode tap on the model selected (face / edge /
+    /// shaft / hole wall) — drives the 3D highlight and the floating
+    /// picked-action bar. Mutually exclusive with `selectedSketchID`.
+    @Published var picked: PickedSelection?
+    /// Generated drill-point sketch waiting for the Hole panel (set by
+    /// the picked-face bar's "Hole Here…"). The panel drafts with it
+    /// and commits it alongside the hole feature; cleared when the
+    /// panel closes.
+    @Published var pendingHoleSketch: Sketch?
+    /// Face the Measure panel should preselect as Face A when it next
+    /// opens (set by the picked-face bar's "Measure").
+    @Published var measureFace: PlanarFace?
+    // MARK: Live draft preview (uncommitted feature changes)
+    /// The feature list the live preview shows, or nil when no panel
+    /// is drafting. Panels keep this in sync with their fields (see
+    /// draftAppend / draftReplacing) so the 3D view ghosts the result
+    /// BEFORE the user commits with OK.
+    @Published var draftFeatures: [Feature]?
+    /// Mesh of the latest draft rebuild (nil when no draft).
+    @Published var previewMesh: Mesh?
+    /// First error of the latest draft rebuild, if it failed.
+    @Published var previewError: CADError?
+    private var draftWorkItem: DispatchWorkItem?
+    private var draftBusy = false
+    /// One pending draft rebuild: the candidate feature list, plus —
+    /// for flows that generate their own sketch (face pull, hole
+    /// here) — the full sketch list the preview part should carry
+    /// instead of the committed part's. nil sketches = the part's own.
+    private struct DraftRequest: Equatable {
+        var features: [Feature]?
+        var sketches: [Sketch]?
+    }
+    /// Latest coalesced request while a draft rebuild was running.
+    private var draftQueued: DraftRequest?
     /// The New Sketch panel's plane selection (kept here so it
     /// survives the panel closing while a face is picked).
     @Published var planeChoice: PlaneChoice = .none
@@ -69,6 +134,82 @@ final class EditorModel: ObservableObject {
     func rebuildNow() {
         guard let p = part else { rebuild = nil; return }
         rebuild = DocumentEngine.rebuild(part: p)
+    }
+
+    // MARK: Draft previews
+
+    /// Schedule a live preview rebuild of `features` (nil clears the
+    /// preview). Debounced ~120 ms so dragging a slider or typing in
+    /// a field doesn't rebuild per keystroke; if a rebuild is already
+    /// running, only the newest request is kept (coalesced). The
+    /// rebuild itself is the same synchronous kit call the committed
+    /// rebuild uses. Pass `sketches` when the candidate feature needs
+    /// a generated sketch the committed part doesn't have yet — the
+    /// preview part carries that list instead; the committed part is
+    /// never touched.
+    func setDraft(_ features: [Feature]?, sketches: [Sketch]? = nil) {
+        draftFeatures = features
+        draftWorkItem?.cancel()
+        let request = DraftRequest(features: features, sketches: sketches)
+        let item = DispatchWorkItem { [weak self] in
+            self?.requestDraftRun(request)
+        }
+        draftWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: item)
+    }
+
+    private func requestDraftRun(_ request: DraftRequest) {
+        if draftBusy {
+            draftQueued = request
+            return
+        }
+        runDraft(request)
+    }
+
+    private func runDraft(_ request: DraftRequest) {
+        guard let features = request.features, var p = part else {
+            previewMesh = nil
+            previewError = nil
+            return
+        }
+        draftBusy = true
+        p.features = features
+        if let sketches = request.sketches { p.sketches = sketches }
+        let result = DocumentEngine.rebuild(part: p)
+        previewMesh = result.mesh
+        previewError = result.firstError
+        draftBusy = false
+        if let queued = draftQueued {
+            draftQueued = nil
+            if queued != request { runDraft(queued) }
+        }
+    }
+
+    /// Draft = the committed features plus this candidate feature.
+    func draftAppend(_ feature: Feature) {
+        guard let current = part?.features else { setDraft(nil); return }
+        setDraft(current + [feature])
+    }
+
+    /// Draft = the committed features plus this candidate feature,
+    /// with the preview part's sketches replaced by `sketches` (the
+    /// committed sketches plus a generated one). Used by the
+    /// face-pull and hole-here flows, whose feature references a
+    /// sketch that only exists once the user commits.
+    func draftAppendWithSketches(_ sketches: [Sketch], _ feature: Feature) {
+        guard let current = part?.features else { setDraft(nil); return }
+        setDraft(current + [feature], sketches: sketches)
+    }
+
+    /// Draft = the committed features with the one at `index`
+    /// replaced by this candidate (same feature id preserved).
+    func draftReplacing(index: Int, with feature: Feature) {
+        guard var current = part?.features, current.indices.contains(index) else {
+            setDraft(nil)
+            return
+        }
+        current[index] = feature
+        setDraft(current)
     }
 
     private func mutate(_ change: (inout Part) -> Void) {
@@ -143,6 +284,8 @@ final class EditorModel: ObservableObject {
 
     func deleteSketch(_ id: String) {
         faceOutlines[id] = nil
+        if selectedSketchID == id { selectedSketchID = nil }
+        hiddenSketchIDs.remove(id)
         mutate { $0.sketches.removeAll { $0.id == id } }
     }
 
@@ -293,6 +436,81 @@ final class EditorModel: ObservableObject {
         return face
     }
 
+    /// Append a fully-built generated sketch (face-pull outline,
+    /// hole-point) as part of committing the feature that uses it.
+    @discardableResult
+    func addGeneratedSketch(_ sketch: Sketch) -> Sketch {
+        mutate { $0.sketches.append(sketch) }
+        MCLog.shared.info(.sketch, "generated sketch added",
+                          context: ["name": sketch.name])
+        return sketch
+    }
+
+    // MARK: Selection-first picking (tap the model, then act on it)
+
+    func clearPicked() { picked = nil }
+
+    /// Resolve a normal-mode tap on the model into `picked`, in
+    /// priority order: (a) a sharp edge within 2.5 mm of the hit
+    /// point, (b) the grouped planar face owning the tapped triangle,
+    /// (c) a fitted cylinder — external = shaft, internal = hole
+    /// wall, (d) nothing → selection cleared. Silent by design:
+    /// picking never raises the error banner.
+    func resolveModelTap(triangleIndex: Int, point: Vec3) {
+        guard let mesh = rebuild?.mesh, mesh.triangleCount > 0 else {
+            clearPicked()
+            return
+        }
+        selectedSketchID = nil
+        // (a) EDGE — nearest sharp edge within 2.5 mm of the hit.
+        var bestEdge: SolidEdge?
+        var bestDist = 2.5
+        for edge in SolidEdgeExtractor.edges(of: mesh) {
+            let d = Self.distanceFromPointToSegment(point, edge.start, edge.end)
+            if d < bestDist { bestDist = d; bestEdge = edge }
+        }
+        if let edge = bestEdge {
+            picked = .edge(midpoint: edge.mid, start: edge.start,
+                           end: edge.end, length: edge.length)
+            return
+        }
+        let welded = mesh.welded()
+        guard triangleIndex >= 0, triangleIndex < welded.triangleCount else {
+            clearPicked()
+            return
+        }
+        // (b) FACE — same plane matcher as the face-pick flow, but
+        // over groupedFaces so the stored index addresses the
+        // per-face triangle lists (the highlight + label use them).
+        let a = welded.vertices[Int(welded.indices[triangleIndex * 3])]
+        let b = welded.vertices[Int(welded.indices[triangleIndex * 3 + 1])]
+        let c = welded.vertices[Int(welded.indices[triangleIndex * 3 + 2])]
+        let n = (b - a).cross(c - a).normalized
+        let w = n.dot(a)
+        let grouped = FaceExtractor.groupedFaces(of: mesh)
+        if let idx = grouped.faces.firstIndex(where: {
+            $0.plane.normal.dot(n) > 0.999 && abs(n.dot($0.centroid) - w) < 1e-3
+        }) {
+            picked = .face(index: idx, face: grouped.faces[idx], point: point)
+            return
+        }
+        // (c) SHAFT / HOLE WALL — fit a cylinder to the tapped patch.
+        if let fit = CylinderFitter.fit(mesh: welded, seedTriangle: triangleIndex) {
+            picked = fit.isInternal ? .holeWall(fit) : .shaft(fit)
+            return
+        }
+        // (d) Nothing matched.
+        clearPicked()
+    }
+
+    private static func distanceFromPointToSegment(_ p: Vec3, _ a: Vec3, _ b: Vec3) -> Double {
+        let ab = b - a
+        let len2 = ab.dot(ab)
+        guard len2 > 1e-12 else { return p.distance(to: a) }
+        let t = max(0, min(1, (p - a).dot(ab) / len2))
+        return p.distance(to: a + ab * t)
+    }
+
     /// Create a sketch on an already-resolved face and remember its
     /// outline as the editor guide. Returns the new sketch's id.
     @discardableResult
@@ -395,6 +613,8 @@ struct EditorView: View {
                                 tool: tool,
                                 model: model,
                                 extrudeSketchID: extrudePresetSketchID,
+                                panelSketchID: model.pendingPanelSketchID ?? model.selectedSketchID,
+                                panelOperation: model.pendingPanelOperation,
                                 close: {
                                     activeTool = nil
                                     extrudePresetSketchID = nil
@@ -445,9 +665,20 @@ struct EditorView: View {
                     filletMaxFeasible: filletMaxFeasible(for: feature),
                     onSave: { name, kind in
                         model.updateFeature(id: feature.id, name: name, kind: kind)
+                        model.setDraft(nil)
                         featureToEdit = nil
                     },
-                    onCancel: { featureToEdit = nil }
+                    onCancel: {
+                        model.setDraft(nil)
+                        featureToEdit = nil
+                    },
+                    onDraft: { kind in
+                        if let idx = model.part?.features.firstIndex(where: { $0.id == feature.id }) {
+                            model.draftReplacing(index: idx,
+                                                 with: Feature(id: feature.id, name: feature.name, kind: kind))
+                        }
+                    },
+                    onDraftEnd: { model.setDraft(nil) }
                 )
             }
             .sheet(isPresented: $showMaterialPicker) {
@@ -466,7 +697,20 @@ struct EditorView: View {
                 extrudePresetSketchID = newID
                 activeTool = .extrude
             }
+            .onChange(of: activeTool) { _, newTool in
+                // A closed panel leaves no draft ghost and no stale
+                // panel presets behind.
+                if newTool == nil {
+                    model.pendingPanelSketchID = nil
+                    model.pendingPanelOperation = nil
+                    model.pendingHoleSketch = nil
+                    model.setDraft(nil)
+                }
+            }
             .onChange(of: baseMeshKey) { _, _ in
+                // The result mesh changed — any picked face/edge/shaft
+                // referred to the old geometry, so drop the selection.
+                model.clearPicked()
                 if sectionOn { refreshSection() }
             }
         }
@@ -696,6 +940,10 @@ struct EditorView: View {
                     ribbonButton("Measure", icon: "ruler", active: activeTool == .measure) {
                         selectTool(.measure)
                     }
+                    ribbonButton("Sketches", icon: model.showsSketches ? "eye" : "eye.slash",
+                                 active: model.showsSketches) {
+                        model.showsSketches.toggle()
+                    }
                     ribbonButton("Section", icon: "square.lefthalf.filled", active: sectionOn) {
                         toggleSection()
                     }
@@ -795,13 +1043,44 @@ struct EditorView: View {
             if let err = model.rebuild?.firstError {
                 errorBanner(err, dismissible: false)
             }
-            SceneKitView(
-                mesh: displayMesh,
-                material: model.part?.material,
-                isPickingFace: pickingFace,
-                onFacePicked: { index in handleFacePicked(index) }
-            )
-            .id(meshKey)
+            ZStack(alignment: .bottom) {
+                SceneKitView(
+                    mesh: displayMesh,
+                    material: model.part?.material,
+                    ghostMesh: model.previewMesh,
+                    sketches: model.part?.sketches ?? [],
+                    selectedSketchID: model.selectedSketchID,
+                    hiddenSketchIDs: model.hiddenSketchIDs,
+                    showSketches: model.showsSketches,
+                    isPickingFace: pickingFace,
+                    onFacePicked: { index in handleFacePicked(index) },
+                    onSketchPicked: { id in
+                        // Sketch and model selections are mutually
+                        // exclusive — whichever was tapped last wins.
+                        model.clearPicked()
+                        model.selectedSketchID = id
+                    },
+                    picked: model.picked,
+                    pickedMesh: model.rebuild?.mesh ?? Mesh(),
+                    onModelHit: { triangleIndex, point in
+                        // In section view the displayed mesh is the
+                        // cut mesh, whose triangle indices don't map
+                        // to the result mesh — taps select nothing.
+                        guard !sectionOn else { return }
+                        model.resolveModelTap(triangleIndex: triangleIndex, point: point)
+                    }
+                )
+                .id(meshKey)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                if let selID = model.selectedSketchID, activeTool == nil, !pickingFace,
+                   model.picked == nil,
+                   let sel = model.sketch(withID: selID), !sel.isDatumPlane {
+                    selectionActionBar(sel)
+                }
+                if let picked = model.picked, activeTool == nil, !pickingFace {
+                    pickedActionBar(picked)
+                }
+            }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             if sectionOn {
                 sectionControls
@@ -930,6 +1209,174 @@ struct EditorView: View {
         .mcFont(19, weight: .semibold)
     }
 
+    // MARK: Sketch selection action bar (Fusion-style)
+
+    /// Floating bar over the 3D view when a sketch is selected by
+    /// tapping its overlay: act on that sketch immediately, with the
+    /// tool panels pre-set to it.
+    private func selectionActionBar(_ sketch: Sketch) -> some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(sketch.name)
+                    .mcFont(19, weight: .bold)
+                    .lineLimit(1)
+                Text("Selected sketch")
+                    .mcFont(14)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: 170, alignment: .leading)
+            Spacer()
+            actionBarButton("Extrude", icon: "rectangle.expand.vertical") {
+                model.pendingPanelSketchID = sketch.id
+                model.pendingPanelOperation = "join"
+                activeTool = .extrude
+            }
+            actionBarButton("Pocket", icon: "arrow.down.square") {
+                model.pendingPanelSketchID = sketch.id
+                model.pendingPanelOperation = "cut"
+                activeTool = .extrude
+            }
+            actionBarButton("Revolve", icon: "rotate.3d") {
+                model.pendingPanelSketchID = sketch.id
+                activeTool = .revolve
+            }
+            actionBarButton("Hole", icon: "circle.circle") {
+                model.pendingPanelSketchID = sketch.id
+                activeTool = .hole
+            }
+            actionBarButton("Edit Sketch", icon: "pencil") {
+                sketchNav = SketchNav(id: sketch.id)
+            }
+            actionBarButton("Hide", icon: "eye.slash") {
+                model.hiddenSketchIDs.insert(sketch.id)
+                model.selectedSketchID = nil
+            }
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 14).fill(Color.black.opacity(0.75)))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.orange.opacity(0.5), lineWidth: 1))
+        .padding(10)
+    }
+
+    // MARK: Picked selection action bar (face / edge / shaft / hole)
+
+    /// Floating bar over the 3D view when a face, edge, shaft or hole
+    /// wall was selected by tapping the model: the actions that make
+    /// sense for exactly that piece of geometry, Fusion-style.
+    @ViewBuilder
+    private func pickedActionBar(_ picked: PickedSelection) -> some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(pickedBarTitle(picked))
+                    .mcFont(19, weight: .bold)
+                    .lineLimit(1)
+                Text(pickedBarSubtitle(picked))
+                    .mcFont(14)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: 210, alignment: .leading)
+            Spacer()
+            switch picked {
+            case .face(_, let face, let point):
+                actionBarButton("Sketch Here", icon: "square.and.pencil") {
+                    sketchNav = SketchNav(id: model.addSketchOnFace(face))
+                }
+                actionBarButton("Pull Face…", icon: "arrow.up.square") {
+                    activeTool = .pullFace
+                }
+                actionBarButton("Hole Here…", icon: "circle.circle") {
+                    model.pendingHoleSketch = mcHolePointSketch(face: face, point: point)
+                    activeTool = .hole
+                }
+                actionBarButton("Offset Plane", icon: "square.on.square") {
+                    model.constructFace = face
+                    activeTool = .offsetPlane
+                }
+                actionBarButton("Measure", icon: "ruler") {
+                    model.measureFace = face
+                    activeTool = .measure
+                }
+            case .edge:
+                actionBarButton("Fillet This Edge…", icon: "capsule") {
+                    activeTool = .filletEdge
+                }
+                actionBarButton("Chamfer This Edge…", icon: "octagon") {
+                    activeTool = .chamferEdge
+                }
+            case .shaft:
+                actionBarButton("Thread This Shaft…", icon: "lines.measurement.horizontal") {
+                    activeTool = .threadShaft
+                }
+            case .holeWall:
+                actionBarButton("Clear", icon: "xmark") {
+                    model.clearPicked()
+                }
+            }
+            if case .holeWall = picked {
+                EmptyView()
+            } else {
+                Button {
+                    model.clearPicked()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .mcFont(22)
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Clear selection")
+            }
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 14).fill(Color.black.opacity(0.75)))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.orange.opacity(0.5), lineWidth: 1))
+        .padding(10)
+    }
+
+    private func pickedBarTitle(_ picked: PickedSelection) -> String {
+        switch picked {
+        case .face(_, let face, _):
+            return "Face · \(String(format: "%.0f", face.area)) mm²"
+        case .edge(_, _, _, let length):
+            return "Edge · \(mcFmt(length)) mm"
+        case .shaft(let fit):
+            return "Shaft · Ø \(mcFmt(fit.radius * 2)) × \(mcFmt(fit.height))"
+        case .holeWall(let fit):
+            return "Hole · Ø \(mcFmt(fit.radius * 2)) × \(mcFmt(fit.height)) deep"
+        }
+    }
+
+    private func pickedBarSubtitle(_ picked: PickedSelection) -> String {
+        switch picked {
+        case .face:
+            return "Selected face"
+        case .edge:
+            return "Selected edge"
+        case .shaft:
+            return "Selected shaft"
+        case .holeWall:
+            return "Internal threading isn't supported yet"
+        }
+    }
+
+    private func actionBarButton(_ label: String, icon: String,
+                                 action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            VStack(spacing: 3) {
+                Image(systemName: icon)
+                    .mcFont(22)
+                Text(label)
+                    .mcFont(15, weight: .semibold)
+                    .lineLimit(1)
+            }
+            .foregroundStyle(.primary)
+            .frame(minWidth: 74, minHeight: 52)
+            .padding(.horizontal, 4)
+            .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.10)))
+        }
+        .buttonStyle(.plain)
+    }
+
     private func errorBanner(_ err: CADError, dismissible: Bool) -> some View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: "exclamationmark.octagon.fill")
@@ -1050,7 +1497,9 @@ struct EditorView: View {
                                 .foregroundStyle(sketch.isDatumPlane ? .teal : .orange)
                                 .frame(width: 44, height: 44)
                                 .background(RoundedRectangle(cornerRadius: 10)
-                                    .fill(Color.white.opacity(0.06)))
+                                    .fill(model.selectedSketchID == sketch.id
+                                          ? Color.orange.opacity(0.35)
+                                          : Color.white.opacity(0.06)))
                         }
                         .buttonStyle(.plain)
                         .accessibilityLabel(sketch.name)
@@ -1147,6 +1596,23 @@ struct EditorView: View {
                 }
             }
             Spacer()
+            if !sketch.isDatumPlane {
+                Button {
+                    if model.hiddenSketchIDs.contains(sketch.id) {
+                        model.hiddenSketchIDs.remove(sketch.id)
+                    } else {
+                        model.hiddenSketchIDs.insert(sketch.id)
+                        if model.selectedSketchID == sketch.id { model.selectedSketchID = nil }
+                    }
+                } label: {
+                    Image(systemName: model.hiddenSketchIDs.contains(sketch.id) ? "eye.slash" : "eye")
+                        .mcFont(20)
+                        .foregroundStyle(model.hiddenSketchIDs.contains(sketch.id) ? .secondary : .primary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(model.hiddenSketchIDs.contains(sketch.id)
+                                     ? "Show \(sketch.name) in 3D" : "Hide \(sketch.name) in 3D")
+            }
             Menu {
                 Button {
                     model.redefineChoice = .none
@@ -1167,6 +1633,7 @@ struct EditorView: View {
             .buttonStyle(.plain)
         }
         .padding(.vertical, 2)
+        .listRowBackground(model.selectedSketchID == sketch.id ? Color.orange.opacity(0.16) : Color.clear)
     }
 
     private func featureRow(_ feature: Feature) -> some View {
@@ -1305,6 +1772,9 @@ struct EditorView: View {
         case .moveBody: return "move.3d"
         case .splitBody: return "rectangle.split.2x1"
         case .circularPattern: return "arrow.triangle.2.circlepath"
+        case .filletEdges: return "capsule"
+        case .chamferEdges: return "octagon"
+        case .threadOnShaft: return "lines.measurement.horizontal"
         case .booleanCutPlaceholder: return "scissors"
         }
     }
@@ -1415,6 +1885,12 @@ struct EditorView: View {
             return "Split · \(axis == 0 ? "X" : (axis == 1 ? "Y" : "Z")) at \(mcFmt(offset)) mm"
         case .circularPattern(let count, let axis, let total):
             return "Circular pattern · ×\(count) around \(axis == 0 ? "X" : (axis == 1 ? "Y" : "Z")) over \(mcFmt(total))°"
+        case .filletEdges(let radius, let midpoints):
+            return "Fillet · r \(mcFmt(radius)) · \(midpoints.count) picked edge\(midpoints.count == 1 ? "" : "s")"
+        case .chamferEdges(let distance, let midpoints):
+            return "Chamfer · \(mcFmt(distance)) mm · \(midpoints.count) picked edge\(midpoints.count == 1 ? "" : "s")"
+        case .threadOnShaft(let s, _, _):
+            return "Thread on shaft · Ø\(mcFmt(s.majorDiameter)) × \(mcFmt(s.pitch)) pitch · \(mcFmt(s.length)) mm long"
         case .booleanCutPlaceholder:
             return "Boolean cut"
         }

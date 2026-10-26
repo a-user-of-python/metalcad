@@ -41,6 +41,22 @@ struct MeasurePanel: View {
             faceMeasure
             PanelNote(text: "To change a size, edit the feature or the sketch dimension — in the sketch editor, the Measure tool and the length / radius fields drive the model.")
         }
+        .onAppear { preselectPickedFace() }
+    }
+
+    /// If the picked-face bar sent a face ("Measure"), preselect it
+    /// as Face A: match it against this panel's sorted face list by
+    /// plane normal + centroid. Silent when it isn't in the top 30.
+    private func preselectPickedFace() {
+        guard let target = model.measureFace else { return }
+        model.measureFace = nil
+        let list = faces
+        if let idx = list.firstIndex(where: {
+            $0.plane.normal.dot(target.plane.normal) > 0.999
+                && $0.centroid.distance(to: target.centroid) < 0.01
+        }) {
+            faceAIndex = idx
+        }
     }
 
     private var statsBlock: some View {

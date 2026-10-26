@@ -285,7 +285,8 @@ public enum EdgeFinisher {
         return out
     }
 
-    static func finish(body: Mesh, value: Double, isFillet: Bool, valueB: Double = -1) throws -> Mesh {
+    static func finish(body: Mesh, value: Double, isFillet: Bool, valueB: Double = -1,
+                       onlyMidpoints: [Vec3]? = nil) throws -> Mesh {
         guard value > 0 else {
             throw isFillet ? CADError.filletFailed("radius must be > 0")
                            : CADError.chamferInvalid("distance must be > 0")
@@ -295,7 +296,14 @@ public enum EdgeFinisher {
         // Skip edges touching a face too small to hold the treatment —
         // CSG output can carry sliver faces that no real edge finish
         // could ever land on.
-        let edges = allEdges.filter { min($0.faceA.area, $0.faceB.area) >= vmax * vmax }
+        var edges = allEdges.filter { min($0.faceA.area, $0.faceB.area) >= vmax * vmax }
+        if let targets = onlyMidpoints {
+            edges = edges.filter { e in targets.contains { $0.distance(to: e.mid) < 0.05 } }
+            guard !edges.isEmpty else {
+                throw isFillet ? CADError.filletFailed("the picked edge is gone — the part changed above it")
+                               : CADError.chamferInvalid("the picked edge is gone — the part changed above it")
+            }
+        }
         guard edges.count <= 240 else {
             throw isFillet ? CADError.filletFailed("\(edges.count) sharp edges — too many to finish at once")
                            : CADError.chamferInvalid("\(edges.count) sharp edges — too many to finish at once")
@@ -334,6 +342,17 @@ public enum EdgeFinisher {
 
     public static func fillet(body: Mesh, radius: Double) throws -> Mesh {
         try finish(body: body, value: radius, isFillet: true)
+    }
+
+    /// Fillet only the edges whose midpoints are given (v4.1: the app
+    /// passes the edge the user tapped in the 3D view).
+    public static func fillet(body: Mesh, radius: Double, onlyMidpoints: [Vec3]) throws -> Mesh {
+        try finish(body: body, value: radius, isFillet: true, onlyMidpoints: onlyMidpoints)
+    }
+
+    /// Chamfer only the edges whose midpoints are given.
+    public static func chamfer(body: Mesh, distance: Double, onlyMidpoints: [Vec3]) throws -> Mesh {
+        try finish(body: body, value: distance, isFillet: false, onlyMidpoints: onlyMidpoints)
     }
 
     public static func chamfer(body: Mesh, distance: Double) throws -> Mesh {

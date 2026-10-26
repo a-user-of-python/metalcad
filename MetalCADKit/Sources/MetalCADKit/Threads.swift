@@ -85,11 +85,15 @@ public struct ThreadSpec: Codable, Equatable {
 }
 
 /// Tessellates a modeled thread over a cylindrical shaft segment.
-/// The shaft runs along +Z from z=0. Returns thread ridge mesh only —
-/// callers union it with the shaft (v1: mesh concatenation).
+/// The shaft runs along +Z from z=0. Returns the thread ridge mesh
+/// only. NOTE: never CSG-union the raw ridge into a body — BSP clip
+/// dices any large face crossing the helix (a plate + M10 shaft went
+/// 7.8k → 169k triangles that way). DocumentEngine merges threads by
+/// unioning the plain core cylinder and APPENDING the ridge trimmed
+/// at the body's surface (see the .threadShaft rebuild branch).
 public enum ThreadTessellator {
     public static func ridgeMesh(spec s: ThreadSpec, baseZ: Double = 0,
-                                 segmentsPerTurn: Int = 72) throws -> Mesh {
+                                 segmentsPerTurn: Int = 48) throws -> Mesh {
         let (spec, _) = try s.validated()
         let rOut = spec.majorDiameter / 2
         let rIn = spec.minorDiameter / 2

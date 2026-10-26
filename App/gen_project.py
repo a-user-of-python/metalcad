@@ -60,6 +60,8 @@ proj_uuid = uuid("proj")
 target_uuid = uuid("target")
 app_ref = uuid("app_ref")
 infoplist_ref = uuid("infoplist")
+assets_ref = uuid("assets_ref")
+assets_build = uuid("assets_build")
 group_main = uuid("group_main")
 group_kit = uuid("group_kit")
 group_products = uuid("group_products")
@@ -86,6 +88,7 @@ for f in APP_FILES:
     objects.append(f"\t\t{build_files[f]} = {{isa = PBXBuildFile; fileRef = {file_refs[f]}; }};")
 for f in KIT_FILES:
     objects.append(f"\t\t{kit_builds[f]} = {{isa = PBXBuildFile; fileRef = {kit_refs[f]}; }};")
+objects.append(f"\t\t{assets_build} = {{isa = PBXBuildFile; fileRef = {assets_ref}; }};")
 
 # PBXFileReference
 for f in APP_FILES:
@@ -94,6 +97,7 @@ for f in KIT_FILES:
     objects.append(f'\t\t{kit_refs[f]} = {{isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = {f}; sourceTree = "<group>"; }};')
 objects.append(f'\t\t{app_ref} = {{isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = {APP}.app; sourceTree = BUILT_PRODUCTS_DIR; }};')
 objects.append(f'\t\t{infoplist_ref} = {{isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; }};')
+objects.append(f'\t\t{assets_ref} = {{isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; }};')
 
 # PBXGroup
 objects.append(f'''\t\t{group_root} = {{
@@ -102,6 +106,7 @@ objects.append(f'''\t\t{group_root} = {{
 \t\t\t\t{group_main},
 \t\t\t\t{group_kit},
 \t\t\t\t{group_products},
+\t\t\t\t{assets_ref},
 \t\t\t);
 \t\t\tsourceTree = "<group>";
 \t\t}};''')
@@ -192,6 +197,7 @@ objects.append(f'''\t\t{res_phase} = {{
 \t\t\tisa = PBXResourcesBuildPhase;
 \t\t\tbuildActionMask = 2147483647;
 \t\t\tfiles = (
+\t\t\t\t{assets_build},
 \t\t\t);
 \t\t\trunOnlyForDeploymentPostprocessing = 0;
 \t\t}};''')
@@ -225,14 +231,15 @@ proj_settings = {
     "SWIFT_VERSION": "5.0",
 }
 tgt_settings = {
+    "ASSETCATALOG_COMPILER_APPICON_NAME": "AppIcon",
     "CODE_SIGN_STYLE": "Automatic",
-    "CURRENT_PROJECT_VERSION": "1",
+    "CURRENT_PROJECT_VERSION": "10",
     "ENABLE_PREVIEWS": "YES",
     "GENERATE_INFOPLIST_FILE": "NO",
     "INFOPLIST_FILE": '"MetalCAD/Info.plist"',
     "IPHONEOS_DEPLOYMENT_TARGET": "17.0",
     "LD_RUNPATH_SEARCH_PATHS": '"$(inherited) @executable_path/Frameworks"',
-    "MARKETING_VERSION": "1.0",
+    "MARKETING_VERSION": "1.10",
     "PRODUCT_BUNDLE_IDENTIFIER": "com.user.metalcad",
     "PRODUCT_NAME": '"$(TARGET_NAME)"',
     "SWIFT_EMIT_LOC_STRINGS": "YES",

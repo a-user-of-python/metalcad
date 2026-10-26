@@ -806,6 +806,16 @@ struct EditorView: View {
     /// shortcut) repeats without re-typing.
     @AppStorage("quickPullDistance") private var quickPullDistance: Double = 10
     @State private var panelDragStart: Double?
+    /// Live width while the resize handle is being dragged. Dragging
+    /// used to write `browserPanelWidth` (@AppStorage) on EVERY drag
+    /// event — a UserDefaults write plus full-tree invalidation per
+    /// event, which made the drag visibly laggy (device report
+    /// 2026-10-26). The drag now mutates only this @State; the
+    /// persisted width is committed once, in onEnded.
+    @State private var dragLiveWidth: Double?
+    /// The width all layout reads: the live drag width while a drag
+    /// is in flight, otherwise the persisted width.
+    private var effectivePanelWidth: Double { dragLiveWidth ?? browserPanelWidth }
     // Section view state. `sectionT` is the committed cut position;
     // the slider edits `sectionSlider` and commits on release so the
     // CSG section only runs once per drag, not per pixel.
@@ -829,9 +839,9 @@ struct EditorView: View {
     @ViewBuilder
     private var mainRow: some View {
                 HStack(spacing: 0) {
-                    if browserPanelWidth > 0 {
+                    if effectivePanelWidth > 0 {
                         browserPanel
-                            .frame(width: browserPanelWidth)
+                            .frame(width: effectivePanelWidth)
                     }
                     panelDragHandle
                     centerColumn
@@ -1160,8 +1170,10 @@ struct EditorView: View {
                 Text(msg)
                     .mcFont(17, weight: .semibold)
                     .foregroundStyle(.green)
+                    .lineLimit(1)
             }
         }
+        .layoutPriority(2)
     }
 
     private func headerChip(_ title: String, icon: String,
@@ -1176,7 +1188,9 @@ struct EditorView: View {
                 .mcFont(19, weight: .semibold)
             Text(title)
                 .mcFont(19, weight: .semibold)
+                .lineLimit(1)
         }
+        .fixedSize(horizontal: true, vertical: false)
         .padding(.horizontal, 14)
         .frame(minHeight: 46)
         .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.06)))
@@ -1198,9 +1212,7 @@ struct EditorView: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text(model.part?.name ?? "Part")
                     .mcFont(22, weight: .bold)
-                Text("Material, size and weight — always up to date")
-                    .mcFont(15)
-                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
             Spacer()
             Button {
@@ -1223,6 +1235,7 @@ struct EditorView: View {
                 }
             }
             .buttonStyle(.plain)
+            .layoutPriority(1)
             headerStat("Volume", "\(String(format: "%.2f", baseMesh.volume / 1000)) cm³")
             headerStat("Mass", model.rebuild?.massGrams.map(mcMass) ?? "—")
             if let bodies = model.rebuild?.bodies, bodies.count > 1 {
@@ -2126,7 +2139,7 @@ struct EditorView: View {
     private var panelDragHandle: some View {
         ZStack {
             Rectangle()
-                .fill(Color.white.opacity(browserPanelWidth == 0 ? 0.10 : 0.05))
+                .fill(Color.white.opacity(effectivePanelWidth == 0 ? 0.10 : 0.05))
             VStack(spacing: 5) {
                 ForEach(0..<3, id: \.self) { _ in
                     Circle()
@@ -2134,7 +2147,7 @@ struct EditorView: View {
                         .frame(width: 4, height: 4)
                 }
             }
-            if browserPanelWidth == 0 {
+            if effectivePanelWidth == 0 {
                 Image(systemName: "chevron.right")
                     .mcFont(12, weight: .bold)
                     .foregroundStyle(.white.opacity(0.8))
@@ -2149,19 +2162,24 @@ struct EditorView: View {
                 .onChanged { value in
                     if panelDragStart == nil { panelDragStart = browserPanelWidth }
                     let start = panelDragStart ?? 300
-                    browserPanelWidth = min(520, max(0, start + Double(value.translation.width)))
+                    dragLiveWidth = min(520, max(0, start + Double(value.translation.width)))
                 }
                 .onEnded { _ in
-                    if browserPanelWidth < 40 {
+                    // Commit once: under 40 snaps shut, otherwise the
+                    // final width becomes the persisted + last width.
+                    let finalWidth = dragLiveWidth ?? browserPanelWidth
+                    if finalWidth < 40 {
                         browserPanelWidth = 0
                     } else {
-                        browserPanelLastWidth = browserPanelWidth
+                        browserPanelWidth = finalWidth
+                        browserPanelLastWidth = finalWidth
                     }
+                    dragLiveWidth = nil
                     panelDragStart = nil
                 }
         )
         .onTapGesture(count: 2) { toggleBrowserPanel() }
-        .accessibilityLabel(browserPanelWidth == 0 ? "Show browser panel" : "Resize or hide browser panel")
+        .accessibilityLabel(effectivePanelWidth == 0 ? "Show browser panel" : "Resize or hide browser panel")
     }
 
     // MARK: Browser (left): sketches + feature timeline
@@ -2170,7 +2188,7 @@ struct EditorView: View {
     /// at/above it, the full browser list at the chosen width.
     private var browserPanel: some View {
         Group {
-            if browserPanelWidth < 250 {
+            if effectivePanelWidth < 250 {
                 slimBrowserPanel
             } else {
                 fullBrowserPanel

@@ -32,6 +32,7 @@
 		0FA70AE043A4A48968897937 = {isa = PBXBuildFile; fileRef = 0C3DEDA3902DF3904E75F868; };
 		FED9FBD61BF46E66FDBC913C = {isa = PBXBuildFile; fileRef = 4715A5D9A2F59456B884A4D7; };
 		6D6349DFE15845D2B8AB7C66 = {isa = PBXBuildFile; fileRef = 7162F3FE7FC59D05CD4BC1B7; };
+		04A7814E4EEC70DE7D6C41B1 = {isa = PBXBuildFile; fileRef = 8D562B3E40B6C9EC53F38F07; };
 		5A8DE70ADA90EC0AC4815469 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Accent.swift; sourceTree = "<group>"; };
 		0A8C13525269D9F9FAC9D986 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		26E010B5315191442FAC2218 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticsView.swift; sourceTree = "<group>"; };
@@ -61,12 +62,14 @@
 		7162F3FE7FC59D05CD4BC1B7 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Threads.swift; sourceTree = "<group>"; };
 		99006388588CE7D539A04F10 = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MetalCAD.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		BB5944C6515D6D2B678426AB = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		8D562B3E40B6C9EC53F38F07 = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		71D2E56247FE75C3DCE9B609 = {
 			isa = PBXGroup;
 			children = (
 				450B220DE8EEB27904FC3DC4,
 				A4DE87CF6E13886A7566E381,
 				30772F61AC9BDC8631745269,
+				8D562B3E40B6C9EC53F38F07,
 			);
 			sourceTree = "<group>";
 		};
@@ -201,6 +204,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				04A7814E4EEC70DE7D6C41B1,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -245,14 +249,15 @@
 		8CBC338D09B9279147FBD852 = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 10;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "MetalCAD/Info.plist";
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
-				MARKETING_VERSION = 1.0;
+				MARKETING_VERSION = 1.10;
 				PRODUCT_BUNDLE_IDENTIFIER = com.user.metalcad;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -265,14 +270,15 @@
 		C286FC8B91125F435CB47F15 = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 10;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "MetalCAD/Info.plist";
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
-				MARKETING_VERSION = 1.0;
+				MARKETING_VERSION = 1.10;
 				PRODUCT_BUNDLE_IDENTIFIER = com.user.metalcad;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;

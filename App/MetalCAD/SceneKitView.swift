@@ -516,7 +516,7 @@ struct SceneKitView: UIViewRepresentable {
             action: #selector(Coordinator.handleSketchTrack(_:)))
         track.minimumPressDuration = 0
         track.allowableMovement = CGFloat.greatestFiniteMagnitude
-        track.maximumNumberOfTouches = 1
+        track.numberOfTouchesRequired = 1
         track.isEnabled = false
         view.addGestureRecognizer(track)
         context.coordinator.sketchTrack = track

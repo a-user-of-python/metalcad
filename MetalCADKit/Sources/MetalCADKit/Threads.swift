@@ -89,7 +89,7 @@ public struct ThreadSpec: Codable, Equatable {
 /// callers union it with the shaft (v1: mesh concatenation).
 public enum ThreadTessellator {
     public static func ridgeMesh(spec s: ThreadSpec, baseZ: Double = 0,
-                                 segmentsPerTurn: Int = 48) throws -> Mesh {
+                                 segmentsPerTurn: Int = 72) throws -> Mesh {
         let (spec, _) = try s.validated()
         let rOut = spec.majorDiameter / 2
         let rIn = spec.minorDiameter / 2

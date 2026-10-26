@@ -9,12 +9,19 @@
 		E73F8391350E770E58919C5C = {isa = PBXBuildFile; fileRef = 26E010B5315191442FAC2218; };
 		2494647FC5C06D2C0A047E7E = {isa = PBXBuildFile; fileRef = 40A5B1E2E10E2E70C2F51D42; };
 		F569ABDEBBC53A99E905454A = {isa = PBXBuildFile; fileRef = 471A6EEF5C8FDD6150C40363; };
+		45C7944EC51DB71456C4C103 = {isa = PBXBuildFile; fileRef = 59738EC4B0D522A0A01F4C23; };
+		9F9149344B4E15B857DCD6D9 = {isa = PBXBuildFile; fileRef = 20588C5D3E62C37AFB605620; };
 		67E6CFA3292C95B3A246FCAC = {isa = PBXBuildFile; fileRef = 34EAF74D8F9AD22B1A955824; };
 		13CD248F2BE6E99CDD084E15 = {isa = PBXBuildFile; fileRef = E2B081EF4558CF6FC12889C2; };
 		96FD82947535842B87E43ECF = {isa = PBXBuildFile; fileRef = 614601B82B6920FE351BEA65; };
+		4149C4978D7611A9AA14AA67 = {isa = PBXBuildFile; fileRef = 77ADB03B5FF0134FD4110AA5; };
+		B7AB714EF9EC1059D64D51E6 = {isa = PBXBuildFile; fileRef = 777B7FE2AA32D14D9B824E11; };
 		DCE42359E782BB14EDC73016 = {isa = PBXBuildFile; fileRef = BFF3437CE7A2C559CAF5F561; };
+		49B553AD20F900EF2B41CAC2 = {isa = PBXBuildFile; fileRef = 4E23DBFF67033CC8FC7F7045; };
 		56A715C9B03BC6FF104DCD91 = {isa = PBXBuildFile; fileRef = C7B47E517D579EA037EC1A60; };
+		FD1B533D18546977C0A9B356 = {isa = PBXBuildFile; fileRef = 8225AF25A1F9B67B5510998E; };
 		866E72D9633FA926E0ECB3B8 = {isa = PBXBuildFile; fileRef = 41EDBF6BADD28A698D318FEF; };
+		76FE0310BCC97EB619CB607A = {isa = PBXBuildFile; fileRef = 44296DEB4E99580BE6C215C4; };
 		BC42B3A84FB210AC59D85EFC = {isa = PBXBuildFile; fileRef = F2C7C1D0D829DB22C758341D; };
 		65C83364523C1AA6AED5D7EC = {isa = PBXBuildFile; fileRef = 142EA766A2E061693F16C021; };
 		943DED58E8A7134F7C7FF71B = {isa = PBXBuildFile; fileRef = C767517EF12A2A560AA6E8AE; };
@@ -26,12 +33,19 @@
 		26E010B5315191442FAC2218 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticsView.swift; sourceTree = "<group>"; };
 		40A5B1E2E10E2E70C2F51D42 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DocumentsView.swift; sourceTree = "<group>"; };
 		471A6EEF5C8FDD6150C40363 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorView.swift; sourceTree = "<group>"; };
+		59738EC4B0D522A0A01F4C23 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeatureEditorSheet.swift; sourceTree = "<group>"; };
+		20588C5D3E62C37AFB605620 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeasurePanel.swift; sourceTree = "<group>"; };
 		34EAF74D8F9AD22B1A955824 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetalCADApp.swift; sourceTree = "<group>"; };
 		E2B081EF4558CF6FC12889C2 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneKitView.swift; sourceTree = "<group>"; };
 		614601B82B6920FE351BEA65 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SketchEditorView.swift; sourceTree = "<group>"; };
+		77ADB03B5FF0134FD4110AA5 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolPanels.swift; sourceTree = "<group>"; };
+		777B7FE2AA32D14D9B824E11 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CSG.swift; sourceTree = "<group>"; };
 		BFF3437CE7A2C559CAF5F561 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Document.swift; sourceTree = "<group>"; };
+		4E23DBFF67033CC8FC7F7045 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Edges.swift; sourceTree = "<group>"; };
 		C7B47E517D579EA037EC1A60 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Errors.swift; sourceTree = "<group>"; };
+		8225AF25A1F9B67B5510998E = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Faces.swift; sourceTree = "<group>"; };
 		41EDBF6BADD28A698D318FEF = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IO.swift; sourceTree = "<group>"; };
+		44296DEB4E99580BE6C215C4 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoftSweep.swift; sourceTree = "<group>"; };
 		F2C7C1D0D829DB22C758341D = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCLog.swift; sourceTree = "<group>"; };
 		142EA766A2E061693F16C021 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Math.swift; sourceTree = "<group>"; };
 		C767517EF12A2A560AA6E8AE = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Mesh.swift; sourceTree = "<group>"; };
@@ -57,9 +71,12 @@
 				26E010B5315191442FAC2218,
 				40A5B1E2E10E2E70C2F51D42,
 				471A6EEF5C8FDD6150C40363,
+				59738EC4B0D522A0A01F4C23,
+				20588C5D3E62C37AFB605620,
 				34EAF74D8F9AD22B1A955824,
 				E2B081EF4558CF6FC12889C2,
 				614601B82B6920FE351BEA65,
+				77ADB03B5FF0134FD4110AA5,
 				BB5944C6515D6D2B678426AB,
 			);
 			path = MetalCAD;
@@ -68,9 +85,13 @@
 		A4DE87CF6E13886A7566E381 = {
 			isa = PBXGroup;
 			children = (
+				777B7FE2AA32D14D9B824E11,
 				BFF3437CE7A2C559CAF5F561,
+				4E23DBFF67033CC8FC7F7045,
 				C7B47E517D579EA037EC1A60,
+				8225AF25A1F9B67B5510998E,
 				41EDBF6BADD28A698D318FEF,
+				44296DEB4E99580BE6C215C4,
 				F2C7C1D0D829DB22C758341D,
 				142EA766A2E061693F16C021,
 				C767517EF12A2A560AA6E8AE,
@@ -134,12 +155,19 @@
 				E73F8391350E770E58919C5C,
 				2494647FC5C06D2C0A047E7E,
 				F569ABDEBBC53A99E905454A,
+				45C7944EC51DB71456C4C103,
+				9F9149344B4E15B857DCD6D9,
 				67E6CFA3292C95B3A246FCAC,
 				13CD248F2BE6E99CDD084E15,
 				96FD82947535842B87E43ECF,
+				4149C4978D7611A9AA14AA67,
+				B7AB714EF9EC1059D64D51E6,
 				DCE42359E782BB14EDC73016,
+				49B553AD20F900EF2B41CAC2,
 				56A715C9B03BC6FF104DCD91,
+				FD1B533D18546977C0A9B356,
 				866E72D9633FA926E0ECB3B8,
+				76FE0310BCC97EB619CB607A,
 				BC42B3A84FB210AC59D85EFC,
 				65C83364523C1AA6AED5D7EC,
 				943DED58E8A7134F7C7FF71B,

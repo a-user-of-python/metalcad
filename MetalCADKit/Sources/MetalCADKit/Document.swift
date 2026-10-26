@@ -4,6 +4,24 @@ public enum PrimitiveKind: String, Codable, CaseIterable {
     case box, cylinder, sphere, cone, torus
 }
 
+public enum HoleKind: Codable, Equatable {
+    case simple
+    case counterbore(diameter: Double, depth: Double)
+    case countersink(angleDegrees: Double)
+}
+
+public enum MirrorPlane: String, Codable, CaseIterable {
+    case yz, xz, xy
+    public var axis: Int { self == .yz ? 0 : (self == .xz ? 1 : 2) }
+    public var displayName: String { rawValue.uppercased() + " plane" }
+}
+
+public enum ExtrudeMode: Codable, Equatable {
+    case one
+    case symmetric
+    case twoSided(second: Double)
+}
+
 public enum FeatureKind: Codable, Equatable {
     case pad(sketchID: String, length: Double)
     case pocket(sketchID: String, depth: Double)
@@ -11,7 +29,14 @@ public enum FeatureKind: Codable, Equatable {
     case primitive(kind: PrimitiveKind, params: [String: Double])
     case threadShaft(spec: ThreadSpec)
     case linearPattern(count: Int, spacing: Vec3)
+    case hole(sketchID: String, diameter: Double, depth: Double, kind: HoleKind)
+    case mirror(plane: MirrorPlane)
     case fillet(radius: Double)
+    case chamfer(distance: Double)
+    case shell(thickness: Double)
+    case extrude(sketchID: String, distance: Double, taperDegrees: Double, mode: ExtrudeMode)
+    case loft(sketchA: String, sketchB: String)
+    case sweep(profileSketchID: String, pathSketchID: String)
     case booleanCutPlaceholder
 }
 
@@ -30,10 +55,12 @@ public struct Part: Codable, Equatable, Identifiable {
     public var name: String
     public var sketches: [Sketch] = []
     public var features: [Feature] = []
+    public var materialID: String = MaterialLibrary.defaultMaterial.id
     public init(id: String = UUID().uuidString, name: String) {
         self.id = id; self.name = name
     }
     public func sketch(_ id: String) -> Sketch? { sketches.first { $0.id == id } }
+    public var material: Material { MaterialLibrary.byID(materialID) ?? MaterialLibrary.defaultMaterial }
 }
 
 public struct CADDocument: Codable, Equatable, Identifiable {
@@ -61,6 +88,8 @@ public struct RebuildResult {
     public var statuses: [FeatureStatus]
     public var warnings: [CADError]
     public var firstError: CADError?
+    /// Mass in grams from the part's material density; nil if no material.
+    public var massGrams: Double? = nil
 }
 
 public enum DocumentEngine {
@@ -86,18 +115,49 @@ public enum DocumentEngine {
                 continue
             }
             do {
-                var m: Mesh
                 if case .linearPattern(let count, let spacing) = feature.kind {
-                    // Pattern operates on the body built so far.
-                    m = try DocumentEngine.applyPattern(mesh: body, count: count, spacing: spacing)
-                    body = Mesh()
-                    body.append(m)
+                    body = try DocumentEngine.applyPattern(mesh: body, count: count, spacing: spacing)
                     statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
                     logger.debug(.feature, "pattern ok", context: ["feature": feature.name, "count": "\(count)"])
                     continue
                 }
-                m = try evaluate(feature: feature, part: part, warnings: &warnings)
-                body.append(m)
+                if case .mirror(let plane) = feature.kind {
+                    if body.triangleCount > 0 {
+                        body = try CSG.union(body, body.mirrored(axis: plane.axis))
+                    }
+                    statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
+                    logger.debug(.feature, "mirror ok", context: ["feature": feature.name, "plane": plane.rawValue])
+                    continue
+                }
+                if case .fillet(let radius) = feature.kind {
+                    guard body.triangleCount > 0 else { throw CADError.filletFailed("no solid to fillet yet") }
+                    body = try EdgeFinisher.fillet(body: body, radius: radius)
+                    statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
+                    logger.debug(.feature, "fillet ok", context: ["feature": feature.name, "radius": "\(radius)"])
+                    continue
+                }
+                if case .chamfer(let distance) = feature.kind {
+                    guard body.triangleCount > 0 else { throw CADError.chamferInvalid("no solid to chamfer yet") }
+                    body = try EdgeFinisher.chamfer(body: body, distance: distance)
+                    statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
+                    logger.debug(.feature, "chamfer ok", context: ["feature": feature.name, "distance": "\(distance)"])
+                    continue
+                }
+                if case .shell(let thickness) = feature.kind {
+                    guard body.triangleCount > 0 else { throw CADError.shellFailed("no solid to shell yet") }
+                    body = try EdgeFinisher.shell(body: body, thickness: thickness)
+                    statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
+                    logger.debug(.feature, "shell ok", context: ["feature": feature.name, "wall": "\(thickness)"])
+                    continue
+                }
+                let m = try evaluate(feature: feature, part: part, warnings: &warnings)
+                switch feature.kind {
+                case .pocket, .hole:
+                    guard body.triangleCount > 0 else { throw CADError.booleanEmptyResult }
+                    body = try CSG.subtract(body, m)
+                default:
+                    body = body.triangleCount == 0 ? m : try CSG.union(body, m)
+                }
                 statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
                 logger.debug(.feature, "feature ok", context: ["feature": feature.name, "tris": "\(m.triangleCount)"])
             } catch let e as CADError {
@@ -113,12 +173,57 @@ public enum DocumentEngine {
                 firstError = e
             }
         }
+        let mass = body.volume / 1000.0 * part.material.density  // mm^3 -> cm^3 * g/cm^3
         logger.info(.perf, "rebuild done", context: [
             "ms": String(format: "%.1f", Date().timeIntervalSince(start) * 1000),
             "tris": "\(body.triangleCount)",
             "ok": firstError == nil ? "1" : "0",
         ])
-        return RebuildResult(mesh: body, statuses: statuses, warnings: warnings, firstError: firstError)
+        return RebuildResult(mesh: body, statuses: statuses, warnings: warnings,
+                             firstError: firstError, massGrams: mass)
+    }
+
+    /// Chain a sketch's line entities into an ordered world-space polyline
+    /// (the sweep path).
+    static func pathPoints(sketch: Sketch) throws -> [Vec3] {
+        var segments: [(Vec2, Vec2)] = []
+        for e in sketch.entities where !e.isConstruction {
+            if case .line(_, let a, let b, _) = e { segments.append((a, b)) }
+        }
+        guard !segments.isEmpty else { throw CADError.sweepPathInvalid("the path sketch needs connected lines") }
+        var chain: [Vec2] = [segments[0].0, segments[0].1]
+        var pool = Array(segments.dropFirst())
+        var grew = true
+        while grew {
+            grew = false
+            for i in pool.indices {
+                let (a, b) = pool[i]
+                if a.distance(to: chain.last!) < 1e-6 { chain.append(b); pool.remove(at: i); grew = true; break }
+                if b.distance(to: chain.last!) < 1e-6 { chain.append(a); pool.remove(at: i); grew = true; break }
+                if a.distance(to: chain.first!) < 1e-6 { chain.insert(b, at: 0); pool.remove(at: i); grew = true; break }
+                if b.distance(to: chain.first!) < 1e-6 { chain.insert(a, at: 0); pool.remove(at: i); grew = true; break }
+            }
+        }
+        guard chain.count >= 2 else { throw CADError.sweepPathInvalid("path lines do not connect") }
+        return chain.map { sketch.plane.toWorld($0) }
+    }
+
+    /// Map a +Z-built tool mesh (z: 0…height) onto a sketch plane so it
+    /// starts `above` mm over the surface point and reaches into the part
+    /// along −normal.
+    static func orientCylinder(_ m: Mesh, plane: Plane3, center: Vec3, above: Double, depth: Double) -> Mesh {
+        let n = plane.normal
+        let verts = m.vertices.map { v in
+            center + plane.xAxis * v.x + plane.yAxis * v.y + n * (above - v.z)
+        }
+        _ = depth
+        // The z -> (above - z) map is a reflection: flip winding to restore
+        // outward normals, or CSG will treat the tool as inside-out.
+        var idx: [UInt32] = []
+        for t in 0..<m.triangleCount {
+            idx += [m.indices[t * 3], m.indices[t * 3 + 2], m.indices[t * 3 + 1]]
+        }
+        return Mesh(vertices: verts, indices: idx)
     }
 
     static func evaluate(feature: Feature, part: Part, warnings: inout [CADError]) throws -> Mesh {
@@ -129,8 +234,56 @@ public enum DocumentEngine {
             warnings += w
             guard let profile = profiles.first else { throw CADError.padNoProfile }
             return try Tessellation.extrude(profile: profile, plane: sketch.plane, length: length)
-        case .pocket:
-            throw CADError.booleanFailed("exact cut arrives with the OCCT kernel bridge")
+        case .pocket(let sketchID, let depth):
+            guard depth > 0 else { throw CADError.holeSpecInvalid("pocket depth must be > 0") }
+            guard let sketch = part.sketch(sketchID) else { throw CADError.nameNotFound("sketch") }
+            let (profiles, w) = try sketch.extractProfiles()
+            warnings += w
+            guard let profile = profiles.first else { throw CADError.padNoProfile }
+            // Prism spanning from 1 mm above the sketch plane to `depth`
+            // below it; rebuild subtracts it from the body.
+            let prism = try Tessellation.extrude(profile: profile, plane: sketch.plane, length: depth + 1)
+            return prism.translated(by: sketch.plane.normal * -depth)
+        case .hole(let sketchID, let diameter, let depth, let kind):
+            guard diameter > 0 else { throw CADError.holeSpecInvalid("diameter must be > 0") }
+            guard let sketch = part.sketch(sketchID) else { throw CADError.nameNotFound("sketch") }
+            // Drill points: sketch points and circle centers.
+            var points: [Vec2] = []
+            for e in sketch.entities where !e.isConstruction {
+                switch e {
+                case .point(_, let at, _): points.append(at)
+                case .circle(_, let c, _, _): points.append(c)
+                default: break
+                }
+            }
+            guard !points.isEmpty else { throw CADError.holeSpecInvalid("the hole sketch needs a point or circle center") }
+            let cutDepth = depth > 0 ? depth : 10_000  // 0 = through everything
+            var tool = Mesh()
+            for p in points {
+                let center3 = sketch.plane.toWorld(p)
+                var cyl = try Tessellation.cylinder(radius: diameter / 2, height: cutDepth + 1, segments: 48)
+                // Cylinder is built along +Z from z=0; orient it along -normal
+                // starting 1 mm above the plane.
+                cyl = orientCylinder(cyl, plane: sketch.plane, center: center3, above: 1, depth: cutDepth + 1)
+                tool.append(cyl)
+                switch kind {
+                case .simple: break
+                case .counterbore(let cbD, let cbDepth):
+                    guard cbD > diameter, cbDepth > 0, cbDepth < cutDepth else {
+                        throw CADError.holeSpecInvalid("counterbore must be wider and shallower than the hole")
+                    }
+                    var cb = try Tessellation.cylinder(radius: cbD / 2, height: cbDepth + 1, segments: 48)
+                    cb = orientCylinder(cb, plane: sketch.plane, center: center3, above: 1, depth: cbDepth + 1)
+                    tool.append(cb)
+                case .countersink(let angle):
+                    guard angle > 0, angle < 180 else { throw CADError.holeSpecInvalid("countersink angle 0-180") }
+                    let coneH = (diameter / 2) / tan(angle / 2 * .pi / 180)
+                    var cone = try Tessellation.cone(radius: diameter / 2, height: coneH, segments: 48)
+                    cone = orientCylinder(cone, plane: sketch.plane, center: center3, above: 1, depth: coneH + 1)
+                    tool.append(cone)
+                }
+            }
+            return tool
         case .revolve(let sketchID, let axisEntityID, let angle):
             guard let sketch = part.sketch(sketchID) else { throw CADError.nameNotFound("sketch") }
             guard let axisEnt = sketch.entity(axisEntityID),
@@ -157,8 +310,42 @@ public enum DocumentEngine {
             return try ThreadTessellator.threadedShaft(spec: spec)
         case .linearPattern:
             throw CADError.invariantBroken("pattern must be handled by rebuild, not evaluate")
-        case .fillet(let radius):
-            throw CADError.filletFailed("radius \(radius): exact fillet arrives with the OCCT kernel bridge")
+        case .mirror:
+            throw CADError.invariantBroken("mirror must be handled by rebuild, not evaluate")
+        case .fillet, .chamfer, .shell:
+            throw CADError.invariantBroken("edge finishing must be handled by rebuild, not evaluate")
+        case .extrude(let sketchID, let distance, let taper, let mode):
+            guard distance > 0 else { throw CADError.padLengthInvalid(distance) }
+            guard let sketch = part.sketch(sketchID) else { throw CADError.nameNotFound("sketch") }
+            let (profiles, w) = try sketch.extractProfiles()
+            warnings += w
+            guard let profile = profiles.first else { throw CADError.padNoProfile }
+            switch mode {
+            case .one:
+                return try Tessellation.extrudeTapered(profile: profile, plane: sketch.plane, length: distance, taperDegrees: taper)
+            case .symmetric:
+                let shifted = Plane3(origin: sketch.plane.origin - sketch.plane.normal * (distance / 2),
+                                     xAxis: sketch.plane.xAxis, yAxis: sketch.plane.yAxis)
+                return try Tessellation.extrudeTapered(profile: profile, plane: shifted, length: distance, taperDegrees: taper)
+            case .twoSided(let second):
+                guard second > 0 else { throw CADError.padLengthInvalid(second) }
+                var m = try Tessellation.extrudeTapered(profile: profile, plane: sketch.plane, length: distance, taperDegrees: taper)
+                let backPlane = Plane3(origin: sketch.plane.origin - sketch.plane.normal * second,
+                                       xAxis: sketch.plane.xAxis, yAxis: sketch.plane.yAxis)
+                let back = try Tessellation.extrudeTapered(profile: profile, plane: backPlane, length: second, taperDegrees: taper)
+                m.append(back)
+                return m
+            }
+        case .loft(let idA, let idB):
+            guard let skA = part.sketch(idA), let skB = part.sketch(idB) else { throw CADError.nameNotFound("sketch") }
+            let loopA = try ProfileLoop.worldLoop(sketch: skA)
+            let loopB = try ProfileLoop.worldLoop(sketch: skB)
+            return try LoftTessellator.loft(loopA: loopA.points, loopB: loopB.points)
+        case .sweep(let profileID, let pathID):
+            guard let skP = part.sketch(profileID), let skPath = part.sketch(pathID) else { throw CADError.nameNotFound("sketch") }
+            let loop = try ProfileLoop.worldLoop(sketch: skP)
+            let path = try DocumentEngine.pathPoints(sketch: skPath)
+            return try SweepTessellator.sweep(profileLoop: loop.points, profilePlane: skP.plane, path: path)
         case .booleanCutPlaceholder:
             throw CADError.booleanFailed("exact boolean arrives with the OCCT kernel bridge")
         }

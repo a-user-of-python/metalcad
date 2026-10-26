@@ -2,17 +2,44 @@ import SwiftUI
 import SceneKit
 import UIKit
 
-/// SceneKit preview of a kit Mesh. Vertices are expanded per triangle so
-/// each face gets its own flat normal (flat shading). Camera control is
-/// SceneKit's; the camera is framed once, on the first non-empty mesh.
+/// SceneKit preview of a kit Mesh, v2: SMOOTH shading via
+/// `Mesh.displaySoup()` (crease-averaged normals — curved surfaces have
+/// no visible triangles; triangles only appear in the exported STL),
+/// physically-based material from the part's `Material`, and optional
+/// face picking for "Sketch on face".
+///
+/// Picking note: the soup is expanded in exactly the same triangle order
+/// as `mesh.welded()`, so a SceneKit hit-test `faceIndex` IS the welded
+/// mesh's triangle index — no remapping needed.
 struct SceneKitView: UIViewRepresentable {
     var mesh: Mesh
+    /// Display material; nil falls back to the library default.
+    var material: Material? = nil
+    /// When true, taps hit-test the model and report the triangle index.
+    var isPickingFace: Bool = false
+    /// Called with the welded-mesh triangle index of the tapped face.
+    var onFacePicked: ((Int) -> Void)? = nil
 
-    final class Coordinator {
-        var meshKey: String = ""
+    final class Coordinator: NSObject {
+        var geometryKey: String = ""
         var modelNode: SCNNode?
         var cameraNode: SCNNode?
         var framed: Bool = false
+        var onFacePicked: ((Int) -> Void)?
+        var isPickingFace: Bool = false
+
+        @objc func handleTap(_ gesture: UITapGestureRecognizer) {
+            guard isPickingFace, let view = gesture.view as? SCNView else { return }
+            let point = gesture.location(in: view)
+            let options: [SCNHitTestOption: Any] = [
+                .searchMode: NSNumber(value: SCNHitTestSearchMode.closest.rawValue),
+                .boundingBoxOnly: NSNumber(value: false),
+                .ignoreChildNodes: NSNumber(value: false),
+            ]
+            let hits = view.hitTest(point, options: options)
+            guard let hit = hits.first(where: { $0.node.geometry != nil }) else { return }
+            onFacePicked?(hit.faceIndex)
+        }
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -27,19 +54,30 @@ struct SceneKitView: UIViewRepresentable {
         let scene = SCNScene()
         view.scene = scene
 
+        // Key light (physically-based materials still need real lights).
         let keyLight = SCNNode()
         let dir = SCNLight()
         dir.type = .directional
-        dir.intensity = 900
+        dir.intensity = 1100
         keyLight.light = dir
         keyLight.position = SCNVector3(60, 90, 110)
         keyLight.look(at: SCNVector3(0, 0, 0))
         scene.rootNode.addChildNode(keyLight)
 
+        // Soft fill from the opposite side so curved metal reads smooth.
+        let fillNode = SCNNode()
+        let fill = SCNLight()
+        fill.type = .directional
+        fill.intensity = 350
+        fillNode.light = fill
+        fillNode.position = SCNVector3(-80, -30, -60)
+        fillNode.look(at: SCNVector3(0, 0, 0))
+        scene.rootNode.addChildNode(fillNode)
+
         let ambientNode = SCNNode()
         let amb = SCNLight()
         amb.type = .ambient
-        amb.intensity = 380
+        amb.intensity = 420
         amb.color = UIColor(white: 0.92, alpha: 1)
         ambientNode.light = amb
         scene.rootNode.addChildNode(ambientNode)
@@ -52,17 +90,33 @@ struct SceneKitView: UIViewRepresentable {
         view.pointOfView = cameraNode
         context.coordinator.cameraNode = cameraNode
 
+        let tap = UITapGestureRecognizer(
+            target: context.coordinator,
+            action: #selector(Coordinator.handleTap(_:)))
+        // Single tap picks a face only in pick mode; the coordinator
+        // ignores it otherwise, so camera control is never disturbed.
+        view.addGestureRecognizer(tap)
+
         return view
     }
 
     func updateUIView(_ view: SCNView, context: Context) {
-        // Cheap identity for "the mesh changed": triangle count + volume.
-        let key = "\(mesh.triangleCount)|\(mesh.volume)"
-        guard context.coordinator.meshKey != key else { return }
-        context.coordinator.meshKey = key
+        context.coordinator.onFacePicked = onFacePicked
+        context.coordinator.isPickingFace = isPickingFace
+        if isPickingFace {
+            view.backgroundColor = UIColor(red: 0.13, green: 0.10, blue: 0.05, alpha: 1)
+        } else {
+            view.backgroundColor = UIColor(red: 0.07, green: 0.08, blue: 0.11, alpha: 1)
+        }
+
+        // Identity for "geometry must be rebuilt": mesh shape + material.
+        let mat = material ?? MaterialLibrary.defaultMaterial
+        let key = "\(mesh.triangleCount)|\(mesh.volume)|\(mat.id)"
+        guard context.coordinator.geometryKey != key else { return }
+        context.coordinator.geometryKey = key
 
         context.coordinator.modelNode?.removeFromParentNode()
-        let node = SCNNode(geometry: Self.makeGeometry(mesh))
+        let node = SCNNode(geometry: Self.makeGeometry(mesh, material: mat))
         view.scene?.rootNode.addChildNode(node)
         context.coordinator.modelNode = node
 
@@ -78,51 +132,55 @@ struct SceneKitView: UIViewRepresentable {
         }
     }
 
-    /// Expanded (non-shared) vertices + per-face normals + sequential index.
-    static func makeGeometry(_ mesh: Mesh) -> SCNGeometry {
+    /// Smooth geometry: positions + crease-averaged normals straight from
+    /// `displaySoup()`. One vertex per corner, sequential indices.
+    static func makeGeometry(_ mesh: Mesh, material: Material) -> SCNGeometry {
         let triCount = mesh.triangleCount
         guard triCount > 0 else { return SCNGeometry() }
-        if let maxIndex = mesh.indices.max(), Int(maxIndex) >= mesh.vertices.count {
-            MCLog.shared.warn(.render, "mesh index out of range; preview skipped",
+        let soup = mesh.displaySoup()
+        let vertCount = soup.positions.count
+        guard vertCount == triCount * 3 else {
+            MCLog.shared.warn(.render, "display soup size mismatch; preview skipped",
                               code: "MCAD-KN603")
             return SCNGeometry()
         }
         var positions: [Float] = []
         var normals: [Float] = []
         var indices: [UInt32] = []
-        positions.reserveCapacity(triCount * 9)
-        normals.reserveCapacity(triCount * 9)
-        indices.reserveCapacity(triCount * 3)
-        let faceNormals = mesh.faceNormals()
-        for t in 0..<triCount {
-            let n = faceNormals[t]
-            for k in 0..<3 {
-                let v = mesh.vertices[Int(mesh.indices[t * 3 + k])]
-                positions.append(Float(v.x)); positions.append(Float(v.y)); positions.append(Float(v.z))
-                normals.append(Float(n.x)); normals.append(Float(n.y)); normals.append(Float(n.z))
-                indices.append(UInt32(t * 3 + k))
-            }
+        positions.reserveCapacity(vertCount * 3)
+        normals.reserveCapacity(vertCount * 3)
+        indices.reserveCapacity(vertCount)
+        for i in 0..<vertCount {
+            let p = soup.positions[i]
+            let n = soup.normals[i]
+            positions.append(Float(p.x)); positions.append(Float(p.y)); positions.append(Float(p.z))
+            normals.append(Float(n.x)); normals.append(Float(n.y)); normals.append(Float(n.z))
+            indices.append(UInt32(i))
         }
         let posData = positions.withUnsafeBufferPointer { Data(buffer: $0) }
         let norData = normals.withUnsafeBufferPointer { Data(buffer: $0) }
         let idxData = indices.withUnsafeBufferPointer { Data(buffer: $0) }
         let vertexSource = SCNGeometrySource(
-            data: posData, semantic: .vertex, vectorCount: triCount * 3,
+            data: posData, semantic: .vertex, vectorCount: vertCount,
             usesFloatComponents: true, componentsPerVector: 3,
             bytesPerComponent: 4, dataOffset: 0, dataStride: 12)
         let normalSource = SCNGeometrySource(
-            data: norData, semantic: .normal, vectorCount: triCount * 3,
+            data: norData, semantic: .normal, vectorCount: vertCount,
             usesFloatComponents: true, componentsPerVector: 3,
             bytesPerComponent: 4, dataOffset: 0, dataStride: 12)
         let element = SCNGeometryElement(
             data: idxData, primitiveType: .triangles,
             primitiveCount: triCount, bytesPerIndex: 4)
         let geometry = SCNGeometry(sources: [vertexSource, normalSource], elements: [element])
-        let material = SCNMaterial()
-        material.diffuse.contents = UIColor(red: 0.36, green: 0.56, blue: 0.96, alpha: 1)
-        material.lightingModel = .blinn
-        material.isDoubleSided = true
-        geometry.materials = [material]
+        let scnMaterial = SCNMaterial()
+        scnMaterial.lightingModel = .physicallyBased
+        scnMaterial.diffuse.contents = UIColor(
+            red: CGFloat(material.red), green: CGFloat(material.green),
+            blue: CGFloat(material.blue), alpha: 1)
+        scnMaterial.metalness.contents = NSNumber(value: material.metalness)
+        scnMaterial.roughness.contents = NSNumber(value: material.roughness)
+        scnMaterial.isDoubleSided = true
+        geometry.materials = [scnMaterial]
         return geometry
     }
 }

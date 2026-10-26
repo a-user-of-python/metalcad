@@ -28,7 +28,7 @@ public enum Tessellation {
     }
 
     public static func cylinder(radius: Double, height: Double, baseZ: Double = 0,
-                                segments: Int = 48, taperDegrees: Double = 0) throws -> Mesh {
+                                segments: Int = 96, taperDegrees: Double = 0) throws -> Mesh {
         guard radius > 0, height > 0 else {
             throw CADError.primitiveParamInvalid("cylinder radius/height must be > 0")
         }
@@ -52,12 +52,16 @@ public enum Tessellation {
         return b.mesh
     }
 
-    public static func sphere(radius: Double, segments: Int = 32, rings: Int = 20) throws -> Mesh {
+    public static func sphere(radius: Double, segments: Int = 64, rings: Int = 40) throws -> Mesh {
         guard radius > 0 else { throw CADError.primitiveParamInvalid("sphere radius must be > 0") }
         var b = MeshBuilder()
-        var grid: [[UInt32]] = []
-        for r in 0...rings {
-            let phi = Double.pi * Double(r) / Double(rings)  // 0..pi from top
+        // Single pole vertices (a grid of coincident pole vertices would
+        // weld into degenerate triangles with zero normals).
+        let top = b.vertex(Vec3(0, 0, radius))
+        let bottom = b.vertex(Vec3(0, 0, -radius))
+        var grid: [[UInt32]] = []  // rings 1..<rings
+        for r in 1..<rings {
+            let phi = Double.pi * Double(r) / Double(rings)
             var row: [UInt32] = []
             for s in 0..<segments {
                 let th = 2 * Double.pi * Double(s) / Double(segments)
@@ -65,17 +69,28 @@ public enum Tessellation {
             }
             grid.append(row)
         }
-        for r in 0..<(rings) {
+        // Top cap fan.
+        for s in 0..<segments {
+            let s2 = (s + 1) % segments
+            b.triangle(top, grid[0][s], grid[0][s2])
+        }
+        // Middle bands.
+        for r in 0..<(grid.count - 1) {
             for s in 0..<segments {
                 let s2 = (s + 1) % segments
-                if r > 0 { b.triangle(grid[r][s], grid[r + 1][s], grid[r + 1][s2]) }
-                if r < rings - 1 { b.triangle(grid[r][s], grid[r + 1][s2], grid[r][s2]) }
+                b.quad(grid[r + 1][s], grid[r + 1][s2], grid[r][s2], grid[r][s])
             }
+        }
+        // Bottom cap fan.
+        let last = grid[grid.count - 1]
+        for s in 0..<segments {
+            let s2 = (s + 1) % segments
+            b.triangle(bottom, last[s2], last[s])
         }
         return b.mesh
     }
 
-    public static func cone(radius: Double, height: Double, segments: Int = 48) throws -> Mesh {
+    public static func cone(radius: Double, height: Double, segments: Int = 96) throws -> Mesh {
         guard radius > 0, height > 0 else {
             throw CADError.primitiveParamInvalid("cone radius/height must be > 0")
         }
@@ -96,7 +111,7 @@ public enum Tessellation {
     }
 
     public static func torus(ringRadius: Double, tubeRadius: Double,
-                             segments: Int = 48, sides: Int = 20) throws -> Mesh {
+                             segments: Int = 96, sides: Int = 48) throws -> Mesh {
         guard ringRadius > 0, tubeRadius > 0 else {
             throw CADError.primitiveParamInvalid("torus radii must be > 0")
         }
@@ -265,7 +280,7 @@ public enum Tessellation {
             let cosA = cos(ang), sinA = sin(ang)
             return axisOrigin3 + rel * cosA + axisDir3.cross(rel) * sinA + axisDir3 * (axisDir3.dot(rel) * (1 - cosA))
         }
-        let steps = max(4, Int(ceil(angleDegrees / 5.0)))
+        let steps = max(4, Int(ceil(angleDegrees / 2.5)))
         var b = MeshBuilder()
         let loops = [profile.outer] + profile.holes
         for loop in loops {
@@ -297,6 +312,114 @@ public enum Tessellation {
                 b.triangle(j0, j1, j2)
             }
         }
+        return b.mesh
+    }
+}
+
+extension Tessellation {
+    /// Offset a simple polygon in its plane, keeping vertex count and
+    /// correspondence (each output vertex = intersection of the two
+    /// adjacent offset edge lines). Positive d expands a CCW polygon.
+    public static func offsetPolygon(_ polyIn: [Vec2], by d: Double) -> [Vec2]? {
+        let poly = dropCollinear(polyIn)
+        let area = polygonArea(poly)
+        guard area != 0, poly.count >= 3 else { return nil }
+        let ccw = area > 0
+        func line(_ a: Vec2, _ b: Vec2) -> (n: Vec2, c: Double) {
+            let dir = (b - a).normalized
+            var nrm = Vec2(dir.y, -dir.x)
+            if !ccw { nrm = nrm * -1 }
+            return (nrm, nrm.dot(a) + d)
+        }
+        var out: [Vec2] = []
+        let n = poly.count
+        for i in 0..<n {
+            let l1 = line(poly[(i + n - 1) % n], poly[i])
+            let l2 = line(poly[i], poly[(i + 1) % n])
+            let det = l1.n.x * l2.n.y - l1.n.y * l2.n.x
+            guard abs(det) > 1e-12 else { return nil }
+            out.append(Vec2((l1.c * l2.n.y - l1.n.y * l2.c) / det,
+                            (l1.n.x * l2.c - l1.c * l2.n.x) / det))
+        }
+        let newArea = polygonArea(out)
+        guard (newArea > 0) == ccw, abs(newArea) > abs(area) * 0.01 else { return nil }
+        // Half-plane containment: every output vertex must respect EVERY
+        // original edge's offset half-plane (inward distance >= |d| for a
+        // shrink). Adjacent-line intersections alone can "wrap" through
+        // the centre on over-shrinks and produce a plausible-looking but
+        // wrong polygon; the non-adjacent constraints expose it.
+        func inwardDistance(_ p: Vec2, _ a: Vec2, _ b: Vec2) -> Double {
+            let dir = (b - a).normalized
+            let cross = dir.x * (p.y - a.y) - dir.y * (p.x - a.x)
+            return ccw ? cross : -cross  // > 0 = inside
+        }
+        if d < 0 {
+            for p in out {
+                for i in 0..<n {
+                    if inwardDistance(p, poly[i], poly[(i + 1) % n]) < -d - 1e-9 { return nil }
+                }
+            }
+        } else if d > 0 {
+            func inwardDistanceOut(_ p: Vec2, _ a: Vec2, _ b: Vec2) -> Double {
+                let dir = (b - a).normalized
+                let cross = dir.x * (p.y - a.y) - dir.y * (p.x - a.x)
+                let outArea = polygonArea(out)
+                return outArea > 0 ? cross : -cross
+            }
+            for p in poly {
+                for i in 0..<out.count {
+                    if inwardDistanceOut(p, out[i], out[(i + 1) % out.count]) < d - 1e-9 { return nil }
+                }
+            }
+        }
+        return out
+    }
+
+    /// Extrude with a draft (taper) angle: the top profile is the base
+    /// profile offset inward by tan(taper) x length.
+    public static func extrudeTapered(profile: Profile, plane: Plane3, length: Double, taperDegrees: Double) throws -> Mesh {
+        guard length > 0 else { throw CADError.padLengthInvalid(length) }
+        if abs(taperDegrees) < 1e-9 { return try extrude(profile: profile, plane: plane, length: length) }
+        let shrink = tan(taperDegrees * .pi / 180) * length
+        guard let outerTop = offsetPolygon(profile.outer, by: -shrink) else {
+            throw CADError.booleanFailed("taper \(taperDegrees) degrees is too steep for this profile")
+        }
+        var holesTop: [[Vec2]] = []
+        for h in profile.holes {
+            guard let ht = offsetPolygon(h, by: shrink) else {
+                throw CADError.booleanFailed("taper \(taperDegrees) degrees collapses a hole in this profile")
+            }
+            holesTop.append(ht)
+        }
+        var b = MeshBuilder()
+        func w(_ p: Vec2, _ z: Double) -> Vec3 { plane.toWorld(p) + plane.normal * z }
+        let bottomTris = try triangulate(try bridgedPolygon(outer: profile.outer, holes: profile.holes))
+        let topTris = try triangulate(try bridgedPolygon(outer: outerTop, holes: holesTop))
+        for t in bottomTris {
+            let i0 = b.vertex(w(t[0], 0)), i1 = b.vertex(w(t[1], 0)), i2 = b.vertex(w(t[2], 0))
+            b.triangle(i0, i2, i1)
+        }
+        for t in topTris {
+            let j0 = b.vertex(w(t[0], length)), j1 = b.vertex(w(t[1], length)), j2 = b.vertex(w(t[2], length))
+            b.triangle(j0, j1, j2)
+        }
+        // Walls by vertex correspondence (offset keeps the count).
+        func walls(_ lo: [Vec2], _ hi: [Vec2], hole: Bool) {
+            let l0 = hole && polygonArea(lo) > 0 ? Array(lo.reversed()) : lo
+            let l1 = hole && polygonArea(hi) > 0 ? Array(hi.reversed()) : hi
+            // Reversal breaks index correspondence; for holes use the
+            // non-reversed loops and flip each quad instead.
+            let a = hole ? lo : l0
+            let c = hole ? hi : l1
+            for i in 0..<a.count {
+                let j = (i + 1) % a.count
+                let p0 = b.vertex(w(a[i], 0)), p1 = b.vertex(w(a[j], 0))
+                let p2 = b.vertex(w(c[j], length)), p3 = b.vertex(w(c[i], length))
+                if hole { b.quad(p0, p3, p2, p1) } else { b.quad(p0, p1, p2, p3) }
+            }
+        }
+        walls(profile.outer, outerTop, hole: false)
+        for (h0, h1) in zip(profile.holes, holesTop) { walls(h0, h1, hole: true) }
         return b.mesh
     }
 }

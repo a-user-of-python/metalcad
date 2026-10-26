@@ -36,8 +36,9 @@ final class DocumentLibrary: ObservableObject {
             .map { DocFile(url: $0) }
     }
 
-    /// Create a demo document (rectangle sketch + Pad + M10 thread shaft),
-    /// save it, and return it ready to open.
+    /// Create the v2 demo document (base plate + pocket + through holes
+    /// + boss on the top face, Stainless 304), save it, and return it
+    /// ready to open.
     func createDemoDocument() -> (doc: CADDocument, url: URL)? {
         var n = files.count + 1
         var name = "Untitled \(n)"
@@ -72,22 +73,50 @@ final class DocumentLibrary: ObservableObject {
     }
 }
 
-/// Builds the starter document used by "New document".
+/// Builds the starter document used by "New document". The v2 demo shows
+/// the new features end to end: a base plate, a real pocket, through
+/// holes, and a boss padded from a sketch on the plate's top face —
+/// all in Stainless 304.
 enum DemoFactory {
     static func make(name: String) -> CADDocument {
         var doc = CADDocument(name: name)
         var part = Part(name: "Demo Part")
+        part.materialID = "stainless-304"
 
-        var sketch = Sketch(name: "Plate", plane: .xy)
-        sketch.addRectangle(from: Vec2(-20, -15), to: Vec2(20, 15))
-        part.sketches.append(sketch)
-        part.features.append(Feature(name: "Plate Pad",
-                                     kind: .pad(sketchID: sketch.id, length: 10)))
+        // Base plate: 60 x 40 sketch, padded 10 mm.
+        var plate = Sketch(name: "Plate", plane: .xy)
+        plate.addRectangle(from: Vec2(-30, -20), to: Vec2(30, 20))
+        part.sketches.append(plate)
+        part.features.append(Feature(name: "Base Plate",
+                                     kind: .pad(sketchID: plate.id, length: 10)))
 
-        var spec = ThreadSpec()
-        if let preset = try? ThreadSpec.preset("M10") { spec = preset }
-        part.features.append(Feature(name: "M10 Thread Shaft",
-                                     kind: .threadShaft(spec: spec)))
+        // The plate's top face (z = 10) — pocket, holes and the boss
+        // sketch all live on it, exactly like Sketch on Face creates.
+        let topPlane = Plane3(origin: Vec3(0, 0, 10),
+                              xAxis: Vec3(1, 0, 0), yAxis: Vec3(0, 1, 0))
+
+        // Pocket: 30 x 20 recess, 4 mm deep.
+        var pocketSketch = Sketch(name: "Pocket Outline", plane: topPlane)
+        pocketSketch.addRectangle(from: Vec2(-15, -10), to: Vec2(15, 10))
+        part.sketches.append(pocketSketch)
+        part.features.append(Feature(name: "Pocket",
+                                     kind: .pocket(sketchID: pocketSketch.id, depth: 4)))
+
+        // Two through holes, drilled at the sketch points.
+        var holeSketch = Sketch(name: "Hole Points", plane: topPlane)
+        holeSketch.addPoint(Vec2(-22, -12))
+        holeSketch.addPoint(Vec2(-22, 12))
+        part.sketches.append(holeSketch)
+        part.features.append(Feature(name: "Holes",
+                                     kind: .hole(sketchID: holeSketch.id, diameter: 6,
+                                                 depth: 0, kind: .simple)))
+
+        // Boss: a circle sketched on the top face, padded up 6 mm.
+        var bossSketch = Sketch(name: "Face Sketch — Boss", plane: topPlane)
+        bossSketch.addCircle(Vec2(22, 0), 5)
+        part.sketches.append(bossSketch)
+        part.features.append(Feature(name: "Boss",
+                                     kind: .pad(sketchID: bossSketch.id, length: 6)))
 
         doc.parts.append(part)
         return doc

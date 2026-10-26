@@ -13,7 +13,17 @@ import os
 BASE = os.path.dirname(os.path.abspath(__file__))
 APP = "MetalCAD"
 
-APP_FILES = [
+def _swift_files(folder):
+    """All .swift files in a folder, sorted for a stable project file."""
+    try:
+        return sorted(f for f in os.listdir(folder) if f.endswith(".swift"))
+    except OSError:
+        return []
+
+
+# App sources: glob the app folder so a new view file is picked up
+# automatically instead of silently missing from the build.
+APP_FILES = _swift_files(os.path.join(BASE, APP)) or [
     "ContentView.swift",
     "DiagnosticsView.swift",
     "DocumentsView.swift",
@@ -22,9 +32,14 @@ APP_FILES = [
     "SceneKitView.swift",
     "SketchEditorView.swift",
 ]
-KIT_FILES = [
+# Kit sources: glob the kit folder — v2 added CSG.swift and Faces.swift,
+# and a hard-coded list silently dropped them from the app target.
+KIT_GROUP_PATH = "../MetalCADKit/Sources/MetalCADKit"
+KIT_FILES = _swift_files(os.path.join(BASE, KIT_GROUP_PATH)) or [
+    "CSG.swift",
     "Document.swift",
     "Errors.swift",
+    "Faces.swift",
     "IO.swift",
     "MCLog.swift",
     "Math.swift",
@@ -34,7 +49,6 @@ KIT_FILES = [
     "Tessellation.swift",
     "Threads.swift",
 ]
-KIT_GROUP_PATH = "../MetalCADKit/Sources/MetalCADKit"
 
 
 def uuid(name: str) -> str:

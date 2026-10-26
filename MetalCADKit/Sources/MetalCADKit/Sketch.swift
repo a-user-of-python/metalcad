@@ -42,7 +42,7 @@ public enum SketchEntity: Codable, Equatable {
     }
     /// Flatten to a polyline (for profiles and display). Circles/arcs are
     /// chord-approximated to `sagitta` tolerance.
-    public func polyline(sagitta: Double = 0.02) -> [Vec2] {
+    public func polyline(sagitta: Double = 0.01) -> [Vec2] {
         switch self {
         case .point(_, let at, _): return [at]
         case .line(_, let a, let b, _): return [a, b]

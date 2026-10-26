@@ -178,18 +178,22 @@ final class FeatureTests: XCTestCase {
         XCTAssertEqual(r.mesh.volume, 1000, accuracy: 1e-6)
     }
 
-    func testPocketReturnsCodedError() {
+    func testPocketMissingSketchFailsByName() {
         var part = Part(name: "p")
         part.features.append(Feature(name: "Pocket", kind: .pocket(sketchID: "x", depth: 3)))
         let r = DocumentEngine.rebuild(part: part)
-        XCTAssertEqual(r.firstError?.code, "MCAD-FT405")
+        XCTAssertEqual(r.firstError?.code, "MCAD-DC106")
     }
 
-    func testFilletReturnsCodedError() {
+    func testFilletWorks() {
+        // v3: fillet is a real edge finish now (was FT407 in v1/v2).
         var part = rectPart()
+        let before = DocumentEngine.rebuild(part: part).mesh.volume
         part.features.append(Feature(name: "Round", kind: .fillet(radius: 2)))
         let r = DocumentEngine.rebuild(part: part)
-        XCTAssertEqual(r.firstError?.code, "MCAD-FT407")
+        XCTAssertNil(r.firstError)
+        XCTAssertLessThan(r.mesh.volume, before)
+        XCTAssertGreaterThan(r.mesh.volume, before * 0.8)
     }
 
     func testPatternExpands() throws {

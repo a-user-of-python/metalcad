@@ -100,8 +100,15 @@ struct SketchEditorView: View {
     @State private var health: [CADError] = []
 
     // Numeric inspector fields (loaded when the selection changes).
-    @State private var fAX = "", fAY = "", fBX = "", fBY = ""
-    @State private var fLength = "", fCX = "", fCY = "", fRadius = ""
+    // (One variable per @State — SwiftUI wrappers reject multi-declarations.)
+    @State private var fAX = ""
+    @State private var fAY = ""
+    @State private var fBX = ""
+    @State private var fBY = ""
+    @State private var fLength = ""
+    @State private var fCX = ""
+    @State private var fCY = ""
+    @State private var fRadius = ""
 
     // Measure tool state.
     @State private var measureA: SketchPointRef?

@@ -216,8 +216,8 @@ struct SceneKitView: UIViewRepresentable {
             let far3 = view.unprojectPoint(SCNVector3(Float(point.x), Float(point.y), 1))
             let hits = node.hitTestWithSegment(
                 from: near3, to: far3,
-                options: [.searchMode: NSNumber(value: SCNHitTestSearchMode.closest.rawValue),
-                          .boundingBoxOnly: NSNumber(value: false)])
+                options: [SCNHitTestSearchModeKey: NSNumber(value: SCNHitTestSearchMode.closest.rawValue),
+                          SCNHitTestBoundingBoxOnlyKey: NSNumber(value: false)])
             guard let hit = hits.first else { return nil }
             let c = hit.localCoordinates
             return (hit.faceIndex, Vec3(Double(c.x), Double(c.y), Double(c.z)))

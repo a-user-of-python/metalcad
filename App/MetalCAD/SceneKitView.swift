@@ -43,6 +43,13 @@ struct SceneKitView: UIViewRepresentable {
     /// triangle index and the hit point (model-node local coords —
     /// the node sits at the origin, so these are scene coords).
     var onModelHit: ((Int, Vec3) -> Void)? = nil
+    /// Called when a double-tap lands on the model (normal mode
+    /// only): the welded triangle index and hit point, same space as
+    /// `onModelHit`. The single-tap recognizer is deliberately NOT
+    /// made to wait for this one (no require(toFail:)) — tap-to-
+    /// select keeps zero added latency; a double-tap simply ALSO
+    /// raises this after the second tap's ordinary selection.
+    var onModelDoubleTap: ((Int, Vec3) -> Void)? = nil
 
     final class Coordinator: NSObject {
         var geometryKey: String = ""
@@ -58,6 +65,7 @@ struct SceneKitView: UIViewRepresentable {
         var onFacePicked: ((Int) -> Void)?
         var onSketchPicked: ((String?) -> Void)?
         var onModelHit: ((Int, Vec3) -> Void)?
+        var onModelDoubleTap: ((Int, Vec3) -> Void)?
         var isPickingFace: Bool = false
         // Snapshot of the overlay inputs, for tap ray casting.
         var sketchesInput: [Sketch] = []
@@ -95,6 +103,28 @@ struct SceneKitView: UIViewRepresentable {
                 return
             }
             pickSketch(at: point, in: view)
+        }
+
+        /// Double-tap on the model = the quick-pull shortcut. Face
+        /// picking is a deliberate single-tap flow, so this stays out
+        /// of its way: in pick mode a double-tap is just two picks,
+        /// already handled by handleTap. Otherwise it hit-tests for
+        /// itself and reports only committed-model hits — empty
+        /// space, the ghost, overlays and the selection highlight
+        /// never raise it.
+        @objc func handleDoubleTap(_ gesture: UITapGestureRecognizer) {
+            guard !isPickingFace, let view = gesture.view as? SCNView else { return }
+            let point = gesture.location(in: view)
+            let options: [SCNHitTestOption: Any] = [
+                .searchMode: NSNumber(value: SCNHitTestSearchMode.closest.rawValue),
+                .boundingBoxOnly: NSNumber(value: false),
+                .ignoreChildNodes: NSNumber(value: false),
+            ]
+            let hits = view.hitTest(point, options: options)
+            guard let hit = hits.first(where: { $0.node === modelNode }) else { return }
+            let c = hit.localCoordinates
+            onModelDoubleTap?(hit.faceIndex,
+                              Vec3(Double(c.x), Double(c.y), Double(c.z)))
         }
 
         /// Ray-cast the tap against each visible sketch's plane and
@@ -212,6 +242,18 @@ struct SceneKitView: UIViewRepresentable {
         // on discrete taps, so orbit drags never disturb the camera.
         view.addGestureRecognizer(tap)
 
+        // Double tap: reports a model hit for the quick-pull shortcut.
+        // Deliberately NOT paired with tap.require(toFail:) — that
+        // would hold EVERY single tap hostage to the double-tap
+        // window (~0.3 s of selection lag). Instead both recognizers
+        // fire on a double tap: the second tap re-selects (harmless,
+        // same target) and this one raises onModelDoubleTap.
+        let doubleTap = UITapGestureRecognizer(
+            target: context.coordinator,
+            action: #selector(Coordinator.handleDoubleTap(_:)))
+        doubleTap.numberOfTapsRequired = 2
+        view.addGestureRecognizer(doubleTap)
+
         return view
     }
 
@@ -219,6 +261,7 @@ struct SceneKitView: UIViewRepresentable {
         context.coordinator.onFacePicked = onFacePicked
         context.coordinator.onSketchPicked = onSketchPicked
         context.coordinator.onModelHit = onModelHit
+        context.coordinator.onModelDoubleTap = onModelDoubleTap
         context.coordinator.isPickingFace = isPickingFace
         context.coordinator.sketchesInput = sketches
         context.coordinator.hiddenSketchIDsInput = hiddenSketchIDs

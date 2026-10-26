@@ -581,6 +581,10 @@ struct EditorView: View {
     // and a double-tap on the handle toggle hidden <-> last width.
     @AppStorage("browserPanelWidth") private var browserPanelWidth: Double = 300
     @AppStorage("browserPanelLastWidth") private var browserPanelLastWidth: Double = 300
+    /// Distance quick press/pull starts at — the value last
+    /// confirmed with Done, so a repeated pull (or the double-tap
+    /// shortcut) repeats without re-typing.
+    @AppStorage("quickPullDistance") private var quickPullDistance: Double = 10
     @State private var panelDragStart: Double?
     // Section view state. `sectionT` is the committed cut position;
     // the slider edits `sectionSlider` and commits on release so the
@@ -590,6 +594,17 @@ struct EditorView: View {
     @State private var sectionT: Double = 0.5
     @State private var sectionSlider: Double = 0.5
     @State private var sectionedMesh: Mesh?
+    // Quick press/pull mode (v4.3): entered from the picked-face
+    // bar's Pull / Press buttons. The face is SNAPPED on entry (the
+    // live selection may move on underneath; the card keeps acting
+    // on this face). The slider drafts the very extrude2 the Pull
+    // Face panel builds — via the shared mcFacePull helpers — so the
+    // ghost tracks the distance before Done commits sketch+feature.
+    @State private var quickFace: PlanarFace?
+    @State private var quickCut = false
+    @State private var quickDistance: Double = 10
+    @State private var quickSketchID: String = UUID().uuidString
+    private var quickActive: Bool { quickFace != nil }
 
     @ViewBuilder
     private var mainRow: some View {
@@ -629,9 +644,26 @@ struct EditorView: View {
                         .background(Color.white.opacity(0.03))
                     }
                 }
+        .onChange(of: activeTool) { _, newTool in
+            // A closed panel leaves no draft ghost and no stale
+            // panel presets behind.
+            if newTool == nil {
+                model.pendingPanelSketchID = nil
+                model.pendingPanelOperation = nil
+                model.pendingHoleSketch = nil
+                model.setDraft(nil)
+            }
+        }
     }
 
-    var body: some View {
+    /// The editor shell (JOB A layering): navigation stack, title
+    /// and toolbar ONLY. The two sheets and the remaining change
+    /// handlers hang off SEPARATE computed properties below
+    /// (withMaterialSheet, body) and off mainRow — a single giant
+    /// modifier chain on one expression repeatedly timed out the
+    /// Swift type checker (v4.2 Actions failures), so every layer
+    /// here stays a small type-check unit of its own.
+    private var coreView: some View {
         NavigationStack {
             VStack(spacing: 0) {
                 headerStrip
@@ -662,6 +694,39 @@ struct EditorView: View {
                     }
                 }
             }
+        }
+        .onChange(of: model.pendingExtrudeSketchID) { _, newID in
+            guard let newID else { return }
+            model.pendingExtrudeSketchID = nil
+            extrudePresetSketchID = newID
+            activeTool = .extrude
+        }
+        .onChange(of: baseMeshKey) { _, _ in
+            // The result mesh changed — any picked face/edge/shaft
+            // referred to the old geometry, so drop the selection.
+            model.clearPicked()
+            if sectionOn { refreshSection() }
+        }
+    }
+
+    /// coreView + the material-picker sheet (its own layer, per
+    /// coreView's note on type-check size).
+    private var withMaterialSheet: some View {
+        coreView
+            .sheet(isPresented: $showMaterialPicker) {
+                MaterialPickerSheet(
+                    currentID: model.part?.materialID ?? MaterialLibrary.defaultMaterial.id,
+                    onPick: { id in
+                        model.setMaterial(id)
+                        showMaterialPicker = false
+                    },
+                    onCancel: { showMaterialPicker = false }
+                )
+            }
+    }
+
+    var body: some View {
+        withMaterialSheet
             .sheet(item: $featureToEdit) { feature in
                 FeatureEditorSheet(
                     feature: feature,
@@ -686,39 +751,6 @@ struct EditorView: View {
                     onDraftEnd: { model.setDraft(nil) }
                 )
             }
-            .sheet(isPresented: $showMaterialPicker) {
-                MaterialPickerSheet(
-                    currentID: model.part?.materialID ?? MaterialLibrary.defaultMaterial.id,
-                    onPick: { id in
-                        model.setMaterial(id)
-                        showMaterialPicker = false
-                    },
-                    onCancel: { showMaterialPicker = false }
-                )
-            }
-            .onChange(of: model.pendingExtrudeSketchID) { _, newID in
-                guard let newID else { return }
-                model.pendingExtrudeSketchID = nil
-                extrudePresetSketchID = newID
-                activeTool = .extrude
-            }
-            .onChange(of: activeTool) { _, newTool in
-                // A closed panel leaves no draft ghost and no stale
-                // panel presets behind.
-                if newTool == nil {
-                    model.pendingPanelSketchID = nil
-                    model.pendingPanelOperation = nil
-                    model.pendingHoleSketch = nil
-                    model.setDraft(nil)
-                }
-            }
-            .onChange(of: baseMeshKey) { _, _ in
-                // The result mesh changed — any picked face/edge/shaft
-                // referred to the old geometry, so drop the selection.
-                model.clearPicked()
-                if sectionOn { refreshSection() }
-            }
-        }
     }
 
     // MARK: Mesh / section plumbing
@@ -1073,6 +1105,9 @@ struct EditorView: View {
                         // to the result mesh — taps select nothing.
                         guard !sectionOn else { return }
                         model.resolveModelTap(triangleIndex: triangleIndex, point: point)
+                    },
+                    onModelDoubleTap: { triangleIndex, point in
+                        handleModelDoubleTap(triangleIndex: triangleIndex, point: point)
                     }
                 )
                 .id(meshKey)
@@ -1082,8 +1117,11 @@ struct EditorView: View {
                    let sel = model.sketch(withID: selID), !sel.isDatumPlane {
                     selectionActionBar(sel)
                 }
-                if let picked = model.picked, activeTool == nil, !pickingFace {
+                if let picked = model.picked, activeTool == nil, !pickingFace, !quickActive {
                     pickedActionBar(picked)
+                }
+                if quickActive {
+                    quickPressPullCard
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1100,6 +1138,21 @@ struct EditorView: View {
                 }
             }
         }
+        .onChange(of: model.picked == nil) { _, isNil in
+            // The selection under quick mode was cleared (tapped
+            // empty space): quick mode has nothing left to act on,
+            // so leave it, discarding the draft. (A Done COMMIT
+            // keeps picked set until the rebuild clears it — by then
+            // quick mode has already exited, so this stays a no-op.)
+            if isNil, quickActive { cancelQuick() }
+        }
+        .onChange(of: activeTool != nil) { _, hasTool in
+            // A tool panel takes over the draft machinery — quick
+            // mode ends, discarding its draft (the panel drafts its
+            // own on appear).
+            if hasTool, quickActive { cancelQuick() }
+        }
+        .onChange(of: quickSignature) { _, _ in refreshQuickDraft() }
         .padding(10)
     }
 
@@ -1287,6 +1340,12 @@ struct EditorView: View {
                 actionBarButton("Sketch Here", icon: "square.and.pencil") {
                     sketchNav = SketchNav(id: model.addSketchOnFace(face))
                 }
+                actionBarButton("Pull", icon: "arrow.up.circle.fill") {
+                    startQuick(cut: false, face: face)
+                }
+                actionBarButton("Press", icon: "arrow.down.circle.fill") {
+                    startQuick(cut: true, face: face)
+                }
                 actionBarButton("Pull Face…", icon: "arrow.up.square") {
                     activeTool = .pullFace
                 }
@@ -1362,6 +1421,120 @@ struct EditorView: View {
         case .holeWall:
             return "Internal threading isn't supported yet"
         }
+    }
+
+    // MARK: Quick press/pull (tap a face → Pull / Press)
+
+    /// Everything the draft depends on, as one string — the
+    /// panels' draftSignature pattern. centerColumn watches it and
+    /// re-drafts, so scrubbing the slider ghosts live.
+    private var quickSignature: String { "\(quickCut)|\(quickDistance)" }
+
+    /// Enter quick mode for `face`. Pull = join (material added
+    /// outward along the face normal); Press = cut (inward). Starts
+    /// at the remembered distance and drafts immediately, so the
+    /// ghost is already up when the card appears.
+    private func startQuick(cut: Bool, face: PlanarFace) {
+        quickFace = face
+        quickCut = cut
+        quickDistance = min(max(quickPullDistance, 0.5), 100)
+        quickSketchID = UUID().uuidString
+        refreshQuickDraft()
+    }
+
+    /// Draft the quick feature through the SHARED face-pull
+    /// builders (mcFacePullSketch + mcFacePullKind — the same code
+    /// the Pull Face panel drafts and commits with), injecting the
+    /// not-yet-committed sketch into the preview part.
+    private func refreshQuickDraft() {
+        guard let face = quickFace else { return }
+        let sketch = mcFacePullSketch(id: quickSketchID, face: face,
+                                      cut: quickCut, name: "Press/Pull (auto)")
+        let kind = mcFacePullKind(sketchID: quickSketchID,
+                                  distance: quickDistance, cut: quickCut)
+        model.draftAppendWithSketches((model.part?.sketches ?? []) + [sketch],
+                                      Feature(name: quickCut ? "Press" : "Pull", kind: kind))
+    }
+
+    /// Done: commit sketch + feature together (the panel's Apply
+    /// does the same two calls), remember the distance for next
+    /// time, and leave quick mode. The rebuild that follows clears
+    /// the picked face via the baseMeshKey handler.
+    private func commitQuick() {
+        guard let face = quickFace else { return }
+        let sketch = mcFacePullSketch(id: quickSketchID, face: face,
+                                      cut: quickCut, name: "Press/Pull (auto)")
+        let kind = mcFacePullKind(sketchID: quickSketchID,
+                                  distance: quickDistance, cut: quickCut)
+        model.addGeneratedSketch(sketch)
+        model.appendFeature(name: quickCut ? "Press" : "Pull", kind: kind)
+        quickPullDistance = quickDistance
+        model.setDraft(nil)
+        quickFace = nil
+    }
+
+    /// Cancel (or the selection/tool took over): drop the draft,
+    /// commit nothing.
+    private func cancelQuick() {
+        model.setDraft(nil)
+        quickFace = nil
+    }
+
+    /// Double-tap shortcut: SceneKitView reports a double-tap on the
+    /// model separately from single-tap selection. Resolve it like a
+    /// tap; ONLY a flat face acts — it is selected and immediately
+    /// pulled (join) at the remembered distance. An edge, shaft or
+    /// hole wall just keeps its ordinary selection (their own
+    /// actions live in the picked bar); empty space never reaches
+    /// here. Silent by design, like resolveModelTap.
+    private func handleModelDoubleTap(triangleIndex: Int, point: Vec3) {
+        guard !sectionOn, activeTool == nil, !pickingFace, !quickActive else { return }
+        model.resolveModelTap(triangleIndex: triangleIndex, point: point)
+        guard case .face(_, let face, _) = model.picked else { return }
+        quickFace = face
+        quickCut = false
+        quickDistance = min(max(quickPullDistance, 0.5), 100)
+        quickSketchID = UUID().uuidString
+        commitQuick()
+    }
+
+    /// The quick-mode overlay card: big readout, one wide scrub
+    /// slider, Done / Cancel. Floats over the 3D view in the same
+    /// style as the action bars while the draft ghost tracks the
+    /// slider.
+    private var quickPressPullCard: some View {
+        VStack(spacing: 12) {
+            HStack(spacing: 12) {
+                Image(systemName: quickCut ? "arrow.down.circle.fill" : "arrow.up.circle.fill")
+                    .mcFont(30)
+                    .foregroundStyle(.orange)
+                Text("\(quickCut ? "Press" : "Pull") · \(mcFmt(quickDistance)) mm")
+                    .mcFont(30, weight: .bold)
+                    .lineLimit(1)
+                Spacer()
+            }
+            Slider(value: $quickDistance, in: 0.5...100, step: 0.5)
+            if model.draftFeatures != nil, let err = model.previewError {
+                PanelNote(text: "Preview: \(err.userMessage) (\(err.code))", warning: true)
+            }
+            HStack(spacing: 14) {
+                Button("Cancel") { cancelQuick() }
+                    .mcFont(21, weight: .semibold)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 13)
+                    .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.12)))
+                Button("Done") { commitQuick() }
+                    .mcFont(21, weight: .bold)
+                    .foregroundStyle(.black)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 13)
+                    .background(RoundedRectangle(cornerRadius: 10).fill(Color.orange))
+            }
+        }
+        .padding(14)
+        .background(RoundedRectangle(cornerRadius: 14).fill(Color.black.opacity(0.80)))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.orange.opacity(0.5), lineWidth: 1))
+        .padding(10)
     }
 
     private func actionBarButton(_ label: String, icon: String,

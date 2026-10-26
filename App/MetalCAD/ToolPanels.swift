@@ -2200,11 +2200,14 @@ func mcHolePointSketch(face: PlanarFace, point: Vec3) -> Sketch {
     return sketch
 }
 
-/// Build the outline sketch for Face → "Pull Face…". Join: the face
+/// Build the outline sketch for a face pull/press. Join: the face
 /// outline on the face's own plane, extruded outward along the face
 /// normal. Cut: the SAME outline on a flipped plane (axes swapped →
 /// normal points INTO the body), so a one-sided extrude cuts inward.
-func mcFacePullSketch(id: String, face: PlanarFace, cut: Bool) -> Sketch {
+/// Shared by the "Pull Face…" panel and the quick press/pull mode;
+/// only the committed sketch NAME differs between them.
+func mcFacePullSketch(id: String, face: PlanarFace, cut: Bool,
+                      name: String = "Face pull (auto)") -> Sketch {
     let points = dropCollinear(face.outline2D)
     let plane: Plane3
     let outline: [Vec2]
@@ -2216,12 +2219,28 @@ func mcFacePullSketch(id: String, face: PlanarFace, cut: Bool) -> Sketch {
         plane = face.plane
         outline = points
     }
-    var sketch = Sketch(id: id, name: "Face pull (auto)", plane: plane)
+    var sketch = Sketch(id: id, name: name, plane: plane)
     guard outline.count >= 3 else { return sketch }
     for i in outline.indices {
         sketch.addLine(outline[i], outline[(i + 1) % outline.count])
     }
     return sketch
+}
+
+/// The extrude2 kind for a face pull/press on the sketch built by
+/// `mcFacePullSketch`: one-sided, no taper, Dimension end — join
+/// adds material outward along the face normal, cut presses inward
+/// (via the flipped-plane sketch). THE single implementation: the
+/// Pull Face panel and the quick press/pull mode both build their
+/// draft and committed features through here, so the same inputs
+/// always produce the same feature.
+func mcFacePullKind(sketchID: String, distance: Double, cut: Bool) -> FeatureKind {
+    .extrude2(sketchID: sketchID,
+              distance: distance,
+              taperDegrees: 0,
+              mode: .one,
+              operation: cut ? .cut : .join,
+              end: .dimension)
 }
 
 /// Pull a picked face straight out (or cut it straight in) along its
@@ -2253,12 +2272,9 @@ struct PullFacePanel: View {
 
     private var candidateKind: FeatureKind? {
         guard candidateSketch != nil else { return nil }
-        return .extrude2(sketchID: scratchID,
-                         distance: panelNum(distanceText, fallback: 10),
-                         taperDegrees: 0,
-                         mode: .one,
-                         operation: operation == "cut" ? .cut : .join,
-                         end: .dimension)
+        return mcFacePullKind(sketchID: scratchID,
+                              distance: panelNum(distanceText, fallback: 10),
+                              cut: operation == "cut")
     }
 
     private var draftSignature: String { "\(distanceText)|\(operation)" }

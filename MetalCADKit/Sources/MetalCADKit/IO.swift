@@ -142,6 +142,13 @@ public enum IOService {
             idx.append(vertex(base + 12))
             idx.append(vertex(base + 24))
         }
+        // STL floats are untrusted bytes: a NaN/Inf coordinate used
+        // to sail through into the mesh, where the next weld/display
+        // pass trapped on Int(floor(NaN)) (2026-10-26 sweep). Reject
+        // the file instead.
+        if verts.contains(where: { !$0.isFinite() }) {
+            throw CADError.importGeometryInvalid("STL contains non-finite vertex coordinates")
+        }
         return Mesh(vertices: verts, indices: idx)
     }
 

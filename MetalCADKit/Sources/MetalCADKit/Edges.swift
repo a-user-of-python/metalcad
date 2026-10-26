@@ -291,6 +291,15 @@ public enum EdgeFinisher {
             throw isFillet ? CADError.filletFailed("radius must be > 0")
                            : CADError.chamferInvalid("distance must be > 0")
         }
+        // valueB == 0 is NOT the unset sentinel (-1 is): a zero second
+        // distance collapses the section region to a degenerate
+        // polygon whose prism made CSG subtract the ENTIRE body —
+        // chamfer2(2, 0) returned an empty mesh as success
+        // (2026-10-26 sweep). Sub-1e-9 values are the same class
+        // (distanceAngle at 90° produces ~1e-16).
+        guard valueB < 0 || valueB >= 1e-9 else {
+            throw CADError.chamferInvalid("second distance must be > 0")
+        }
         let vmax = max(value, valueB)
         let allEdges = SolidEdgeExtractor.edges(of: body).filter { $0.length >= 0.5 }
         // Skip edges touching a face too small to hold the treatment —
@@ -303,6 +312,22 @@ public enum EdgeFinisher {
                 throw isFillet ? CADError.filletFailed("the picked edge is gone — the part changed above it")
                                : CADError.chamferInvalid("the picked edge is gone — the part changed above it")
             }
+        } else if edges.isEmpty {
+            // Silent no-op guard (2026-10-26 sweep): with no picked
+            // edges, an empty working set used to sail through the
+            // ladder below (zero regions, zero cutters) and report
+            // SUCCESS with the body untouched — fillet r=100 on a
+            // 20×20×10 block "worked". Two distinct cases:
+            if allEdges.isEmpty {
+                // Nothing to finish at all (e.g. a sphere).
+                throw isFillet ? CADError.filletFailed("there are no sharp edges to round on this part")
+                               : CADError.chamferInvalid("there are no sharp edges to chamfer on this part")
+            }
+            // Every edge was rejected by the face-size filter alone:
+            // restore the full set and let region() decide — an
+            // oversize value now errors (FT408 with the feasible max)
+            // instead of silently doing nothing.
+            edges = allEdges
         }
         guard edges.count <= 240 else {
             throw isFillet ? CADError.filletFailed("\(edges.count) sharp edges — too many to finish at once")
@@ -393,6 +418,42 @@ public enum EdgeFinisher {
         try finish(body: body, value: distance, isFillet: false)
     }
 
+    /// The largest fillet radius / chamfer distance whose SECTION
+    /// REGIONS fit every target edge — region checks only, no CSG,
+    /// so it is cheap enough to run when a panel opens. This is the
+    /// same binary search `finish` runs on its FT408 error path,
+    /// exposed so the app can PREFILL and CLAMP from the selection's
+    /// real measured geometry instead of inventing a value the
+    /// kernel then rejects. `onlyMidpoints` nil = every sharp edge
+    /// of the body. Returns nil when the body has no target edges,
+    /// and 0 when no positive value fits at all.
+    public static func maxFeasibleValue(body: Mesh, isFillet: Bool,
+                                        onlyMidpoints: [Vec3]? = nil) -> Double? {
+        var edges = SolidEdgeExtractor.edges(of: body).filter { $0.length >= 0.5 }
+        if let targets = onlyMidpoints {
+            edges = edges.filter { e in targets.contains { $0.distance(to: e.mid) < 0.05 } }
+        }
+        guard !edges.isEmpty else { return nil }
+        func fits(_ v: Double) -> Bool {
+            for e in edges {
+                do { _ = try self.region(edge: e, value: v, isFillet: isFillet) }
+                catch { return false }
+            }
+            return true
+        }
+        guard fits(0.01) else { return 0 }
+        // Grow an upper bound that fails (capped — no real part
+        // takes a 200 mm edge finish), then bisect on the region
+        // checks exactly like the FT408 path in finish().
+        var lo = 0.01, hi = 0.02
+        while fits(hi), hi < 200 { lo = hi; hi *= 2 }
+        for _ in 0..<24 {
+            let mid = (lo + hi) / 2
+            if fits(mid) { lo = mid } else { hi = mid }
+        }
+        return lo
+    }
+
     /// Chamfer with per-face distances (v4 modes). Pre-validates every
     /// edge region (cheap); if the pair runs off a face, binary searches
     /// a uniform scale over the region checks only, so the thrown error
@@ -440,7 +501,41 @@ public enum EdgeFinisher {
             guard normals[i].length > 1e-9 else { throw CADError.shellFailed("degenerate geometry") }
             normals[i] = normals[i].normalized
         }
-        let cutterVerts = m.vertices.enumerated().map { $0.element - normals[$0.offset] * thickness }
+        // Wall-thickness correction: moving a vertex straight along
+        // its averaged normal by t moves each adjacent FACE plane
+        // by only t·(n̂·n̂face). At a box corner n̂ is the diagonal,
+        // so the walls came out t/√3 ≈ 0.58·t — a 2 mm shell
+        // measured ≈1.2 mm at the face (2026-10-26 sweep). Where
+        // exactly three distinct planes meet at a vertex, solve for
+        // the displacement whose component along EVERY plane's
+        // normal is exactly t (reciprocal basis / Cramer). Vertices
+        // on curved or multi-plane regions keep the averaged-normal
+        // step — there n̂·n̂face ≈ 1 and it was already right.
+        var planesAt: [Int: [Vec3]] = [:]
+        for t in 0..<m.triangleCount {
+            for k in 0..<3 {
+                let vi = Int(m.indices[t * 3 + k])
+                let n = faceN[t]
+                if let existing = planesAt[vi],
+                   existing.contains(where: { $0.dot(n) > 1 - 1e-9 }) { continue }
+                planesAt[vi, default: []].append(n)
+            }
+        }
+        let cutterVerts = m.vertices.enumerated().map { (i, v) -> Vec3 in
+            if let ps = planesAt[i], ps.count == 3 {
+                let (a, b, c) = (ps[0], ps[1], ps[2])
+                let det = a.dot(b.cross(c))
+                if abs(det) > 1e-6 {
+                    // o = M⁻¹ r for M = [a; b; c], r = (−t, −t, −t):
+                    // the reciprocal basis — o is the combination
+                    // r₁(b×c) + r₂(c×a) + r₃(a×b), all over det.
+                    let r = Vec3(-thickness, -thickness, -thickness)
+                    let o = (b.cross(c) * r.x + c.cross(a) * r.y + a.cross(b) * r.z) * (1 / det)
+                    if o.length <= 3 * thickness { return v + o }
+                }
+            }
+            return v - normals[i] * thickness
+        }
         // Keep the original winding: CSG reads solid insides from polygon
         // orientation, so the cutter must be an ordinary outward solid.
         let cutter = Mesh(vertices: cutterVerts, indices: m.indices)

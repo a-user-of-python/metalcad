@@ -142,10 +142,13 @@ final class V3Tests: XCTestCase {
         part.features.append(Feature(name: "Shell", kind: .shell(thickness: 2)))
         let r = DocumentEngine.rebuild(part: part)
         XCTAssertNil(r.firstError)
-        // Vertex-normal offset walls measure ~0.58x nominal at face
-        // centres on a coarse box; the shell is genuinely hollow.
-        XCTAssertLessThan(r.mesh.volume, 8000 * 0.36)
-        XCTAssertGreaterThan(r.mesh.volume, 8000 * 0.28)
+        // True 2 mm walls on the 20 mm cube: 20³ − 16³ = 3904.
+        // (This test previously accepted 0.28–0.36 × 8000 — the
+        // volume of the old vertex-normal shell whose walls measured
+        // only ~0.58× nominal at face centres. The engine now solves
+        // the exact three-plane offset at box corners; see the
+        // 2026-10-26 engine sweep.)
+        XCTAssertEqual(r.mesh.volume, 3904, accuracy: 40)
         // The centre is hollow.
         let probe = try Tessellation.box(width: 4, depth: 4, height: 4).translated(by: Vec3(0, 0, 8))
         let inside = try CSG.intersect(r.mesh, probe)

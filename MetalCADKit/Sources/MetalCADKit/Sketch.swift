@@ -56,8 +56,13 @@ public enum SketchEntity: Codable, Equatable {
 
 public func arcPoints(center: Vec2, radius: Double, from a0: Double, to a1: Double,
                       sagitta: Double, closed: Bool) -> [Vec2] {
-    var sweep = a1 - a0
-    while sweep < 0 { sweep += 2 * Double.pi }
+    // Normalize the sweep into [0, 2π). The old `while sweep < 0`
+    // loop left a huge positive sweep (an arc stored with
+    // endAngle 1e9) untouched: the step count came out in the
+    // billions and polyline() hung building the point array
+    // (2026-10-26 sweep). An arc never sweeps more than one turn.
+    var sweep = (a1 - a0).truncatingRemainder(dividingBy: 2 * Double.pi)
+    if sweep < 0 { sweep += 2 * Double.pi }
     if closed && abs(sweep) < 1e-12 { sweep = 2 * Double.pi }
     let r = max(radius, 1e-9)
     let maxStep = 2 * acos(max(-1, min(1, 1 - sagitta / r)))
@@ -256,6 +261,15 @@ public struct Sketch: Codable, Equatable, Identifiable {
             used[s] = true
             var grew = true
             while grew {
+                // A chain that has closed is a COMPLETE loop — stop.
+                // Without this, the scan rolls past the closing point
+                // into any coincident twin loop (a rectangle drawn
+                // twice) and returns ONE self-overlapping 8-point
+                // chain of double area, which extrudes to garbage
+                // (2333 mm³ for two unit rectangles, 2026-10-26
+                // sweep). Twin loops are then deduped below.
+                if chain.count > 2, let f = chain.first, let l = chain.last,
+                   f.distance(to: l) < tol { break }
                 grew = false
                 for t in segments.indices where !used[t] {
                     if segments[t].a.distance(to: chain.last!) < tol {
@@ -267,6 +281,7 @@ public struct Sketch: Codable, Equatable, Identifiable {
                     } else if segments[t].a.distance(to: chain.first!) < tol {
                         chain.insert(segments[t].b, at: 0); used[t] = true; grew = true
                     }
+                    if used[t] { break }  // rescan against the fresh ends
                 }
             }
             if chain.count > 2 && chain.first!.distance(to: chain.last!) < tol {
@@ -300,6 +315,22 @@ public struct Sketch: Codable, Equatable, Identifiable {
                 }
             }
         }
+        // Loops tracing the same boundary twice (a rectangle drawn
+        // over itself) carry no extra geometry, and keeping both
+        // breaks the containment-parity hole assignment below — a
+        // loop's first point lies ON its twin, where pointInPolygon
+        // is undefined; two identical rectangles padded to 2333 mm³
+        // instead of 1000 (2026-10-26 sweep). Drop exact duplicates.
+        var uniqueLoops: [[Vec2]] = []
+        for lp in loops {
+            let isDup = uniqueLoops.contains { u in
+                u.count == lp.count && lp.allSatisfy { p in
+                    u.contains { $0.distance(to: p) < 1e-6 }
+                }
+            }
+            if !isDup { uniqueLoops.append(lp) }
+        }
+        loops = uniqueLoops
         // Normalize orientation (outer CCW) and assign holes by containment parity.
         var warnings: [CADError] = []
         var normalized = loops.map { lp -> [Vec2] in polygonArea(lp) < 0 ? Array(lp.reversed()) : lp }

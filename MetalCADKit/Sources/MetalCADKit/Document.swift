@@ -263,6 +263,12 @@ public enum DocumentEngine {
                 }
                 if case .circularPattern(let count, let axis, let total) = feature.kind {
                     guard count >= 2 else { throw CADError.patternCountInvalid(count) }
+                    // Each copy is a full CSG union against the
+                    // growing body — an adversarial count (a corrupt
+                    // document asking for 5000) runs for hours
+                    // (2026-10-26 sweep). One copy per degree is far
+                    // past any real pattern.
+                    guard count <= 360 else { throw CADError.patternCountInvalid(count) }
                     guard body.triangleCount > 0 else { throw CADError.booleanEmptyResult }
                     let center = body.bounds.center
                     let full = total >= 359.999
@@ -456,6 +462,10 @@ public enum DocumentEngine {
         var pool = Array(segments.dropFirst())
         var grew = true
         while grew {
+            // Same closure rule as extractProfiles: a closed chain is
+            // complete — don't roll into coincident duplicate segments.
+            if chain.count > 2, let f = chain.first, let l = chain.last,
+               f.distance(to: l) < 1e-6 { break }
             grew = false
             for i in pool.indices {
                 let (a, b) = pool[i]
@@ -466,7 +476,23 @@ public enum DocumentEngine {
             }
         }
         guard chain.count >= 2 else { throw CADError.sweepPathInvalid("path lines do not connect") }
-        return chain.map { sketch.plane.toWorld($0) }
+        // Leftover segments mean the sketch holds lines the chain
+        // never reached — sweeping just the connected subset used to
+        // succeed silently and drop the rest of the path
+        // (2026-10-26 sweep).
+        guard pool.isEmpty else { throw CADError.sweepPathInvalid("path lines do not connect") }
+        // Drop consecutive duplicates left by zero-length lines in
+        // the path: pipeMesh frames itself from the first segment,
+        // and a zero first segment handed it a zero tangent — the
+        // pipe came out a zero-volume ghost with no error
+        // (2026-10-26 sweep).
+        var deduped: [Vec2] = []
+        for p in chain {
+            if let last = deduped.last, last.distance(to: p) < 1e-9 { continue }
+            deduped.append(p)
+        }
+        guard deduped.count >= 2 else { throw CADError.sweepPathInvalid("path lines do not connect") }
+        return deduped.map { sketch.plane.toWorld($0) }
     }
 
     /// Map a +Z-built tool mesh (z: 0…height) onto a sketch plane so it
@@ -487,24 +513,43 @@ public enum DocumentEngine {
         return Mesh(vertices: verts, indices: idx)
     }
 
+    /// Union the per-profile meshes of a multi-profile feature.
+    /// Every closed profile in the sketch contributes: pad/pocket/
+    /// extrude/revolve used to build only `profiles.first` and
+    /// silently drop the rest — a two-rectangle sketch padded one
+    /// block (2026-10-26 sweep). A single profile returns untouched
+    /// (no CSG pass), so single-loop sketches keep the exact mesh
+    /// they always produced.
+    static func unionProfileMeshes(_ meshes: [Mesh]) throws -> Mesh {
+        guard var acc = meshes.first else { throw CADError.padNoProfile }
+        for m in meshes.dropFirst() { acc = try CSG.union(acc, m) }
+        return acc
+    }
+
     static func evaluate(feature: Feature, part: Part, warnings: inout [CADError]) throws -> Mesh {
         switch feature.kind {
         case .pad(let sketchID, let length):
             guard let sketch = part.sketch(sketchID) else { throw CADError.nameNotFound("sketch") }
             let (profiles, w) = try sketch.extractProfiles()
             warnings += w
-            guard let profile = profiles.first else { throw CADError.padNoProfile }
-            return try Tessellation.extrude(profile: profile, plane: sketch.plane, length: length)
+            guard !profiles.isEmpty else { throw CADError.padNoProfile }
+            var meshes: [Mesh] = []
+            for p in profiles { meshes.append(try Tessellation.extrude(profile: p, plane: sketch.plane, length: length)) }
+            return try unionProfileMeshes(meshes)
         case .pocket(let sketchID, let depth):
             guard depth > 0 else { throw CADError.holeSpecInvalid("pocket depth must be > 0") }
             guard let sketch = part.sketch(sketchID) else { throw CADError.nameNotFound("sketch") }
             let (profiles, w) = try sketch.extractProfiles()
             warnings += w
-            guard let profile = profiles.first else { throw CADError.padNoProfile }
-            // Prism spanning from 1 mm above the sketch plane to `depth`
-            // below it; rebuild subtracts it from the body.
-            let prism = try Tessellation.extrude(profile: profile, plane: sketch.plane, length: depth + 1)
-            return prism.translated(by: sketch.plane.normal * -depth)
+            guard !profiles.isEmpty else { throw CADError.padNoProfile }
+            // Prisms spanning from 1 mm above the sketch plane to `depth`
+            // below it; rebuild subtracts them from the body.
+            var meshes: [Mesh] = []
+            for p in profiles {
+                let prism = try Tessellation.extrude(profile: p, plane: sketch.plane, length: depth + 1)
+                meshes.append(prism.translated(by: sketch.plane.normal * -depth))
+            }
+            return try unionProfileMeshes(meshes)
         case .hole(let sketchID, let diameter, let depth, let kind):
             guard diameter > 0 else { throw CADError.holeSpecInvalid("diameter must be > 0") }
             guard let sketch = part.sketch(sketchID) else { throw CADError.nameNotFound("sketch") }
@@ -577,9 +622,13 @@ public enum DocumentEngine {
                   case .line(_, let a, let b, _) = axisEnt else { throw CADError.revolveAxisMissing }
             let (profiles, w) = try sketch.extractProfiles()
             warnings += w
-            guard let profile = profiles.first else { throw CADError.padNoProfile }
-            return try Tessellation.revolve(profile: profile, plane: sketch.plane,
-                                             axisPoint: a, axisDirection: b - a, angleDegrees: angle)
+            guard !profiles.isEmpty else { throw CADError.padNoProfile }
+            var meshes: [Mesh] = []
+            for p in profiles {
+                meshes.append(try Tessellation.revolve(profile: p, plane: sketch.plane,
+                                                       axisPoint: a, axisDirection: b - a, angleDegrees: angle))
+            }
+            return try unionProfileMeshes(meshes)
         case .primitive(let kind, let p):
             switch kind {
             case .box:
@@ -610,23 +659,28 @@ public enum DocumentEngine {
             guard let sketch = part.sketch(sketchID) else { throw CADError.nameNotFound("sketch") }
             let (profiles, w) = try sketch.extractProfiles()
             warnings += w
-            guard let profile = profiles.first else { throw CADError.padNoProfile }
-            switch mode {
-            case .one:
-                return try Tessellation.extrudeTapered(profile: profile, plane: sketch.plane, length: distance, taperDegrees: taper)
-            case .symmetric:
-                let shifted = Plane3(origin: sketch.plane.origin - sketch.plane.normal * (distance / 2),
-                                     xAxis: sketch.plane.xAxis, yAxis: sketch.plane.yAxis)
-                return try Tessellation.extrudeTapered(profile: profile, plane: shifted, length: distance, taperDegrees: taper)
-            case .twoSided(let second):
-                guard second > 0 else { throw CADError.padLengthInvalid(second) }
-                var m = try Tessellation.extrudeTapered(profile: profile, plane: sketch.plane, length: distance, taperDegrees: taper)
-                let backPlane = Plane3(origin: sketch.plane.origin - sketch.plane.normal * second,
-                                       xAxis: sketch.plane.xAxis, yAxis: sketch.plane.yAxis)
-                let back = try Tessellation.extrudeTapered(profile: profile, plane: backPlane, length: second, taperDegrees: taper)
-                m.append(back)
-                return m
+            guard !profiles.isEmpty else { throw CADError.padNoProfile }
+            func oneProfile(_ profile: Profile) throws -> Mesh {
+                switch mode {
+                case .one:
+                    return try Tessellation.extrudeTapered(profile: profile, plane: sketch.plane, length: distance, taperDegrees: taper)
+                case .symmetric:
+                    let shifted = Plane3(origin: sketch.plane.origin - sketch.plane.normal * (distance / 2),
+                                         xAxis: sketch.plane.xAxis, yAxis: sketch.plane.yAxis)
+                    return try Tessellation.extrudeTapered(profile: profile, plane: shifted, length: distance, taperDegrees: taper)
+                case .twoSided(let second):
+                    guard second > 0 else { throw CADError.padLengthInvalid(second) }
+                    var m = try Tessellation.extrudeTapered(profile: profile, plane: sketch.plane, length: distance, taperDegrees: taper)
+                    let backPlane = Plane3(origin: sketch.plane.origin - sketch.plane.normal * second,
+                                           xAxis: sketch.plane.xAxis, yAxis: sketch.plane.yAxis)
+                    let back = try Tessellation.extrudeTapered(profile: profile, plane: backPlane, length: second, taperDegrees: taper)
+                    m.append(back)
+                    return m
+                }
             }
+            var meshes: [Mesh] = []
+            for p in profiles { meshes.append(try oneProfile(p)) }
+            return try unionProfileMeshes(meshes)
         case .loft(let idA, let idB):
             guard let skA = part.sketch(idA), let skB = part.sketch(idB) else { throw CADError.nameNotFound("sketch") }
             let loopA = try ProfileLoop.worldLoop(sketch: skA)
@@ -645,7 +699,7 @@ public enum DocumentEngine {
     /// Pattern needs the running body, so rebuild handles it specially:
     /// this helper is used by the app/tests to expand a mesh.
     public static func applyPattern(mesh: Mesh, count: Int, spacing: Vec3) throws -> Mesh {
-        guard count >= 1, spacing.length > 0 else { throw CADError.patternCountInvalid(count) }
+        guard count >= 1, count <= 10_000, spacing.length > 0 else { throw CADError.patternCountInvalid(count) }
         var out = Mesh()
         for i in 0..<count { out.append(mesh.translated(by: spacing * Double(i))) }
         return out
@@ -663,6 +717,7 @@ public enum EquationEvaluator {
     struct Parser {
         let chars: [Character]
         var pos = 0
+        var depth = 0
         let variables: [String: Double]
         init(expr: String, variables: [String: Double]) {
             self.chars = Array(expr)
@@ -701,6 +756,13 @@ public enum EquationEvaluator {
             }
         }
         mutating func parseFactor() throws -> Double {
+            // Recursion guard: "(" nesting and "^" chains recurse
+            // through parseAtom/parseFactor, and a pasted formula
+            // with ~50k of either overflowed the stack and crashed
+            // (2026-10-26 sweep). Real dimensions nest a handful deep.
+            depth += 1
+            defer { depth -= 1 }
+            guard depth <= 200 else { throw CADError.equationParseError("formula nested too deeply", position: pos) }
             var base = try parseAtom()
             skipSpaces()
             if pos < chars.count && chars[pos] == "^" {
@@ -711,6 +773,9 @@ public enum EquationEvaluator {
             return base
         }
         mutating func parseAtom() throws -> Double {
+            depth += 1
+            defer { depth -= 1 }
+            guard depth <= 200 else { throw CADError.equationParseError("formula nested too deeply", position: pos) }
             skipSpaces()
             guard pos < chars.count else { throw CADError.equationParseError("unexpected end", position: pos) }
             let c = chars[pos]

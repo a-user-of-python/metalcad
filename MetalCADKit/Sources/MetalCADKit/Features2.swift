@@ -345,7 +345,7 @@ extension DocumentEngine {
         guard let sketch = part.sketch(sketchID) else { throw CADError.nameNotFound("sketch") }
         let (profiles, w) = try sketch.extractProfiles()
         warnings += w
-        guard let profile = profiles.first else { throw CADError.padNoProfile }
+        guard !profiles.isEmpty else { throw CADError.padNoProfile }
         let n = sketch.plane.normal
         var dist = distance
         switch end {
@@ -364,22 +364,28 @@ extension DocumentEngine {
             }
             dist = d
         }
-        switch mode {
-        case .one:
-            return try Tessellation.extrudeTapered(profile: profile, plane: sketch.plane, length: dist, taperDegrees: taper)
-        case .symmetric:
-            let shifted = Plane3(origin: sketch.plane.origin - n * (dist / 2),
-                                 xAxis: sketch.plane.xAxis, yAxis: sketch.plane.yAxis)
-            return try Tessellation.extrudeTapered(profile: profile, plane: shifted, length: dist, taperDegrees: taper)
-        case .twoSided(let second):
-            guard second > 0 else { throw CADError.padLengthInvalid(second) }
-            var m = try Tessellation.extrudeTapered(profile: profile, plane: sketch.plane, length: dist, taperDegrees: taper)
-            let backPlane = Plane3(origin: sketch.plane.origin - n * second,
-                                   xAxis: sketch.plane.xAxis, yAxis: sketch.plane.yAxis)
-            let back = try Tessellation.extrudeTapered(profile: profile, plane: backPlane, length: second, taperDegrees: taper)
-            m.append(back)
-            return m
+        // Every closed profile extrudes (see unionProfileMeshes).
+        func oneProfile(_ profile: Profile) throws -> Mesh {
+            switch mode {
+            case .one:
+                return try Tessellation.extrudeTapered(profile: profile, plane: sketch.plane, length: dist, taperDegrees: taper)
+            case .symmetric:
+                let shifted = Plane3(origin: sketch.plane.origin - n * (dist / 2),
+                                     xAxis: sketch.plane.xAxis, yAxis: sketch.plane.yAxis)
+                return try Tessellation.extrudeTapered(profile: profile, plane: shifted, length: dist, taperDegrees: taper)
+            case .twoSided(let second):
+                guard second > 0 else { throw CADError.padLengthInvalid(second) }
+                var m = try Tessellation.extrudeTapered(profile: profile, plane: sketch.plane, length: dist, taperDegrees: taper)
+                let backPlane = Plane3(origin: sketch.plane.origin - n * second,
+                                       xAxis: sketch.plane.xAxis, yAxis: sketch.plane.yAxis)
+                let back = try Tessellation.extrudeTapered(profile: profile, plane: backPlane, length: second, taperDegrees: taper)
+                m.append(back)
+                return m
+            }
         }
+        var meshes: [Mesh] = []
+        for p in profiles { meshes.append(try oneProfile(p)) }
+        return try unionProfileMeshes(meshes)
     }
 }
 

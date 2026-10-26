@@ -409,14 +409,28 @@ final class EditorModel: ObservableObject {
     /// `changed()` uses. SceneKitView renders this copy in place of
     /// the committed sketch so drags show live.
     @Published private(set) var activeSketch: Sketch?
-    /// The in-place tool the next pointer stroke uses.
-    @Published var inPlaceTool: InPlaceSketchTool = .select
+    /// The in-place tool the next pointer stroke uses. Switching
+    /// tools abandons any pending two-tap anchor (v1.13).
+    @Published var inPlaceTool: InPlaceSketchTool = .select {
+        didSet {
+            if inPlaceTool != oldValue {
+                sketchAnchor = nil
+                sketchConfirming = false
+                sketchPreview = []
+            }
+        }
+    }
     /// Entities selected inside the active sketch (kit entity ids).
     @Published var selectedSketchEntityIDs: Set<Int> = []
     /// Not-yet-committed entities of the stroke in flight (the
     /// rubber band), drawn dashed by the viewport. Ids are negative
     /// placeholders — preview entities never enter a real sketch.
-    @Published var sketchPreview: [SketchEntity] = []
+    /// Deliberately NOT @Published (v1.13): the SceneKitView
+    /// coordinator reads this imperatively after every pointer
+    /// event and rebuilds only its small preview node. Publishing
+    /// it re-rendered the whole editor on every pointer move —
+    /// the churn behind the v1.12 session freeze.
+    var sketchPreview: [SketchEntity] = []
     /// Snapped pointer position on the active plane (pencil hover,
     /// and the live point while a stroke is down) — the viewport
     /// draws its marker ring here.
@@ -439,6 +453,64 @@ final class EditorModel: ObservableObject {
     /// True while an in-place sketch session is live.
     var isSketchingInPlace: Bool { activeSketchID != nil }
 
+    // MARK: Camera snap requests (v1.13)
+
+    /// One "put the camera flat on this plane" request. The
+    /// viewport consumes it in updateUIView (nonce-guarded, so each
+    /// request lands exactly once) and places the camera on the
+    /// plane's normal through its origin, screen-up = the plane's
+    /// local V axis — the Fusion-style face-on sketch view.
+    struct CameraSnapRequest: Equatable {
+        let nonce: Int
+        let origin: Vec3
+        let normal: Vec3
+        let vAxis: Vec3
+    }
+
+    @Published private(set) var cameraSnapRequest: CameraSnapRequest?
+    private var cameraSnapCounter = 0
+
+    /// Ask the viewport to snap face-on to `plane`. Called when a
+    /// sketch session begins (every path: auto-start, New Sketch,
+    /// Edit Sketch, sketch-on-face), when a plane is picked in the
+    /// New Sketch / Redefine pickers, and by the rail's
+    /// "Look at plane" button.
+    func requestCameraSnap(to plane: Plane3) {
+        cameraSnapCounter += 1
+        cameraSnapRequest = CameraSnapRequest(
+            nonce: cameraSnapCounter, origin: plane.origin,
+            normal: plane.normal, vAxis: plane.yAxis)
+    }
+
+    /// Placement style for in-place drawing, mirrored from the
+    /// rail's Placement control (persisted there via @AppStorage):
+    /// false = press-drag-release, true = tap the anchor, tap the
+    /// second point.
+    var sketchPlacementTwoTap = false {
+        didSet {
+            // A pending anchor belongs to the style that placed
+            // it: switching styles mid-anchor would resurrect a
+            // stale anchor (and its marker) in the other style.
+            if sketchPlacementTwoTap != oldValue {
+                sketchAnchor = nil
+                sketchConfirming = false
+                sketchPreview = []
+            }
+        }
+    }
+
+    /// Pending two-tap anchor (the first tap's point) and whether
+    /// the stroke currently down is the confirming second stroke.
+    private var sketchAnchor: Vec2?
+    private var sketchConfirming = false
+
+    /// Publish the hover point ONLY when the snapped value actually
+    /// changed — a slow pencil hover otherwise re-published the
+    /// same point at event rate and re-rendered the editor with it.
+    private func setHover(_ p: Vec2?) {
+        if sketchHoverPoint != p { sketchHoverPoint = p }
+    }
+
     // Stroke state (session-private; a stroke is down→drag→up).
     private var sketchDragStart: Vec2?
     private var sketchDragTarget: DragTarget?
@@ -454,6 +526,8 @@ final class EditorModel: ObservableObject {
         sketchDragBase = nil
         sketchDragMoved = false
         sketchArcTangent = nil
+        sketchAnchor = nil
+        sketchConfirming = false
     }
 
     /// Begin drawing on an existing sketch in the viewport. The
@@ -471,6 +545,10 @@ final class EditorModel: ObservableObject {
         sketchDragReadout = nil
         resetSketchDrag()
         activeSketchDOF = SketchSolver.degreesOfFreedom(sk)
+        // Every session starts face-on to its plane (v1.13) — the
+        // Fusion-style flat sketch view, however the session was
+        // entered (auto-start, New Sketch, Edit Sketch, on-face).
+        requestCameraSnap(to: sk.plane)
         MCLog.shared.info(.sketch, "in-place sketch session began",
                           context: ["id": id, "name": sk.name])
     }
@@ -490,17 +568,19 @@ final class EditorModel: ObservableObject {
     }
 
     /// Sean's open-straight-into-a-sketch rule: a brand-new document
-    /// (no sketches, no features) gets a sketch on the XY base plane
-    /// — created through the same `addSketch` path the New Sketch
-    /// panel uses, with the same "Sketch N" naming — and the
-    /// in-place session begins on it immediately. Called from the
-    /// editor's onAppear; a no-op for any document that already has
-    /// content (or a live session).
+    /// (no sketches, no features) gets a sketch on the XZ base plane
+    /// (the green plane — v1.13; it was XY) — created through the
+    /// same `addSketch` path the New Sketch panel uses, with the
+    /// same "Sketch N" naming — and the in-place session begins on
+    /// it immediately, the camera snapped flat to the plane by
+    /// `beginSketchInPlace`. Called from the editor's onAppear; a
+    /// no-op for any document that already has content (or a live
+    /// session).
     func autoStartSketchIfEmpty() {
         guard activeSketchID == nil, let p = part,
               p.sketches.isEmpty, p.features.isEmpty else { return }
         let name = "Sketch \((part?.sketches.count ?? 0) + 1)"
-        let sk = addSketch(plane: .xy, name: name)
+        let sk = addSketch(plane: .xz, name: name)
         beginSketchInPlace(sk.id)
     }
 
@@ -521,13 +601,26 @@ final class EditorModel: ObservableObject {
         activeSketchDOF = SketchSolver.degreesOfFreedom(working)
     }
 
-    /// Snap a raw plane point the way the 2D editor snaps: existing
-    /// endpoints (priority 0), centers (1) and midpoints (2) inside
-    /// the tolerance win over the grid (3), which rounds to
-    /// `sketchSnapStep`. A dragged point never snaps onto its own
-    /// start position (`excluding`).
+    /// Snap a raw plane point for PLACEMENT (v1.13 rework). The
+    /// grid is the base snap and ALWAYS applies: the point is first
+    /// rounded to `sketchSnapStep` in model units, so every placed
+    /// coordinate lands on the grid, at any camera distance. An
+    /// existing entity point (endpoints, priority 0; centers, 1;
+    /// midpoints, 2) may override the grid only when the pointer is
+    /// genuinely aimed at it — inside the pick tolerance (the
+    /// camera-derived tolerance is for PICKING, and may reach it)
+    /// AND no farther from the raw point than the grid point plus
+    /// most of a step. v1.12 chose by priority first, so an
+    /// endpoint 10+ mm away beat a grid point 0.4 mm away and
+    /// placed points visibly jumped off-grid ("they do not snap to
+    /// grid"). A dragged point never snaps onto its own start
+    /// position (`excluding`).
     private func snappedSketchPoint(_ raw: Vec2, excluding: Vec2? = nil) -> Vec2 {
         guard let sk = activeSketch else { return raw }
+        let step = max(sketchSnapStep, 0.0001)
+        let grid = Vec2((raw.x / step).rounded() * step,
+                        (raw.y / step).rounded() * step)
+        let gridDist = grid.distance(to: raw)
         let threshold = max(sketchSnapToleranceMM, sketchSnapStep)
         var candidates: [(point: Vec2, priority: Int)] = []
         for e in sk.entities {
@@ -551,13 +644,10 @@ final class EditorModel: ObservableObject {
         if let excluding {
             candidates.removeAll { $0.point.distance(to: excluding) < 1e-9 }
         }
-        let step = max(sketchSnapStep, 0.0001)
-        candidates.append((Vec2((raw.x / step).rounded() * step,
-                                (raw.y / step).rounded() * step), 3))
         var best: (point: Vec2, priority: Int, dist: Double)?
         for c in candidates {
             let d = c.point.distance(to: raw)
-            guard d <= threshold else { continue }
+            guard d <= threshold, d <= gridDist + step * 0.75 else { continue }
             if let b = best {
                 if c.priority < b.priority ||
                     (c.priority == b.priority && d < b.dist) {
@@ -567,7 +657,7 @@ final class EditorModel: ObservableObject {
                 best = (c.point, c.priority, d)
             }
         }
-        return best?.point ?? raw
+        return best?.point ?? grid
     }
 
     // MARK: In-place pointer API (plane-space points, snapped inside)
@@ -576,13 +666,32 @@ final class EditorModel: ObservableObject {
     func sketchPointerDown(at raw: Vec2) {
         guard var working = activeSketch else { return }
         let p = snappedSketchPoint(raw)
-        sketchHoverPoint = p
+        setHover(p)
         switch inPlaceTool {
         case .point:
             working.addPoint(p)
             activeSketch = working
             commitActiveSketch()
         case .line, .rectangle, .circle, .arc:
+            if sketchPlacementTwoTap, sketchAnchor == nil {
+                // Two-tap, first tap: drop the anchor and show it
+                // as a point marker; the shape commits on the
+                // second tap (or follows a confirming drag).
+                sketchAnchor = p
+                sketchDragStart = p
+                sketchArcTangent = nil
+                sketchPreview = [.point(id: -1, at: p, construction: false)]
+                sketchDragReadout = nil
+                return
+            }
+            if sketchPlacementTwoTap, let anchor = sketchAnchor {
+                // Two-tap, second stroke down: confirming — the
+                // live preview runs anchor → pointer until the tap.
+                sketchConfirming = true
+                sketchDragStart = anchor
+                updateCreatePreview(to: p)
+                return
+            }
             sketchDragStart = p
             sketchArcTangent = nil
             sketchPreview = []
@@ -596,12 +705,32 @@ final class EditorModel: ObservableObject {
     func sketchPointerDragged(to raw: Vec2) {
         guard activeSketch != nil else { return }
         let p = snappedSketchPoint(raw, excluding: sketchDragTarget?.original)
-        sketchHoverPoint = p
+        setHover(p)
+        switch inPlaceTool {
+        case .line, .rectangle, .circle, .arc:
+            updateCreatePreview(to: p)
+        case .select:
+            updateSelectDrag(to: p)
+        case .point:
+            break
+        }
+    }
+
+    /// Build the rubber-band preview + size readout for the create
+    /// tools, from `sketchDragStart` to the snapped point `p`.
+    /// Shared by drag strokes, two-tap confirming drags, and
+    /// pencil hover with a pending two-tap anchor — every path
+    /// that must show the in-progress shape live. The readout is
+    /// assigned only when the formatted value actually changes.
+    private func updateCreatePreview(to p: Vec2) {
+        func setReadout(_ s: String?) {
+            if sketchDragReadout != s { sketchDragReadout = s }
+        }
         switch inPlaceTool {
         case .line:
             guard let s = sketchDragStart else { return }
             sketchPreview = [.line(id: -1, a: s, b: p, construction: false)]
-            sketchDragReadout = String(format: "%.1f mm", s.distance(to: p))
+            setReadout(String(format: "%.1f mm", s.distance(to: p)))
         case .rectangle:
             guard let s = sketchDragStart else { return }
             let corners = [s, Vec2(p.x, s.y), p, Vec2(s.x, p.y)]
@@ -609,12 +738,12 @@ final class EditorModel: ObservableObject {
                 SketchEntity.line(id: -1 - i, a: corners[i],
                                   b: corners[(i + 1) % 4], construction: false)
             }
-            sketchDragReadout = "\(mcFmt(abs(p.x - s.x))) × \(mcFmt(abs(p.y - s.y))) mm"
+            setReadout("\(mcFmt(abs(p.x - s.x))) × \(mcFmt(abs(p.y - s.y))) mm")
         case .circle:
             guard let s = sketchDragStart else { return }
             let r = s.distance(to: p)
             sketchPreview = [.circle(id: -1, center: s, radius: r, construction: false)]
-            sketchDragReadout = String(format: "Ø %.1f mm", 2 * r)
+            setReadout(String(format: "Ø %.1f mm", 2 * r))
         case .arc:
             guard let s = sketchDragStart else { return }
             // The arc's tangent at its start is the direction the
@@ -630,14 +759,12 @@ final class EditorModel: ObservableObject {
                 sketchPreview = [.arc(id: -1, center: arc.center, radius: arc.radius,
                                       startAngle: arc.startAngle, endAngle: arc.endAngle,
                                       construction: false)]
-                sketchDragReadout = String(format: "R %.1f mm", arc.radius)
+                setReadout(String(format: "R %.1f mm", arc.radius))
             } else {
                 sketchPreview = []
-                sketchDragReadout = nil
+                setReadout(nil)
             }
-        case .select:
-            updateSelectDrag(to: p)
-        case .point:
+        case .select, .point:
             break
         }
     }
@@ -647,11 +774,48 @@ final class EditorModel: ObservableObject {
         guard var working = activeSketch else { return }
         let p = snappedSketchPoint(raw, excluding: sketchDragTarget?.original)
         switch inPlaceTool {
+        case .line, .rectangle, .circle, .arc:
+            if sketchPlacementTwoTap, sketchAnchor != nil, !sketchConfirming {
+                // The anchor-setting tap just ended: the anchor
+                // and its marker stay up for the second tap — no
+                // commit, no drag-state reset.
+                return
+            }
+            if !commitCreateStroke(to: p, working: &working),
+               sketchPlacementTwoTap, sketchConfirming {
+                // Degenerate second tap (same point as the
+                // anchor): nothing to place, but keep the anchor
+                // so the next tap can land somewhere useful.
+                sketchConfirming = false
+                sketchDragStart = sketchAnchor
+                if let a = sketchAnchor {
+                    sketchPreview = [.point(id: -1, at: a, construction: false)]
+                }
+                return
+            }
+        case .select:
+            if sketchDragMoved { commitActiveSketch(solveFirst: true) }
+        case .point:
+            break
+        }
+        sketchPreview = []
+        sketchDragReadout = nil
+        resetSketchDrag()
+    }
+
+    /// Commit the in-flight create stroke (`sketchDragStart` → the
+    /// snapped point `p`) into the working copy. Returns true when
+    /// a shape was actually added. Shared by drag strokes and
+    /// two-tap confirming taps, so both placement styles produce
+    /// identical geometry.
+    private func commitCreateStroke(to p: Vec2, working: inout Sketch) -> Bool {
+        switch inPlaceTool {
         case .line:
             if let s = sketchDragStart, s.distance(to: p) > 1e-9 {
                 working.addLine(s, p)
                 activeSketch = working
                 commitActiveSketch()
+                return true
             }
         case .rectangle:
             if let s = sketchDragStart,
@@ -659,6 +823,7 @@ final class EditorModel: ObservableObject {
                 working.addRectangle(from: s, to: p)
                 activeSketch = working
                 commitActiveSketch()
+                return true
             }
         case .circle:
             if let s = sketchDragStart {
@@ -667,6 +832,7 @@ final class EditorModel: ObservableObject {
                     working.addCircle(s, r)
                     activeSketch = working
                     commitActiveSketch()
+                    return true
                 }
             }
         case .arc:
@@ -678,15 +844,12 @@ final class EditorModel: ObservableObject {
                                  construction: false))
                 activeSketch = working
                 commitActiveSketch()
+                return true
             }
-        case .select:
-            if sketchDragMoved { commitActiveSketch(solveFirst: true) }
-        case .point:
+        case .select, .point:
             break
         }
-        sketchPreview = []
-        sketchDragReadout = nil
-        resetSketchDrag()
+        return false
     }
 
     /// Abort the stroke in flight (a second finger landed and the
@@ -704,14 +867,25 @@ final class EditorModel: ObservableObject {
     }
 
     /// Pencil hover (or any pointer move without a stroke): track
-    /// the snapped point for the viewport's marker ring.
+    /// the snapped point for the viewport's marker. With a two-tap
+    /// anchor pending, hover ALSO drives the live shape preview,
+    /// so the shape follows the pencil before the second tap.
     func sketchHover(at raw: Vec2) {
         guard activeSketch != nil else { return }
-        sketchHoverPoint = snappedSketchPoint(raw)
+        let p = snappedSketchPoint(raw)
+        setHover(p)
+        if sketchPlacementTwoTap, sketchAnchor != nil, !sketchConfirming {
+            switch inPlaceTool {
+            case .line, .rectangle, .circle, .arc:
+                updateCreatePreview(to: p)
+            case .select, .point:
+                break
+            }
+        }
     }
 
     /// Hover ended: clear the marker.
-    func endSketchHover() { sketchHoverPoint = nil }
+    func endSketchHover() { setHover(nil) }
 
     // MARK: In-place selection drag
 
@@ -753,6 +927,13 @@ final class EditorModel: ObservableObject {
         } else {
             selectedSketchEntityIDs = []
             sketchDragBase = nil
+            // A Select-tool tap on empty space also cancels a
+            // pending two-tap anchor (v1.13).
+            if sketchAnchor != nil {
+                sketchAnchor = nil
+                sketchConfirming = false
+                sketchPreview = []
+            }
         }
     }
 
@@ -1647,6 +1828,10 @@ struct EditorView: View {
     /// overlay in the 3D view. Same AppStorage key as the Settings
     /// toggle ("showModelEdges").
     @AppStorage("showModelEdges") private var showModelEdges: Bool = true
+    /// In-place sketch placement style (v1.13): false = Drag,
+    /// true = Two taps. Persisted; mirrored into the model
+    /// (`sketchPlacementTwoTap`) on appear and on every change.
+    @AppStorage("sketchPlacementTwoTap") private var sketchPlacementTwoTap: Bool = false
     /// Rail inspector working copies (one variable per @State):
     /// the selected circle's radius / the selected line's length,
     /// reloaded whenever the in-place selection changes.
@@ -1743,6 +1928,19 @@ struct EditorView: View {
             extrudePresetSketchID = newID
             activeTool = .extrude
         }
+        .onChange(of: model.activeSketchID) { _, newID in
+            // A sketch session owns the viewport exclusively: face
+            // picking, the section view and any open tool panel
+            // stand down when one begins — the panel's draft and
+            // the pick state referred to the pre-session view, and
+            // a live panel kept drafting over the session.
+            if newID != nil {
+                pickingFace = false
+                if sectionOn { toggleSection() }
+                activeTool = nil
+                extrudePresetSketchID = nil
+            }
+        }
         .onChange(of: baseMeshKey) { _, _ in
             // The result mesh changed — any picked face/edge/shaft
             // referred to the old geometry, so drop the selection.
@@ -1753,8 +1951,9 @@ struct EditorView: View {
         }
         .onAppear {
             // A brand-new document opens straight into an in-place
-            // sketch on the XY plane (Sean's normal-CAD flow); any
+            // sketch on the XZ plane (Sean's normal-CAD flow); any
             // document with content is left exactly as it was.
+            model.sketchPlacementTwoTap = sketchPlacementTwoTap
             model.autoStartSketchIfEmpty()
         }
     }
@@ -1933,7 +2132,11 @@ struct EditorView: View {
     }
 
     private var baseMeshKey: String {
-        "\(baseMesh.triangleCount)-\(baseMesh.volume)"
+        // The shared strong fingerprint (see SceneKitView): count +
+        // volume alone missed pure moves/rotations, which left the
+        // picked selection and measure points pointing at geometry
+        // that was no longer there.
+        SceneKitView.meshFingerprint(baseMesh)
     }
 
     private var displayMesh: Mesh {
@@ -1970,6 +2173,15 @@ struct EditorView: View {
         sectionOn.toggle()
         if sectionOn {
             activeTool = nil
+            // The cut view replaces the model: a face pick in
+            // flight would resolve sectioned-mesh triangle indices
+            // against the committed mesh, and the picked selection
+            // / quick draft / measure points all refer to the
+            // uncut body — stand them all down.
+            pickingFace = false
+            model.clearPicked()
+            model.clearMeasure()
+            if quickActive { cancelQuick() }
             refreshSection()
         } else {
             sectionedMesh = nil
@@ -2108,20 +2320,68 @@ struct EditorView: View {
     /// face: draw tools, live status, constraints, the selection
     /// inspector, and Done.
     private var toolRail: some View {
-        ScrollView(.vertical, showsIndicators: false) {
-            VStack(spacing: 8) {
-                if model.isSketchingInPlace {
-                    sketchRailContent
-                } else {
-                    modelRailContent
+        VStack(spacing: 0) {
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(spacing: 8) {
+                    if model.isSketchingInPlace {
+                        sketchRailContent
+                    } else {
+                        modelRailContent
+                    }
                 }
+                .padding(.vertical, 10)
+                .padding(.horizontal, 6)
+                .frame(maxWidth: .infinity)
             }
-            .padding(.vertical, 10)
-            .padding(.horizontal, 6)
-            .frame(maxWidth: .infinity)
+            if model.isSketchingInPlace {
+                sketchRailFooter
+            }
         }
         .frame(width: 96)
         .background(Color.white.opacity(0.02))
+    }
+
+    /// The sketch session's finish actions, pinned at the rail's
+    /// bottom OUTSIDE the scroll area (v1.13) — in v1.12 they sat
+    /// at the end of the scrolling tool list, half cut off below
+    /// the fold exactly when the user needed them.
+    private var sketchRailFooter: some View {
+        VStack(spacing: 8) {
+            Divider()
+            Button {
+                _ = model.finishSketchAndExtrude()
+            } label: {
+                VStack(spacing: 4) {
+                    Image(systemName: "rectangle.expand.vertical")
+                        .mcFont(22)
+                    Text("Finish & Extrude")
+                        .mcFont(15, weight: .semibold)
+                        .multilineTextAlignment(.center)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.65)
+                }
+                .foregroundStyle(.primary)
+                .frame(maxWidth: .infinity, minHeight: 58)
+                .padding(.horizontal, 2)
+                .padding(.vertical, 6)
+                .background(RoundedRectangle(cornerRadius: 10)
+                    .fill(Color.white.opacity(0.10)))
+            }
+            .buttonStyle(.plain)
+            Button {
+                model.endSketchInPlace()
+            } label: {
+                Text("DONE")
+                    .mcFont(21, weight: .bold)
+                    .foregroundStyle(.black)
+                    .frame(maxWidth: .infinity, minHeight: 56)
+                    .background(RoundedRectangle(cornerRadius: 10).fill(accent))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 6)
+        .padding(.bottom, 10)
+        .padding(.top, 2)
     }
 
     private func railButton(_ label: String, icon: String, active: Bool,
@@ -2133,7 +2393,8 @@ struct EditorView: View {
                 Text(label)
                     .mcFont(15, weight: .semibold)
                     .multilineTextAlignment(.center)
-                    .lineLimit(2)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.65)
             }
             .foregroundStyle(active ? .black : .primary)
             .frame(maxWidth: .infinity, minHeight: 60)
@@ -2169,7 +2430,8 @@ struct EditorView: View {
                 Text("New Sketch")
                     .mcFont(16, weight: .bold)
                     .multilineTextAlignment(.center)
-                    .lineLimit(2)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.65)
             }
             .foregroundStyle(.black)
             .frame(maxWidth: .infinity, minHeight: 66)
@@ -2345,39 +2607,22 @@ struct EditorView: View {
             }
         }
         sketchStatusCard
+        railButton("Flat view", icon: "camera.viewfinder", active: false) {
+            if let sk = model.activeSketch {
+                model.requestCameraSnap(to: sk.plane)
+            }
+        }
+        railCaption("PLACEMENT")
+        railButton("Drag", icon: "hand.draw", active: !sketchPlacementTwoTap) {
+            sketchPlacementTwoTap = false
+            model.sketchPlacementTwoTap = false
+        }
+        railButton("Two taps", icon: "hand.tap", active: sketchPlacementTwoTap) {
+            sketchPlacementTwoTap = true
+            model.sketchPlacementTwoTap = true
+        }
         sketchConstraintsSection
         sketchInspectorSection
-        Divider()
-            .padding(.vertical, 2)
-        Button {
-            _ = model.finishSketchAndExtrude()
-        } label: {
-            VStack(spacing: 4) {
-                Image(systemName: "rectangle.expand.vertical")
-                    .mcFont(22)
-                Text("Finish & Extrude")
-                    .mcFont(15, weight: .semibold)
-                    .multilineTextAlignment(.center)
-                    .lineLimit(2)
-            }
-            .foregroundStyle(.primary)
-            .frame(maxWidth: .infinity, minHeight: 58)
-            .padding(.horizontal, 2)
-            .padding(.vertical, 6)
-            .background(RoundedRectangle(cornerRadius: 10)
-                .fill(Color.white.opacity(0.10)))
-        }
-        .buttonStyle(.plain)
-        Button {
-            model.endSketchInPlace()
-        } label: {
-            Text("DONE")
-                .mcFont(21, weight: .bold)
-                .foregroundStyle(.black)
-                .frame(maxWidth: .infinity, minHeight: 56)
-                .background(RoundedRectangle(cornerRadius: 10).fill(accent))
-        }
-        .buttonStyle(.plain)
     }
 
     /// Live session status: while a stroke is down, its size
@@ -2399,6 +2644,15 @@ struct EditorView: View {
             } else {
                 Text("\(model.activeSketchDOF) DOF")
                     .mcFont(17, weight: .bold)
+            }
+            if model.sketchDragReadout == nil, let hp = model.sketchHoverPoint {
+                // The snapped hover point's plane coordinates
+                // (v1.13) — hover is visible in the rail as well
+                // as in the viewport marker.
+                Text("X \(mcFmt(hp.x)) · Y \(mcFmt(hp.y))")
+                    .mcFont(15, weight: .semibold)
+                    .foregroundStyle(accent)
+                    .multilineTextAlignment(.center)
             }
             Text("Snap \(mcFmt(model.sketchSnapStep)) mm")
                 .mcFont(13)
@@ -2612,6 +2866,15 @@ struct EditorView: View {
                         // cut mesh, whose triangle indices don't map
                         // to the result mesh — taps select nothing.
                         guard !sectionOn else { return }
+                        // While a panel draft ghost is on screen,
+                        // the hit-tested geometry is the DRAFT: its
+                        // triangle indices do not address the
+                        // committed mesh the resolver works on, so
+                        // resolving one would select (or measure)
+                        // nonsense. Quick press/pull is exempt — it
+                        // owns its draft and its face was snapped
+                        // on entry.
+                        guard model.previewMesh == nil || quickActive else { return }
                         // Quick measure armed: the tap records a
                         // measure point instead of resolving a picked
                         // selection. (Face-pick mode never reaches
@@ -2633,11 +2896,12 @@ struct EditorView: View {
                 // key), and the camera pose persists per document.
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 if let selID = model.selectedSketchID, activeTool == nil, !pickingFace,
-                   model.picked == nil,
+                   model.picked == nil, !model.isSketchingInPlace,
                    let sel = model.sketch(withID: selID), !sel.isDatumPlane {
                     selectionActionBar(sel)
                 }
-                if let picked = model.picked, activeTool == nil, !pickingFace, !quickActive {
+                if let picked = model.picked, activeTool == nil, !pickingFace, !quickActive,
+                   !model.isSketchingInPlace {
                     pickedActionBar(picked)
                 }
                 if quickActive {
@@ -2736,7 +3000,7 @@ struct EditorView: View {
             Text(pickBannerText)
                 .mcFont(20, weight: .semibold)
             Spacer()
-            Button("Cancel") { pickingFace = false }
+            Button("Cancel") { pickingFace = false; reopenPickPanel() }
                 .mcFont(20, weight: .semibold)
         }
         .padding(12)
@@ -2765,14 +3029,42 @@ struct EditorView: View {
         pickingFace = true
     }
 
+    /// After a face pick ends WITHOUT a face (the tap missed, the
+    /// resolve failed, or the user cancelled), put back the panel
+    /// the pick was launched from — it lives in EditorModel state
+    /// (planeChoice / constructFace / midplane faces / the redefine
+    /// target), so reopening restores it exactly. Sketch-on-face
+    /// was launched from the rail and has no panel to restore.
+    private func reopenPickPanel() {
+        switch pickPurpose {
+        case .sketchOnFace:
+            break
+        case .newSketchFace:
+            activeTool = .newSketch
+        case .offsetDatumFace:
+            activeTool = .offsetPlane
+        case .midplaneA, .midplaneB:
+            activeTool = .midplane
+        case .redefineFace(let sketchID):
+            activeTool = .redefinePlane(sketchID)
+        }
+    }
+
     private func handleFacePicked(_ triangleIndex: Int) {
         pickingFace = false
-        guard let face = model.resolvePickedFace(triangleIndex: triangleIndex) else { return }
+        guard let face = model.resolvePickedFace(triangleIndex: triangleIndex) else {
+            reopenPickPanel()
+            return
+        }
         switch pickPurpose {
         case .sketchOnFace:
             model.beginSketchInPlace(model.addSketchOnFace(face))
         case .newSketchFace:
             model.planeChoice = .face(face)
+            // Snap flat onto the picked face right away (v1.13) so
+            // the user sees the exact plane the sketch will lie on
+            // before confirming in the panel.
+            model.requestCameraSnap(to: face.plane)
             activeTool = .newSketch
         case .offsetDatumFace:
             model.constructFace = face
@@ -2792,7 +3084,7 @@ struct EditorView: View {
 
     private var statsBar: some View {
         HStack(spacing: 24) {
-            Text("Triangles: \(displayMesh.triangleCount)")
+            Text("Triangles: \((model.previewMesh ?? displayMesh).triangleCount)")
             if sectionOn {
                 Text("Section view")
                     .foregroundStyle(accent)

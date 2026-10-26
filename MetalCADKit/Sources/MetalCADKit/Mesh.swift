@@ -93,6 +93,7 @@ public struct Mesh: Equatable {
         func gkey(_ x: Int, _ y: Int, _ z: Int) -> Int { (x &* 73856093) ^ (y &* 19349663) ^ (z &* 83492791) }
         var vgrid: [Int: [Int]] = [:]
         for (vi, v) in mesh.vertices.enumerated() {
+            guard v.isFinite() else { continue }  // Int(floor(NaN)) traps
             vgrid[gkey(Int(floor(v.x / cellSize)), Int(floor(v.y / cellSize)), Int(floor(v.z / cellSize))), default: []].append(vi)
         }
         func candidates(near pa: Vec3, _ pb: Vec3) -> [Int] {
@@ -120,6 +121,7 @@ public struct Mesh: Equatable {
         var didSplit = false
         for (a, b) in open {
             let pa = mesh.vertices[Int(a)], pb = mesh.vertices[Int(b)]
+            guard pa.isFinite(), pb.isFinite() else { continue }
             let ab = pb - pa
             let len2 = ab.dot(ab)
             if len2 < 1e-18 { continue }
@@ -168,6 +170,15 @@ public struct Mesh: Equatable {
     /// Tessellation stages emit duplicated seam vertices; welding produces
     /// the shared-index mesh used for watertight checks and export.
     public func welded(tolerance: Double = 1e-6) -> Mesh {
+        // A zero/negative tolerance divides by zero in the cell math
+        // below (floor(v / 0) = inf, and Int(inf) traps); clamp to a
+        // hair above zero so degenerate input degrades to "merge
+        // exact duplicates only" instead of crashing (2026-10-26
+        // sweep). Non-finite vertices are carried through unmerged:
+        // Int(floor(NaN)) traps the same way, and a NaN vertex must
+        // poison the geometry, never the process — CSG rejects NaN
+        // meshes up front, this keeps display/weld callers alive.
+        let tolerance = max(tolerance, 1e-9)
         // Spatial hash over the 27 neighboring cells so points near a cell
         // boundary still merge (single-cell rounding splits them).
         var cells: [Int: [Int]] = [:]
@@ -183,6 +194,12 @@ public struct Mesh: Equatable {
             (cx &* 73856093) ^ (cy &* 19349663) ^ (cz &* 83492791)
         }
         for v in vertices {
+            if !v.isFinite() {
+                let ci = verts.count
+                verts.append(v)
+                remap.append(UInt32(ci))
+                continue
+            }
             let gx = Int(floor(v.x / tolerance)), gy = Int(floor(v.y / tolerance)), gz = Int(floor(v.z / tolerance))
             var found: Int? = nil
             outer: for dx in -1...1 {
@@ -269,7 +286,13 @@ public struct Mesh: Equatable {
                 for f in vertexFaces[vi] ?? [] where faceN[f].dot(faceN[t]) >= cosLimit {
                     sum = sum + faceN[f] * faceW[f]
                 }
-                normals.append(sum.length > 1e-12 ? sum.normalized : faceN[t])
+                // A degenerate (zero-area) face has no normal: its own
+                // face normal is the zero vector, and emitting that
+                // hands the renderer a non-unit normal (2026-10-26
+                // sweep). Fall back to an arbitrary unit axis.
+                if sum.length > 1e-12 { normals.append(sum.normalized) }
+                else if faceN[t].length > 1e-12 { normals.append(faceN[t]) }
+                else { normals.append(Vec3(0, 0, 1)) }
             }
         }
         return (positions, normals)

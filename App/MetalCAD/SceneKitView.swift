@@ -88,7 +88,7 @@ struct SceneKitView: UIViewRepresentable {
     /// raises this after the second tap's ordinary selection.
     var onModelDoubleTap: ((Int, Vec3) -> Void)? = nil
 
-    final class Coordinator: NSObject {
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
         var geometryKey: String = ""
         var overlayKey: String = ""
         var selectionKey: String = ""
@@ -127,9 +127,22 @@ struct SceneKitView: UIViewRepresentable {
         var pencilHover: UIHoverGestureRecognizer?
         var sketchSessionNode: SCNNode?
         var sketchGridNode: SCNNode?
-        var sketchDynamicNode: SCNNode?
         var sketchGridKey: String = ""
-        var sketchSessionKey: String = ""
+        // v1.13 session-dynamic layer: preview / hover marker /
+        // working-copy nodes, owned and rebuilt IMPERATIVELY by
+        // this coordinator from the gesture handlers — never via a
+        // SwiftUI rebuild key (that round-trip was the v1.12
+        // freeze: every hover/drag event rebuilt geometry).
+        var sketchWorkingNode: SCNNode?
+        var sketchPreviewNode: SCNNode?
+        var sketchHoverNode: SCNNode?
+        var sketchGuideNode: SCNNode?
+        var sketchGuideKey: String = ""
+        /// Accent color snapshot for the imperative layer
+        /// (refreshed by updateUIView).
+        var accentInput: UIColor = UIColor(red: 0.30, green: 0.85, blue: 0.80, alpha: 1)
+        /// Nonce of the last camera-snap request consumed.
+        var lastSnapNonce: Int = 0
 
         /// Project a view point onto a sketch plane — the same
         /// unproject + ray/plane intersection the sketch picking
@@ -151,6 +164,240 @@ struct SceneKitView: UIViewRepresentable {
             return Vec2(local.dot(plane.xAxis), local.dot(plane.yAxis))
         }
 
+        /// Place the camera perfectly face-on to a plane (v1.13):
+        /// on the plane's normal through its origin, screen-up =
+        /// the plane's local V axis, at a distance framing about
+        /// ±110 mm vertically. The orientation is written as an
+        /// explicit basis matrix — `look(at:)` alone would hit
+        /// gimbal degeneracy for the XZ plane (camera forward
+        /// parallel to world +Y up). Instant: a snap that animates
+        /// is a snap the user waits on.
+        func snapCameraToPlane(origin: Vec3, normal: Vec3, vAxis: Vec3) {
+            guard let cam = cameraNode else { return }
+            let fovDeg = Double(cam.camera?.fieldOfView ?? 60)
+            let dist = min(max(110.0 / max(tan(fovDeg * .pi / 360), 0.1), 60), 900)
+            let z = normal.length > 1e-9 ? normal.normalized : Vec3(0, 0, 1)
+            var x = vAxis.cross(z)
+            if x.length < 1e-6 {
+                x = Vec3(1, 0, 0).cross(z)
+                if x.length < 1e-6 { x = Vec3(0, 1, 0).cross(z) }
+            }
+            x = x.normalized
+            let y = z.cross(x).normalized
+            let pos = origin + z * dist
+            var m = SCNMatrix4()
+            m.m11 = Float(x.x); m.m12 = Float(x.y); m.m13 = Float(x.z); m.m14 = 0
+            m.m21 = Float(y.x); m.m22 = Float(y.y); m.m23 = Float(y.z); m.m24 = 0
+            m.m31 = Float(z.x); m.m32 = Float(z.y); m.m33 = Float(z.z); m.m34 = 0
+            m.m41 = Float(pos.x); m.m42 = Float(pos.y); m.m43 = Float(pos.z); m.m44 = 1
+            cam.transform = m
+            orbitTarget = origin
+        }
+
+        /// Hit-test a view point against the MODEL NODE ONLY
+        /// (v1.13). v1.12 hit-tested the whole view with
+        /// `searchMode .closest`, which returns only the single
+        /// nearest hit — and the sketch-overlay halo tubes sit
+        /// 0.05 mm proud of the model faces (directly over the very
+        /// profile that was extruded), the edge lines 0.03 mm
+        /// proud, the grid above its plane — so the nearest hit
+        /// was routinely an overlay node, the `node === modelNode`
+        /// filter discarded it, and the tap selected NOTHING (and
+        /// face picking, same filter, failed the same way).
+        /// Testing the model node's own subtree cannot see overlay
+        /// nodes at all. The model node sits at the origin with no
+        /// transform, so local coordinates are scene coordinates,
+        /// and faceIndex addresses the geometry's triangles — the
+        /// display-soup order, exactly as before.
+        func modelHit(at point: CGPoint, in view: SCNView)
+            -> (faceIndex: Int, point: Vec3)? {
+            guard let node = modelNode else { return nil }
+            let near3 = view.unprojectPoint(SCNVector3(Float(point.x), Float(point.y), 0))
+            let far3 = view.unprojectPoint(SCNVector3(Float(point.x), Float(point.y), 1))
+            let hits = node.hitTestWithSegment(
+                from: near3, to: far3,
+                options: [.searchMode: NSNumber(value: SCNHitTestSearchMode.closest.rawValue),
+                          .boundingBoxOnly: NSNumber(value: false)])
+            guard let hit = hits.first else { return nil }
+            let c = hit.localCoordinates
+            return (hit.faceIndex, Vec3(Double(c.x), Double(c.y), Double(c.z)))
+        }
+
+        /// The session recognizers may recognize SIMULTANEOUSLY
+        /// with each other (v1.13) — UIKit's default exclusivity
+        /// was why the camera never moved while sketching: the
+        /// zero-duration stroke tracker begins on the first touch
+        /// and, under the default rules, the two-finger orbit pan
+        /// and pinch could never begin afterwards. The stroke
+        /// handler already cancels/rolls back cleanly when a
+        /// second touch lands, and the orbit handlers cancel any
+        /// in-flight stroke when they begin.
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                               shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+            let session: [UIGestureRecognizer?] = [sketchTrack, orbitPan, orbitPinch]
+            return session.contains { $0 === gestureRecognizer }
+                && session.contains { $0 === otherGestureRecognizer }
+        }
+
+        /// The session root node, created on demand (rendering
+        /// order 7: over the sketch overlays at 6, under the
+        /// selection highlight at 9).
+        func ensureSessionRoot(in view: SCNView) -> SCNNode? {
+            if let root = sketchSessionNode { return root }
+            guard sketchModel?.activeSketchID != nil else { return nil }
+            let root = SCNNode()
+            root.name = "sketchSession"
+            root.renderingOrder = 7
+            view.scene?.rootNode.addChildNode(root)
+            sketchSessionNode = root
+            return root
+        }
+
+        /// Rebuild ONLY the session's dynamic layer — the working
+        /// copy's lines, the selected entities' glow, the stroke
+        /// preview, the hover marker — from the model's current
+        /// transient state. Called imperatively by the gesture /
+        /// hover handlers after every pointer event, and by
+        /// updateSketchSession for discrete state changes. Plain
+        /// line geometry (one build per node), so a pointer move
+        /// costs a few small allocations — never a model or
+        /// overlay rebuild.
+        func refreshSessionDynamics(in view: SCNView) {
+            guard let model = sketchModel, let working = model.activeSketch,
+                  let root = ensureSessionRoot(in: view) else { return }
+            let plane = working.plane
+            let accent = accentInput
+            let lift = plane.normal * 0.07
+            let liftV = SCNVector3(Float(lift.x), Float(lift.y), Float(lift.z))
+
+            sketchWorkingNode?.removeFromParentNode()
+            let wNode = SCNNode()
+            wNode.name = "sketchWorking"
+            wNode.renderingOrder = 7
+            wNode.position = liftV
+            var plain: [(Vec3, Vec3)] = []
+            let haloMat = SceneKitView.lineMaterial(accent, opacity: 0.30)
+            let coreMat = SceneKitView.lineMaterial(accent, opacity: 1.0)
+            for e in working.entities {
+                let pts = e.polyline().map { plane.toWorld($0) }
+                if model.selectedSketchEntityIDs.contains(e.id) {
+                    for i in 0..<(pts.count - 1) {
+                        if let halo = SceneKitView.tubeNode(from: pts[i], to: pts[i + 1],
+                                                            radius: 0.9, material: haloMat) {
+                            wNode.addChildNode(halo)
+                        }
+                        if let core = SceneKitView.tubeNode(from: pts[i], to: pts[i + 1],
+                                                            radius: 0.35, material: coreMat) {
+                            wNode.addChildNode(core)
+                        }
+                    }
+                    for p in pts {
+                        let sphere = SCNSphere(radius: 0.55)
+                        sphere.materials = [coreMat]
+                        let sNode = SCNNode(geometry: sphere)
+                        sNode.position = SCNVector3(Float(p.x), Float(p.y), Float(p.z))
+                        wNode.addChildNode(sNode)
+                    }
+                } else if pts.count == 1 {
+                    let c = pts[0], r = 1.2
+                    plain.append((c + plane.xAxis * -r, c + plane.xAxis * r))
+                    plain.append((c + plane.yAxis * -r, c + plane.yAxis * r))
+                } else {
+                    for i in 0..<(pts.count - 1) {
+                        plain.append((pts[i], pts[i + 1]))
+                    }
+                }
+            }
+            if let geo = SceneKitView.lineGeometry(
+                segments: plain,
+                material: SceneKitView.lineMaterial(SceneKitView.cyanColor, opacity: 0.9)) {
+                wNode.addChildNode(SCNNode(geometry: geo))
+            }
+            root.addChildNode(wNode)
+            sketchWorkingNode = wNode
+
+            sketchPreviewNode?.removeFromParentNode()
+            sketchPreviewNode = nil
+            if !model.sketchPreview.isEmpty {
+                let pNode = SCNNode()
+                pNode.name = "sketchPreview"
+                pNode.renderingOrder = 7
+                pNode.position = liftV
+                var dash: [(Vec3, Vec3)] = []
+                var dots: [Vec3] = []
+                for e in model.sketchPreview {
+                    let pts = e.polyline()
+                    if pts.count == 1 {
+                        let c = pts[0], r = 1.6
+                        dash.append((plane.toWorld(c + Vec2(-r, 0)),
+                                     plane.toWorld(c + Vec2(r, 0))))
+                        dash.append((plane.toWorld(c + Vec2(0, -r)),
+                                     plane.toWorld(c + Vec2(0, r))))
+                        dots.append(plane.toWorld(c))
+                    }
+                    for i in 0..<(pts.count - 1) {
+                        dash += SceneKitView.dashedSegments(plane.toWorld(pts[i]),
+                                                            plane.toWorld(pts[i + 1]),
+                                                            on: 2.2, off: 1.6)
+                        dots.append(plane.toWorld(pts[i]))
+                    }
+                    if let last = pts.last, pts.count > 1 { dots.append(plane.toWorld(last)) }
+                }
+                if let geo = SceneKitView.lineGeometry(
+                    segments: dash,
+                    material: SceneKitView.lineMaterial(accent, opacity: 0.95)) {
+                    pNode.addChildNode(SCNNode(geometry: geo))
+                }
+                for d in dots {
+                    let dot = SCNSphere(radius: 0.5)
+                    dot.materials = [coreMat]
+                    let dNode = SCNNode(geometry: dot)
+                    dNode.position = SCNVector3(Float(d.x), Float(d.y), Float(d.z))
+                    pNode.addChildNode(dNode)
+                }
+                root.addChildNode(pNode)
+                sketchPreviewNode = pNode
+            }
+
+            sketchHoverNode?.removeFromParentNode()
+            sketchHoverNode = nil
+            if let hp = model.sketchHoverPoint {
+                let hNode = SCNNode()
+                hNode.name = "sketchHover"
+                hNode.renderingOrder = 7
+                hNode.position = liftV
+                // Crosshair arms + ring + center dot at the
+                // SNAPPED hover point (v1.13: hover must be
+                // plainly visible, not just a faint ring).
+                let arm = 3.2
+                var segs: [(Vec3, Vec3)] = [
+                    (plane.toWorld(hp + Vec2(-arm, 0)), plane.toWorld(hp + Vec2(arm, 0))),
+                    (plane.toWorld(hp + Vec2(0, -arm)), plane.toWorld(hp + Vec2(0, arm))),
+                ]
+                let steps = 20, rad = 1.8
+                for i in 0..<steps {
+                    let a0 = 2 * Double.pi * Double(i) / Double(steps)
+                    let a1 = 2 * Double.pi * Double(i + 1) / Double(steps)
+                    segs.append((plane.toWorld(hp + Vec2(cos(a0) * rad, sin(a0) * rad)),
+                                 plane.toWorld(hp + Vec2(cos(a1) * rad, sin(a1) * rad))))
+                }
+                if let geo = SceneKitView.lineGeometry(
+                    segments: segs,
+                    material: SceneKitView.lineMaterial(accent, opacity: 0.95)) {
+                    hNode.addChildNode(SCNNode(geometry: geo))
+                }
+                let c = plane.toWorld(hp)
+                let dot = SCNSphere(radius: 0.45)
+                dot.materials = [coreMat]
+                let dNode = SCNNode(geometry: dot)
+                dNode.position = SCNVector3(Float(c.x), Float(c.y), Float(c.z))
+                hNode.addChildNode(dNode)
+                root.addChildNode(hNode)
+                sketchHoverNode = hNode
+            }
+            view.setNeedsDisplay()
+        }
+
         /// Sketch stroke tracking (a zero-duration long-press is the
         /// reliable "give me every touch phase" recognizer): finger /
         /// pencil down → drag → up maps straight onto the model's
@@ -164,6 +411,7 @@ struct SceneKitView: UIViewRepresentable {
                 if strokeInFlight {
                     strokeInFlight = false
                     model.cancelSketchStroke()
+                    refreshSessionDynamics(in: view)
                 }
                 return
             }
@@ -174,19 +422,23 @@ struct SceneKitView: UIViewRepresentable {
                 if let p = planePoint(at: loc, in: view, plane: plane) {
                     model.sketchPointerDown(at: p)
                 }
+                refreshSessionDynamics(in: view)
             case .changed:
                 if let p = planePoint(at: loc, in: view, plane: plane) {
                     model.sketchPointerDragged(to: p)
                 }
+                refreshSessionDynamics(in: view)
             case .ended:
                 if let p = planePoint(at: loc, in: view, plane: plane) {
                     model.sketchPointerUp(at: p)
                 }
                 strokeInFlight = false
                 model.endSketchHover()
+                refreshSessionDynamics(in: view)
             case .cancelled, .failed:
                 if strokeInFlight { model.cancelSketchStroke() }
                 strokeInFlight = false
+                refreshSessionDynamics(in: view)
             default:
                 break
             }
@@ -269,8 +521,10 @@ struct SceneKitView: UIViewRepresentable {
                                       in: view, plane: plane) {
                     model.sketchHover(at: p)
                 }
+                refreshSessionDynamics(in: view)
             case .ended, .cancelled:
                 model.endSketchHover()
+                refreshSessionDynamics(in: view)
             default:
                 break
             }
@@ -281,30 +535,20 @@ struct SceneKitView: UIViewRepresentable {
             guard sketchModel?.activeSketchID == nil else { return }
             guard let view = gesture.view as? SCNView else { return }
             let point = gesture.location(in: view)
-            let options: [SCNHitTestOption: Any] = [
-                .searchMode: NSNumber(value: SCNHitTestSearchMode.closest.rawValue),
-                .boundingBoxOnly: NSNumber(value: false),
-                .ignoreChildNodes: NSNumber(value: false),
-            ]
             if isPickingFace {
-                let hits = view.hitTest(point, options: options)
-                // Only the model node counts — the sketch overlays
-                // also carry geometry but must never answer a face pick.
-                guard let hit = hits.first(where: { $0.node === modelNode }) else { return }
+                // Only the model node counts — the hit test is
+                // scoped to its subtree (see modelHit), so the
+                // sketch overlays can never answer a face pick.
+                guard let hit = modelHit(at: point, in: view) else { return }
                 onFacePicked?(hit.faceIndex)
                 return
             }
             // Normal mode: a tap ON the model resolves a picked
             // selection first (edge → face → shaft/hole, in the
-            // model). The filter to the model node keeps the sketch
-            // overlays and the selection highlight itself from ever
-            // answering the tap. Only a tap that misses the
-            // model entirely falls through to sketch selection.
-            let hits = view.hitTest(point, options: options)
-            if let hit = hits.first(where: { $0.node === modelNode }) {
-                let c = hit.localCoordinates
-                onModelHit?(hit.faceIndex,
-                            Vec3(Double(c.x), Double(c.y), Double(c.z)))
+            // model). Only a tap that misses the model entirely
+            // falls through to sketch selection.
+            if let hit = modelHit(at: point, in: view) {
+                onModelHit?(hit.faceIndex, hit.point)
                 return
             }
             pickSketch(at: point, in: view)
@@ -321,16 +565,8 @@ struct SceneKitView: UIViewRepresentable {
             guard sketchModel?.activeSketchID == nil else { return }
             guard !isPickingFace, let view = gesture.view as? SCNView else { return }
             let point = gesture.location(in: view)
-            let options: [SCNHitTestOption: Any] = [
-                .searchMode: NSNumber(value: SCNHitTestSearchMode.closest.rawValue),
-                .boundingBoxOnly: NSNumber(value: false),
-                .ignoreChildNodes: NSNumber(value: false),
-            ]
-            let hits = view.hitTest(point, options: options)
-            guard let hit = hits.first(where: { $0.node === modelNode }) else { return }
-            let c = hit.localCoordinates
-            onModelDoubleTap?(hit.faceIndex,
-                              Vec3(Double(c.x), Double(c.y), Double(c.z)))
+            guard let hit = modelHit(at: point, in: view) else { return }
+            onModelDoubleTap?(hit.faceIndex, hit.point)
         }
 
         /// Ray-cast the tap against each visible sketch's plane and
@@ -410,6 +646,35 @@ struct SceneKitView: UIViewRepresentable {
         (accentUIColor.cgColor.components ?? [])
             .map { String(format: "%.3f", $0) }
             .joined(separator: ",")
+    }
+
+    /// Identity fingerprint for a mesh, strong enough that two
+    /// DIFFERENT meshes practically never share one: triangle
+    /// count + volume + bounds + a sampled-vertex checksum. The
+    /// old keys used count + volume alone — and a pure translation
+    /// or rotation (Move Body) preserves BOTH exactly, so the
+    /// geometry, edge overlay and selection highlight all stayed
+    /// stale at the pre-move position (sweep finding, 2026-10-26).
+    /// Shared by the geometry / edge / selection keys here and by
+    /// EditorView's baseMeshKey.
+    static func meshFingerprint(_ mesh: Mesh) -> String {
+        let b = mesh.bounds
+        var check = 0.0
+        let vs = mesh.vertices
+        if !vs.isEmpty {
+            let stride = max(1, vs.count / 24)
+            var i = 0
+            while i < vs.count {
+                let v = vs[i]
+                check += v.x + v.y * 3.1 + v.z * 7.3
+                i += stride
+            }
+            if let last = vs.last { check += last.x + last.y * 3.1 + last.z * 7.3 }
+        }
+        return String(format: "%d|%.4f|%.3f,%.3f,%.3f|%.3f,%.3f,%.3f|%.3f",
+                      mesh.triangleCount, mesh.volume,
+                      b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z,
+                      check)
     }
 
     static func dismantleUIView(_ view: SCNView, coordinator: Coordinator) {
@@ -518,6 +783,10 @@ struct SceneKitView: UIViewRepresentable {
         track.allowableMovement = CGFloat.greatestFiniteMagnitude
         track.numberOfTouchesRequired = 1
         track.isEnabled = false
+        // Simultaneous recognition with the orbit recognizers is
+        // what lets the camera move while sketching at all (see
+        // the coordinator's delegate method).
+        track.delegate = context.coordinator
         view.addGestureRecognizer(track)
         context.coordinator.sketchTrack = track
 
@@ -527,6 +796,7 @@ struct SceneKitView: UIViewRepresentable {
         orbitPan.minimumNumberOfTouches = 2
         orbitPan.maximumNumberOfTouches = 2
         orbitPan.isEnabled = false
+        orbitPan.delegate = context.coordinator
         view.addGestureRecognizer(orbitPan)
         context.coordinator.orbitPan = orbitPan
 
@@ -534,6 +804,7 @@ struct SceneKitView: UIViewRepresentable {
             target: context.coordinator,
             action: #selector(Coordinator.handleOrbitPinch(_:)))
         orbitPinch.isEnabled = false
+        orbitPinch.delegate = context.coordinator
         view.addGestureRecognizer(orbitPinch)
         context.coordinator.orbitPinch = orbitPinch
 
@@ -553,10 +824,11 @@ struct SceneKitView: UIViewRepresentable {
         context.coordinator.onModelHit = onModelHit
         context.coordinator.onModelDoubleTap = onModelDoubleTap
         context.coordinator.isPickingFace = isPickingFace
-        context.coordinator.sketchesInput = effectiveSketches
+        context.coordinator.sketchesInput = sketches
         context.coordinator.hiddenSketchIDsInput = hiddenSketchIDs
         context.coordinator.showSketchesInput = showSketches
         context.coordinator.sketchModel = sketchModel
+        context.coordinator.accentInput = accentUIColor
         if isPickingFace {
             view.backgroundColor = UIColor(red: 0.13, green: 0.10, blue: 0.05, alpha: 1)
         } else {
@@ -579,6 +851,21 @@ struct SceneKitView: UIViewRepresentable {
             }
         }
 
+        // Camera snap requests (v1.13): a session beginning, a
+        // plane picked in the New Sketch panel, a face picked for
+        // it, or the rail's Flat view button asks for the camera
+        // flat on a plane. Consumed once per nonce, AFTER any pose
+        // restore above and BEFORE the pose save below, so the
+        // snapped pose is what persists.
+        if let req = sketchModel?.cameraSnapRequest,
+           context.coordinator.lastSnapNonce != req.nonce {
+            context.coordinator.lastSnapNonce = req.nonce
+            context.coordinator.snapCameraToPlane(origin: req.origin,
+                                                  normal: req.normal,
+                                                  vAxis: req.vAxis)
+            context.coordinator.framed = true
+        }
+
         // Sketch overlays + selection highlight + measure markers
         // refresh independently of the model geometry guard below.
         updateOverlays(view, context: context)
@@ -593,7 +880,7 @@ struct SceneKitView: UIViewRepresentable {
         // material + preview state + accent (the preview tint reads
         // the accent, so a settings change re-tints a live preview).
         let mat = material ?? MaterialLibrary.defaultMaterial
-        let key = "\(mesh.triangleCount)|\(mesh.volume)|\(mat.id)|\(isPreview ? "preview" : "live")|\(accentKey)"
+        let key = "\(Self.meshFingerprint(mesh))|\(mat.id)|\(isPreview ? "preview" : "live")|\(accentKey)"
         if context.coordinator.geometryKey != key {
             context.coordinator.geometryKey = key
 
@@ -637,7 +924,7 @@ struct SceneKitView: UIViewRepresentable {
     /// picked (with its identifying numbers) + the mesh it was picked
     /// from, so a rebuild swaps the highlight out.
     static func selectionKey(picked: PickedSelection?, mesh: Mesh) -> String {
-        let meshPart = "\(mesh.triangleCount)|\(mesh.volume)"
+        let meshPart = meshFingerprint(mesh)
         guard let picked else { return "none|\(meshPart)" }
         switch picked {
         case .face(let index, _, _):
@@ -977,7 +1264,7 @@ struct SceneKitView: UIViewRepresentable {
     /// the model node).
     private func updateEdges(_ view: SCNView, context: Context) {
         let coord = context.coordinator
-        let key = "\(showModelEdges ? "edges-on" : "edges-off")|\(mesh.triangleCount)|\(mesh.volume)"
+        let key = "\(showModelEdges ? "edges-on" : "edges-off")|\(Self.meshFingerprint(mesh))"
         guard coord.edgeKey != key else { return }
         coord.edgeKey = key
         coord.edgeNode?.removeFromParentNode()
@@ -1046,25 +1333,13 @@ struct SceneKitView: UIViewRepresentable {
         return segments
     }
 
-    // MARK: In-place sketch session (grid / preview / hover / selection)
-
-    /// The sketches the overlays should draw: while a session is
-    /// live, the active sketch is the model's WORKING COPY (drags
-    /// mutate it without a document rebuild), substituted for the
-    /// committed sketch of the same id. Everywhere else, the inputs
-    /// pass through untouched.
-    private var effectiveSketches: [Sketch] {
-        guard let m = sketchModel, let w = m.activeSketch,
-              let id = m.activeSketchID else { return sketches }
-        return sketches.map { $0.id == id ? w : $0 }
-    }
+    // MARK: In-place sketch session (grid / guide / dynamics)
 
     /// Enter/leave sketch input mode with the session: entering
     /// disables the built-in camera control (so one finger draws
     /// instead of orbiting) and arms the session recognizers;
     /// leaving restores the standard camera and disarms them. The
-    /// orbit target is the part's bounds center (the origin for an
-    /// empty document — a fresh in-place sketch's home).
+    /// orbit target is the active sketch plane's origin (v1.13).
     private func syncSketchMode(_ view: SCNView, context: Context) {
         let coord = context.coordinator
         let active = sketchModel?.activeSketchID != nil
@@ -1088,7 +1363,10 @@ struct SceneKitView: UIViewRepresentable {
         coord.sketchModeActive = active
         if active {
             view.allowsCameraControl = false
-            coord.orbitTarget = mesh.triangleCount > 0 ? mesh.bounds.center : .zero
+            // Orbit around the sketch plane's center (v1.13) —
+            // the point the user is drawing about — not the part's
+            // bounds center.
+            coord.orbitTarget = sketchModel?.activeSketch?.plane.origin ?? .zero
             coord.sketchTrack?.isEnabled = true
             coord.orbitPan?.isEnabled = true
             coord.orbitPinch?.isEnabled = true
@@ -1103,37 +1381,11 @@ struct SceneKitView: UIViewRepresentable {
         }
     }
 
-    static func sketchEntityFingerprint(_ e: SketchEntity) -> String {
-        let pts = e.polyline()
-        guard let f = pts.first, let l = pts.last else { return "\(e.id):0" }
-        return String(format: "%d:%d@%.2f,%.2f-%.2f,%.2f",
-                      e.id, pts.count, f.x, f.y, l.x, l.y)
-    }
-
-    /// Change fingerprint for the session's dynamic layer: the
-    /// selection (ids + their working-copy geometry), the preview
-    /// entities, and the hover point.
-    static func sketchSessionKey(model: EditorModel, working: Sketch) -> String {
-        var parts: [String] = []
-        parts.append("sel:" + model.selectedSketchEntityIDs.sorted()
-            .map(String.init).joined(separator: ","))
-        if let hp = model.sketchHoverPoint {
-            parts.append(String(format: "hov:%.2f,%.2f", hp.x, hp.y))
-        } else {
-            parts.append("hov:-")
-        }
-        for e in model.sketchPreview {
-            parts.append("p" + sketchEntityFingerprint(e))
-        }
-        for e in working.entities
-        where model.selectedSketchEntityIDs.contains(e.id) {
-            parts.append("w" + sketchEntityFingerprint(e))
-        }
-        return parts.joined(separator: "|")
-    }
-
     /// Change fingerprint for the grid layer: only the sketch, its
     /// plane, and the snap step — the grid is static while drawing.
+    /// (The v1.12 dynamic-layer key — selection + preview + hover
+    /// at 0.01 mm precision — is gone: that layer is rebuilt
+    /// imperatively by the coordinator now, never through here.)
     static func sketchGridKey(model: EditorModel, working: Sketch) -> String {
         let pl = working.plane
         return String(format: "%@|o:%.2f,%.2f,%.2f|n:%.3f,%.3f,%.3f|s:%.2f",
@@ -1142,11 +1394,14 @@ struct SceneKitView: UIViewRepresentable {
                       model.sketchSnapStep)
     }
 
-    /// Keep the session overlays in sync: a root at renderingOrder 7
-    /// (over the sketch overlays at 6, under the selection highlight
-    /// at 9) holding the plane grid (rebuilt only when the plane /
-    /// snap changes) and the dynamic layer — dashed stroke preview,
-    /// selected-entity glow, hover ring — rebuilt when its key moves.
+    /// Keep the session's STATIC layers in sync: the root, the
+    /// plane grid (rebuilt only when the sketch / plane / snap step
+    /// changes) and the face-outline guide (only when the outline
+    /// changes). Everything that moves per pointer event — working
+    /// copy, preview, hover marker — lives in the coordinator's
+    /// imperative layer (`refreshSessionDynamics`), refreshed here
+    /// too so discrete state changes (selection, commits) land
+    /// without waiting for the next pointer event.
     private func updateSketchSession(_ view: SCNView, context: Context) {
         let coord = context.coordinator
         guard let model = sketchModel, model.activeSketchID != nil,
@@ -1155,22 +1410,16 @@ struct SceneKitView: UIViewRepresentable {
                 coord.sketchSessionNode?.removeFromParentNode()
                 coord.sketchSessionNode = nil
                 coord.sketchGridNode = nil
-                coord.sketchDynamicNode = nil
+                coord.sketchWorkingNode = nil
+                coord.sketchPreviewNode = nil
+                coord.sketchHoverNode = nil
+                coord.sketchGuideNode = nil
                 coord.sketchGridKey = ""
-                coord.sketchSessionKey = ""
+                coord.sketchGuideKey = ""
             }
             return
         }
-        let root: SCNNode
-        if let existing = coord.sketchSessionNode {
-            root = existing
-        } else {
-            root = SCNNode()
-            root.name = "sketchSession"
-            root.renderingOrder = 7
-            view.scene?.rootNode.addChildNode(root)
-            coord.sketchSessionNode = root
-        }
+        guard let root = coord.ensureSessionRoot(in: view) else { return }
         let gKey = Self.sketchGridKey(model: model, working: working)
         if coord.sketchGridKey != gKey {
             coord.sketchGridKey = gKey
@@ -1180,22 +1429,60 @@ struct SceneKitView: UIViewRepresentable {
             root.addChildNode(grid)
             coord.sketchGridNode = grid
         }
-        let key = Self.sketchSessionKey(model: model, working: working)
-            + "|acc:\(accentKey)"
-        guard coord.sketchSessionKey != key else { return }
-        coord.sketchSessionKey = key
-        coord.sketchDynamicNode?.removeFromParentNode()
-        let dyn = Self.makeSketchDynamicNode(model: model, working: working,
-                                             accent: accentUIColor)
-        root.addChildNode(dyn)
-        coord.sketchDynamicNode = dyn
+        // The face guide: when the active sketch was created on a
+        // model face, its outline (stored by the model at creation)
+        // draws as a closed amber loop in the session — the guide
+        // the old 2D editor showed (v1.13 restores it in-place).
+        let outline = model.activeSketchID.flatMap { model.faceOutlines[$0] } ?? []
+        let oKey = outline.isEmpty ? "none"
+            : "\(outline.count)|\(outline.first!.x),\(outline.first!.y)|\(outline.last!.x),\(outline.last!.y)"
+        if coord.sketchGuideKey != oKey {
+            coord.sketchGuideKey = oKey
+            coord.sketchGuideNode?.removeFromParentNode()
+            coord.sketchGuideNode = nil
+            if outline.count > 1 {
+                let guide = Self.makeSketchGuideNode(plane: working.plane,
+                                                     outline: outline)
+                root.addChildNode(guide)
+                coord.sketchGuideNode = guide
+            }
+        }
+        coord.refreshSessionDynamics(in: view)
     }
 
-    /// The active plane's grid: ±120 mm of lines, minor every snap
-    /// step (5 mm when the step is finer than 2 mm), major every 5
-    /// minors, at subtle white opacities (0.10 / 0.22) tinted toward
-    /// the plane's axis color for a true base plane. Lifted +0.06 mm
-    /// along the normal so it never sits coplanar with a model face.
+    /// The face-outline guide node: the picked face's boundary as
+    /// one closed loop of line segments, in warm amber so it never
+    /// reads as sketch geometry (cyan) or selection (accent).
+    /// Lifted like the grid so it never z-fights the face itself.
+    static func makeSketchGuideNode(plane: Plane3, outline: [Vec2]) -> SCNNode {
+        let node = SCNNode()
+        node.name = "sketchGuide"
+        node.renderingOrder = 7
+        let lift = plane.normal * 0.06
+        node.position = SCNVector3(Float(lift.x), Float(lift.y), Float(lift.z))
+        var segments: [(Vec3, Vec3)] = []
+        for i in outline.indices {
+            segments.append((plane.toWorld(outline[i]),
+                             plane.toWorld(outline[(i + 1) % outline.count])))
+        }
+        if let geo = lineGeometry(
+            segments: segments,
+            material: lineMaterial(UIColor(red: 1.0, green: 0.72, blue: 0.30, alpha: 1),
+                                   opacity: 0.85)) {
+            node.addChildNode(SCNNode(geometry: geo))
+        }
+        return node
+    }
+
+    /// The active plane's grid: ±100 mm of lines in ONE
+    /// SCNGeometry (v1.13) — a single vertex buffer with two line
+    /// elements, minor at opacity 0.10 and major (every 5th) at
+    /// 0.22, each element with its own material. The DRAWN minor
+    /// spacing is the snap step floored at 2 mm (a 0.5 mm snap
+    /// would otherwise weave thousands of lines; snapping itself
+    /// still uses the real step). Tinted toward the plane's axis
+    /// color for a true base plane. Lifted +0.06 mm along the
+    /// normal so it never sits coplanar with a model face.
     static func makeSketchGridNode(plane: Plane3, snapStep: Double) -> SCNNode {
         let node = SCNNode()
         node.name = "sketchGrid"
@@ -1203,29 +1490,39 @@ struct SceneKitView: UIViewRepresentable {
         let lift = plane.normal * 0.06
         node.position = SCNVector3(Float(lift.x), Float(lift.y), Float(lift.z))
         let tint = basePlaneTint(for: plane)
-        let minorStep = snapStep >= 2 ? snapStep : 5
-        let half = 120.0
+        let minorStep = max(2, snapStep)
+        let half = 100.0
         let count = Int(half / minorStep)
-        var minor: [(Vec3, Vec3)] = []
-        var major: [(Vec3, Vec3)] = []
+        var positions: [Float] = []
+        var minorIndices: [UInt32] = []
+        var majorIndices: [UInt32] = []
+        func addSegment(_ a: Vec3, _ b: Vec3, major: Bool) {
+            let base = UInt32(positions.count / 3)
+            positions.append(Float(a.x)); positions.append(Float(a.y)); positions.append(Float(a.z))
+            positions.append(Float(b.x)); positions.append(Float(b.y)); positions.append(Float(b.z))
+            if major { majorIndices += [base, base + 1] } else { minorIndices += [base, base + 1] }
+        }
         for i in -count...count {
             let v = Double(i) * minorStep
-            let a1 = plane.toWorld(Vec2(v, -half)), b1 = plane.toWorld(Vec2(v, half))
-            let a2 = plane.toWorld(Vec2(-half, v)), b2 = plane.toWorld(Vec2(half, v))
-            if i % 5 == 0 {
-                major.append((a1, b1)); major.append((a2, b2))
-            } else {
-                minor.append((a1, b1)); minor.append((a2, b2))
-            }
+            let major = i % 5 == 0
+            addSegment(plane.toWorld(Vec2(v, -half)), plane.toWorld(Vec2(v, half)), major: major)
+            addSegment(plane.toWorld(Vec2(-half, v)), plane.toWorld(Vec2(half, v)), major: major)
         }
-        if let geo = lineGeometry(segments: minor,
-                                  material: lineMaterial(tint, opacity: 0.10)) {
-            node.addChildNode(SCNNode(geometry: geo))
+        let posData = positions.withUnsafeBufferPointer { Data(buffer: $0) }
+        let vertexSource = SCNGeometrySource(
+            data: posData, semantic: .vertex, vectorCount: positions.count / 3,
+            usesFloatComponents: true, componentsPerVector: 3,
+            bytesPerComponent: 4, dataOffset: 0, dataStride: 12)
+        func element(_ indices: [UInt32]) -> SCNGeometryElement {
+            let data = indices.withUnsafeBufferPointer { Data(buffer: $0) }
+            return SCNGeometryElement(data: data, primitiveType: .line,
+                                      primitiveCount: indices.count / 2, bytesPerIndex: 4)
         }
-        if let geo = lineGeometry(segments: major,
-                                  material: lineMaterial(tint, opacity: 0.22)) {
-            node.addChildNode(SCNNode(geometry: geo))
-        }
+        let geometry = SCNGeometry(sources: [vertexSource],
+                                   elements: [element(minorIndices), element(majorIndices)])
+        geometry.materials = [lineMaterial(tint, opacity: 0.10),
+                              lineMaterial(tint, opacity: 0.22)]
+        node.addChildNode(SCNNode(geometry: geometry))
         return node
     }
 
@@ -1247,86 +1544,6 @@ struct SceneKitView: UIViewRepresentable {
         return .white
     }
 
-    /// The dynamic session layer: selected entities glow with the
-    /// same accent tube pair a selected sketch uses (plus vertex
-    /// spheres); the stroke preview draws as DASHED accent lines;
-    /// the hover / drag point gets a small accent ring + dot. The
-    /// whole layer floats +0.07 mm along the plane normal.
-    static func makeSketchDynamicNode(model: EditorModel, working: Sketch,
-                                      accent: UIColor) -> SCNNode {
-        let node = SCNNode()
-        node.name = "sketchDynamic"
-        node.renderingOrder = 7
-        let plane = working.plane
-        let lift = plane.normal * 0.07
-        node.position = SCNVector3(Float(lift.x), Float(lift.y), Float(lift.z))
-        let haloMat = lineMaterial(accent, opacity: 0.30)
-        let coreMat = lineMaterial(accent, opacity: 1.0)
-        for e in working.entities
-        where model.selectedSketchEntityIDs.contains(e.id) {
-            let pts = e.polyline().map { plane.toWorld($0) }
-            for i in 0..<(pts.count - 1) {
-                if let halo = tubeNode(from: pts[i], to: pts[i + 1],
-                                       radius: 0.9, material: haloMat) {
-                    node.addChildNode(halo)
-                }
-                if let core = tubeNode(from: pts[i], to: pts[i + 1],
-                                       radius: 0.35, material: coreMat) {
-                    node.addChildNode(core)
-                }
-            }
-            for p in pts {
-                let sphere = SCNSphere(radius: 0.55)
-                sphere.materials = [coreMat]
-                let sNode = SCNNode(geometry: sphere)
-                sNode.position = SCNVector3(Float(p.x), Float(p.y), Float(p.z))
-                node.addChildNode(sNode)
-            }
-        }
-        var dashSegments: [(Vec3, Vec3)] = []
-        for e in model.sketchPreview {
-            let pts = e.polyline()
-            if pts.count == 1 {
-                let c = pts[0], r = 1.2
-                dashSegments.append((plane.toWorld(c + Vec2(-r, 0)),
-                                     plane.toWorld(c + Vec2(r, 0))))
-                dashSegments.append((plane.toWorld(c + Vec2(0, -r)),
-                                     plane.toWorld(c + Vec2(0, r))))
-            }
-            for i in 0..<(pts.count - 1) {
-                dashSegments += dashedSegments(plane.toWorld(pts[i]),
-                                               plane.toWorld(pts[i + 1]),
-                                               on: 2.2, off: 1.6)
-            }
-        }
-        if let geo = lineGeometry(segments: dashSegments,
-                                  material: lineMaterial(accent, opacity: 0.95)) {
-            node.addChildNode(SCNNode(geometry: geo))
-        }
-        if let hp = model.sketchHoverPoint {
-            var ring: [(Vec3, Vec3)] = []
-            let steps = 20
-            let rad = 1.8
-            for i in 0..<steps {
-                let a0 = 2 * Double.pi * Double(i) / Double(steps)
-                let a1 = 2 * Double.pi * Double(i + 1) / Double(steps)
-                ring.append((plane.toWorld(hp + Vec2(cos(a0) * rad, sin(a0) * rad)),
-                             plane.toWorld(hp + Vec2(cos(a1) * rad, sin(a1) * rad))))
-            }
-            if let geo = lineGeometry(segments: ring,
-                                      material: lineMaterial(accent, opacity: 0.9)) {
-                node.addChildNode(SCNNode(geometry: geo))
-            }
-            let c = plane.toWorld(hp)
-            let dot = SCNSphere(radius: 0.45)
-            dot.materials = [coreMat]
-            let dNode = SCNNode(geometry: dot)
-            dNode.position = SCNVector3(Float(c.x), Float(c.y), Float(c.z))
-            node.addChildNode(dNode)
-        }
-        return node
-    }
-
     /// Split a segment into dash sub-segments (on/off lengths in mm).
     static func dashedSegments(_ a: Vec3, _ b: Vec3,
                                on: Double, off: Double) -> [(Vec3, Vec3)] {
@@ -1344,10 +1561,19 @@ struct SceneKitView: UIViewRepresentable {
 
     // MARK: Sketch overlays
 
-    /// Keep the sketch overlay nodes in sync with the overlay inputs.
+    /// Keep the sketch overlay nodes in sync with the overlay
+    /// inputs. v1.13: these are the COMMITTED sketches only, and
+    /// while a session is live the active sketch is EXCLUDED — the
+    /// session layer draws its working copy. (v1.12 substituted
+    /// the working copy in here, so every select-drag move changed
+    /// this key and rebuilt every sketch overlay, tube glows
+    /// included, per pointer event.)
     private func updateOverlays(_ view: SCNView, context: Context) {
         let coord = context.coordinator
-        let key = Self.overlayKey(sketches: effectiveSketches, selectedID: selectedSketchID,
+        let activeID = sketchModel?.activeSketchID
+        let visible = activeID == nil ? sketches
+            : sketches.filter { $0.id != activeID }
+        let key = Self.overlayKey(sketches: visible, selectedID: selectedSketchID,
                                   hidden: hiddenSketchIDs, show: showSketches)
             + "|acc:\(accentKey)"
         guard coord.overlayKey != key else { return }
@@ -1357,7 +1583,7 @@ struct SceneKitView: UIViewRepresentable {
         guard showSketches else { return }
         let root = SCNNode()
         root.name = "sketchOverlays"
-        for sketch in effectiveSketches where !hiddenSketchIDs.contains(sketch.id) {
+        for sketch in visible where !hiddenSketchIDs.contains(sketch.id) {
             root.addChildNode(Self.makeSketchNode(sketch,
                                                   selected: sketch.id == selectedSketchID,
                                                   accent: accentUIColor))
@@ -1368,8 +1594,9 @@ struct SceneKitView: UIViewRepresentable {
 
     /// Change fingerprint for the overlays: visibility, selection,
     /// each sketch's plane origin, entity count, and a cheap shape
-    /// sample (first polyline point per entity) so in-place sketch
-    /// edits refresh the overlay too.
+    /// sample (first polyline point per entity) so committed sketch
+    /// edits refresh the overlay. (The ACTIVE sketch is excluded
+    /// during a session — see updateOverlays.)
     static func overlayKey(sketches: [Sketch], selectedID: String?,
                            hidden: Set<String>, show: Bool) -> String {
         var parts = [show ? "show" : "hide", selectedID ?? "-"]
@@ -1378,8 +1605,11 @@ struct SceneKitView: UIViewRepresentable {
             fp += String(format: "%.2f,%.2f,%.2f", s.plane.origin.x, s.plane.origin.y, s.plane.origin.z)
             for e in s.entities {
                 let pts = e.polyline()
-                if let f = pts.first {
-                    fp += "|\(pts.count)@\(String(format: "%.2f,%.2f", f.x, f.y))"
+                if let f = pts.first, let l = pts.last {
+                    // First AND last point: sampling the first alone
+                    // missed edits that move only an entity's far
+                    // end (a line's B endpoint, an arc's end).
+                    fp += "|\(pts.count)@\(String(format: "%.2f,%.2f-%.2f,%.2f", f.x, f.y, l.x, l.y))"
                 } else {
                     fp += "|0"
                 }

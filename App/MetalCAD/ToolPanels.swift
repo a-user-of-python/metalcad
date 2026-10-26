@@ -68,7 +68,7 @@ func mcRotatedPlane(_ p: Plane3, aroundXAxis: Bool, degrees: Double) -> Plane3 {
     }
 }
 
-/// The Fusion-style context tools. Tapping a ribbon tool opens one of
+/// The Fusion-style context tools. Tapping a rail tool opens one of
 /// these panels beside the preview; OK builds the feature with exactly
 /// the numbers shown — nothing is hidden or prefixed.
 enum ActiveTool: Identifiable, Equatable {
@@ -2640,7 +2640,7 @@ func mcFaceEdgeMidpoints(faceIndex: Int, mesh: Mesh) -> [Vec3] {
 /// one view for all four selection-first finishes: the single
 /// tapped edge ("Fillet/Chamfer This Edge") and every edge
 /// bounding the tapped face ("Fillet/Chamfer Face Edges"). The
-/// ribbon Fillet/Chamfer panels stay all-edges; this one never
+/// rail Fillet/Chamfer panels stay all-edges; this one never
 /// touches an edge outside its midpoint list.
 struct EdgeFinishPanel: View {
     @ObservedObject var model: EditorModel

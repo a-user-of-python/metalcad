@@ -47,6 +47,18 @@ struct SceneKitView: UIViewRepresentable {
     /// blue (normal +Z) — matching the New Sketch panel's plane
     /// cards while a plane is being chosen.
     var showBasePlanes: Bool = false
+    /// Draw the model's sharp (crease) edges as thin dark lines —
+    /// the shaded-with-edges look of normal CAD. Gated by the
+    /// caller to meshes under ~80k triangles (see updateEdges).
+    var showModelEdges: Bool = true
+    /// The editor model, passed while an in-place sketch session may
+    /// be live. When `sketchModel.activeSketchID != nil` the view
+    /// switches to sketch input: one-finger/pencil strokes draw on
+    /// the active sketch's plane (camera control is replaced by a
+    /// two-finger orbit + pinch), pencil hover tracks the snapped
+    /// point, and the grid / preview / selection overlays render.
+    /// Nil (the default) keeps every pre-session behavior.
+    var sketchModel: EditorModel? = nil
     /// When true, taps hit-test the model and report the triangle index.
     var isPickingFace: Bool = false
     /// Called with the welded-mesh triangle index of the tapped face.
@@ -82,6 +94,8 @@ struct SceneKitView: UIViewRepresentable {
         var selectionKey: String = ""
         var measureKey: String = ""
         var basePlanesKey: String = ""
+        var edgeNode: SCNNode?
+        var edgeKey: String = ""
         var modelNode: SCNNode?
         var overlayNode: SCNNode?
         var selectionNode: SCNNode?
@@ -101,8 +115,170 @@ struct SceneKitView: UIViewRepresentable {
         var sketchesInput: [Sketch] = []
         var hiddenSketchIDsInput: Set<String> = []
         var showSketchesInput: Bool = true
+        // In-place sketch session state (see `sketchModel`).
+        weak var sketchModel: EditorModel?
+        var sketchModeActive = false
+        var strokeInFlight = false
+        var orbitTarget: Vec3 = .zero
+        var lastPinchScale: CGFloat = 1
+        var sketchTrack: UILongPressGestureRecognizer?
+        var orbitPan: UIPanGestureRecognizer?
+        var orbitPinch: UIPinchGestureRecognizer?
+        var pencilHover: UIPencilHoverGestureRecognizer?
+        var sketchSessionNode: SCNNode?
+        var sketchGridNode: SCNNode?
+        var sketchDynamicNode: SCNNode?
+        var sketchGridKey: String = ""
+        var sketchSessionKey: String = ""
+
+        /// Project a view point onto a sketch plane — the same
+        /// unproject + ray/plane intersection the sketch picking
+        /// below uses — returning plane-space coordinates.
+        func planePoint(at point: CGPoint, in view: SCNView, plane: Plane3) -> Vec2? {
+            let near3 = view.unprojectPoint(SCNVector3(Float(point.x), Float(point.y), 0))
+            let far3 = view.unprojectPoint(SCNVector3(Float(point.x), Float(point.y), 1))
+            let origin = Vec3(Double(near3.x), Double(near3.y), Double(near3.z))
+            let far = Vec3(Double(far3.x), Double(far3.y), Double(far3.z))
+            let span = far - origin
+            guard span.length > 1e-9 else { return nil }
+            let dir = span.normalized
+            let denom = dir.dot(plane.normal)
+            guard abs(denom) > 1e-9 else { return nil }
+            let t = (plane.origin - origin).dot(plane.normal) / denom
+            guard t > 0 else { return nil }
+            let hit = origin + dir * t
+            let local = hit - plane.origin
+            return Vec2(local.dot(plane.xAxis), local.dot(plane.yAxis))
+        }
+
+        /// Sketch stroke tracking (a zero-duration long-press is the
+        /// reliable "give me every touch phase" recognizer): finger /
+        /// pencil down → drag → up maps straight onto the model's
+        /// pointer API, projected onto the active sketch's plane.
+        @objc func handleSketchTrack(_ gesture: UILongPressGestureRecognizer) {
+            guard let view = gesture.view as? SCNView, let model = sketchModel,
+                  let plane = model.activeSketch?.plane else { return }
+            if gesture.numberOfTouches > 1 {
+                // A second finger landed — the orbit is taking over;
+                // roll the stroke back instead of fighting it.
+                if strokeInFlight {
+                    strokeInFlight = false
+                    model.cancelSketchStroke()
+                }
+                return
+            }
+            let loc = gesture.location(in: view)
+            switch gesture.state {
+            case .began:
+                strokeInFlight = true
+                if let p = planePoint(at: loc, in: view, plane: plane) {
+                    model.sketchPointerDown(at: p)
+                }
+            case .changed:
+                if let p = planePoint(at: loc, in: view, plane: plane) {
+                    model.sketchPointerDragged(to: p)
+                }
+            case .ended:
+                if let p = planePoint(at: loc, in: view, plane: plane) {
+                    model.sketchPointerUp(at: p)
+                }
+                strokeInFlight = false
+                model.endSketchHover()
+            case .cancelled, .failed:
+                if strokeInFlight { model.cancelSketchStroke() }
+                strokeInFlight = false
+            default:
+                break
+            }
+        }
+
+        /// Two-finger orbit while sketching (the built-in camera
+        /// control is disabled so one finger can draw): pan rotates
+        /// the camera around `orbitTarget` in world-Z azimuth /
+        /// elevation, pinch dollies. Taking over cancels any stroke.
+        @objc func handleOrbitPan(_ gesture: UIPanGestureRecognizer) {
+            guard let view = gesture.view as? SCNView, let cam = cameraNode
+            else { return }
+            if gesture.state == .began, strokeInFlight {
+                strokeInFlight = false
+                sketchModel?.cancelSketchStroke()
+            }
+            guard gesture.state == .changed else { return }
+            let t = gesture.translation(in: view)
+            gesture.setTranslation(.zero, in: view)
+            orbitCamera(cam, dAzimuth: -Double(t.x) * 0.008,
+                        dElevation: -Double(t.y) * 0.008)
+            view.setNeedsDisplay()
+        }
+
+        @objc func handleOrbitPinch(_ gesture: UIPinchGestureRecognizer) {
+            guard let cam = cameraNode else { return }
+            if gesture.state == .began {
+                lastPinchScale = 1
+                if strokeInFlight {
+                    strokeInFlight = false
+                    sketchModel?.cancelSketchStroke()
+                }
+            }
+            guard gesture.state == .changed, gesture.scale > 0 else { return }
+            let step = Double(gesture.scale) / Double(lastPinchScale)
+            lastPinchScale = gesture.scale
+            guard step > 0 else { return }
+            dollyCamera(cam, factor: step)
+            (gesture.view as? SCNView)?.setNeedsDisplay()
+        }
+
+        private func orbitCamera(_ cam: SCNNode, dAzimuth: Double, dElevation: Double) {
+            let pos = Vec3(Double(cam.position.x), Double(cam.position.y),
+                           Double(cam.position.z))
+            let off = pos - orbitTarget
+            let r = off.length
+            guard r > 1e-3 else { return }
+            var az = atan2(off.y, off.x)
+            var el = asin(max(-1, min(1, off.z / r)))
+            az += dAzimuth
+            el = max(-1.45, min(1.45, el + dElevation))
+            let flat = r * cos(el)
+            let newPos = orbitTarget + Vec3(flat * cos(az), flat * sin(az), r * sin(el))
+            cam.position = SCNVector3(Float(newPos.x), Float(newPos.y), Float(newPos.z))
+            cam.look(at: SCNVector3(Float(orbitTarget.x), Float(orbitTarget.y),
+                                    Float(orbitTarget.z)))
+        }
+
+        private func dollyCamera(_ cam: SCNNode, factor: Double) {
+            let pos = Vec3(Double(cam.position.x), Double(cam.position.y),
+                           Double(cam.position.z))
+            let off = pos - orbitTarget
+            let r = off.length
+            guard r > 1e-3 else { return }
+            let newR = max(5, min(4000, r / factor))
+            let newPos = orbitTarget + off * (newR / r)
+            cam.position = SCNVector3(Float(newPos.x), Float(newPos.y), Float(newPos.z))
+            cam.look(at: SCNVector3(Float(orbitTarget.x), Float(orbitTarget.y),
+                                    Float(orbitTarget.z)))
+        }
+
+        /// Apple Pencil hover: the snapped point follows the pencil
+        /// before it ever touches, so the user can aim the stroke.
+        @objc func handlePencilHover(_ gesture: UIPencilHoverGestureRecognizer) {
+            guard let view = gesture.view as? SCNView, let model = sketchModel,
+                  let plane = model.activeSketch?.plane else { return }
+            switch gesture.state {
+            case .began, .changed:
+                if let p = planePoint(at: gesture.location(in: view),
+                                      in: view, plane: plane) {
+                    model.sketchHover(at: p)
+                }
+            case .ended, .cancelled:
+                model.endSketchHover()
+            default:
+                break
+            }
+        }
 
         @objc func handleTap(_ gesture: UITapGestureRecognizer) {
+            // In-place sketch session live: strokes own the touches.
+            guard sketchModel?.activeSketchID == nil else { return }
             guard let view = gesture.view as? SCNView else { return }
             let point = gesture.location(in: view)
             let options: [SCNHitTestOption: Any] = [
@@ -142,6 +318,7 @@ struct SceneKitView: UIViewRepresentable {
         /// space, overlays and the selection highlight
         /// never raise it.
         @objc func handleDoubleTap(_ gesture: UITapGestureRecognizer) {
+            guard sketchModel?.activeSketchID == nil else { return }
             guard !isPickingFace, let view = gesture.view as? SCNView else { return }
             let point = gesture.location(in: view)
             let options: [SCNHitTestOption: Any] = [
@@ -327,6 +504,46 @@ struct SceneKitView: UIViewRepresentable {
         doubleTap.numberOfTapsRequired = 2
         view.addGestureRecognizer(doubleTap)
 
+        // In-place sketch input. All four recognizers exist from the
+        // start but stay DISABLED until a sketch session is live
+        // (updateUIView's mode sync): the stroke tracker (zero-
+        // duration long-press, one touch), a two-finger orbit pan
+        // and a pinch — the built-in camera control is disabled
+        // while sketching so one finger can draw without orbiting —
+        // and the Pencil hover tracker.
+        let track = UILongPressGestureRecognizer(
+            target: context.coordinator,
+            action: #selector(Coordinator.handleSketchTrack(_:)))
+        track.minimumPressDuration = 0
+        track.allowableMovement = CGFloat.greatestFiniteMagnitude
+        track.maximumNumberOfTouches = 1
+        track.isEnabled = false
+        view.addGestureRecognizer(track)
+        context.coordinator.sketchTrack = track
+
+        let orbitPan = UIPanGestureRecognizer(
+            target: context.coordinator,
+            action: #selector(Coordinator.handleOrbitPan(_:)))
+        orbitPan.minimumNumberOfTouches = 2
+        orbitPan.maximumNumberOfTouches = 2
+        orbitPan.isEnabled = false
+        view.addGestureRecognizer(orbitPan)
+        context.coordinator.orbitPan = orbitPan
+
+        let orbitPinch = UIPinchGestureRecognizer(
+            target: context.coordinator,
+            action: #selector(Coordinator.handleOrbitPinch(_:)))
+        orbitPinch.isEnabled = false
+        view.addGestureRecognizer(orbitPinch)
+        context.coordinator.orbitPinch = orbitPinch
+
+        let hover = UIPencilHoverGestureRecognizer(
+            target: context.coordinator,
+            action: #selector(Coordinator.handlePencilHover(_:)))
+        hover.isEnabled = false
+        view.addGestureRecognizer(hover)
+        context.coordinator.pencilHover = hover
+
         return view
     }
 
@@ -336,9 +553,10 @@ struct SceneKitView: UIViewRepresentable {
         context.coordinator.onModelHit = onModelHit
         context.coordinator.onModelDoubleTap = onModelDoubleTap
         context.coordinator.isPickingFace = isPickingFace
-        context.coordinator.sketchesInput = sketches
+        context.coordinator.sketchesInput = effectiveSketches
         context.coordinator.hiddenSketchIDsInput = hiddenSketchIDs
         context.coordinator.showSketchesInput = showSketches
+        context.coordinator.sketchModel = sketchModel
         if isPickingFace {
             view.backgroundColor = UIColor(red: 0.13, green: 0.10, blue: 0.05, alpha: 1)
         } else {
@@ -367,6 +585,9 @@ struct SceneKitView: UIViewRepresentable {
         updateSelection(view, context: context)
         updateMeasure(view, context: context)
         updateBasePlanes(view, context: context)
+        updateEdges(view, context: context)
+        syncSketchMode(view, context: context)
+        updateSketchSession(view, context: context)
 
         // Identity for "geometry must be rebuilt": mesh shape +
         // material + preview state + accent (the preview tint reads
@@ -737,12 +958,396 @@ struct SceneKitView: UIViewRepresentable {
         return node
     }
 
+    // MARK: Sharp-edge overlay (the CAD look)
+
+    /// The crease angle (degrees between adjacent face normals)
+    /// past which an edge counts as sharp and gets a drawn line.
+    /// Matches the `displaySoup` default in the kit, so the lines
+    /// land exactly where the smooth shading breaks.
+    static let edgeCreaseDegrees: Double = 60
+
+    /// Keep the sharp-edge line node in sync with the model +
+    /// the "Show model edges" setting. Rebuilt only when its key
+    /// moves (mesh identity + flag); skipped entirely at or above
+    /// ~80k triangles, where per-edge lines stop being legible and
+    /// the welded edge walk gets expensive. renderingOrder 5: above
+    /// the model (0), below the sketch overlays (6), the session
+    /// layer (7) and the selection highlight (9). Named
+    /// "modelEdges" and never hit-tested (every pick filters to
+    /// the model node).
+    private func updateEdges(_ view: SCNView, context: Context) {
+        let coord = context.coordinator
+        let key = "\(showModelEdges ? "edges-on" : "edges-off")|\(mesh.triangleCount)|\(mesh.volume)"
+        guard coord.edgeKey != key else { return }
+        coord.edgeKey = key
+        coord.edgeNode?.removeFromParentNode()
+        coord.edgeNode = nil
+        guard showModelEdges, mesh.triangleCount > 0,
+              mesh.triangleCount < 80_000 else { return }
+        let segments = Self.creaseEdgeSegments(mesh,
+                                               creaseDegrees: Self.edgeCreaseDegrees)
+        guard let geo = Self.lineGeometry(
+            segments: segments,
+            material: Self.lineMaterial(UIColor(white: 0.03, alpha: 1), opacity: 0.42))
+        else { return }
+        let node = SCNNode(geometry: geo)
+        node.name = "modelEdges"
+        node.renderingOrder = 5
+        view.scene?.rootNode.addChildNode(node)
+        coord.edgeNode = node
+    }
+
+    /// The sharp edges of the welded mesh: an edge shared by two
+    /// faces whose normals differ by more than the crease angle,
+    /// plus every boundary edge (only one adjacent face — the rim
+    /// of an opening is always a drawn edge in CAD). Each segment is
+    /// lifted 0.03 mm along the mean adjacent-face normal so the
+    /// line sits proud of the surface instead of z-fighting it.
+    static func creaseEdgeSegments(_ mesh: Mesh, creaseDegrees: Double) -> [(Vec3, Vec3)] {
+        let m = mesh.welded()
+        guard m.triangleCount > 0 else { return [] }
+        let faceN = m.faceNormals()
+        let cosLimit = cos(creaseDegrees * .pi / 180)
+        func edgeKey(_ a: UInt32, _ b: UInt32) -> UInt64 {
+            (UInt64(min(a, b)) << 32) | UInt64(max(a, b))
+        }
+        var edgeFaces: [UInt64: [Int]] = [:]
+        for t in 0..<m.triangleCount {
+            let i0 = m.indices[t * 3], i1 = m.indices[t * 3 + 1], i2 = m.indices[t * 3 + 2]
+            edgeFaces[edgeKey(i0, i1), default: []].append(t)
+            edgeFaces[edgeKey(i1, i2), default: []].append(t)
+            edgeFaces[edgeKey(i2, i0), default: []].append(t)
+        }
+        var segments: [(Vec3, Vec3)] = []
+        for k in edgeFaces.keys.sorted() {
+            let faces = edgeFaces[k] ?? []
+            let sharp: Bool
+            if faces.count <= 1 {
+                sharp = true
+            } else {
+                var s = false
+                pairLoop: for i in faces.indices {
+                    for j in faces.indices where j > i {
+                        if faceN[faces[i]].dot(faceN[faces[j]]) < cosLimit {
+                            s = true
+                            break pairLoop
+                        }
+                    }
+                }
+                sharp = s
+            }
+            guard sharp else { continue }
+            let lo = Int(k >> 32), hi = Int(k & 0xFFFF_FFFF)
+            var n = Vec3.zero
+            for f in faces { n = n + faceN[f] }
+            let lift = n.length > 1e-9 ? n.normalized * 0.03 : Vec3.zero
+            segments.append((m.vertices[lo] + lift, m.vertices[hi] + lift))
+        }
+        return segments
+    }
+
+    // MARK: In-place sketch session (grid / preview / hover / selection)
+
+    /// The sketches the overlays should draw: while a session is
+    /// live, the active sketch is the model's WORKING COPY (drags
+    /// mutate it without a document rebuild), substituted for the
+    /// committed sketch of the same id. Everywhere else, the inputs
+    /// pass through untouched.
+    private var effectiveSketches: [Sketch] {
+        guard let m = sketchModel, let w = m.activeSketch,
+              let id = m.activeSketchID else { return sketches }
+        return sketches.map { $0.id == id ? w : $0 }
+    }
+
+    /// Enter/leave sketch input mode with the session: entering
+    /// disables the built-in camera control (so one finger draws
+    /// instead of orbiting) and arms the session recognizers;
+    /// leaving restores the standard camera and disarms them. The
+    /// orbit target is the part's bounds center (the origin for an
+    /// empty document — a fresh in-place sketch's home).
+    private func syncSketchMode(_ view: SCNView, context: Context) {
+        let coord = context.coordinator
+        let active = sketchModel?.activeSketchID != nil
+        // Keep the model's snap/pick tolerance honest while a
+        // session is live: ≈14 screen points at the sketch plane,
+        // from the live camera (distance + vertical FOV + height).
+        if active, let model = sketchModel, let plane = model.activeSketch?.plane,
+           let pov = view.pointOfView, let cam = pov.camera {
+            let camPos = Vec3(Double(pov.position.x), Double(pov.position.y),
+                              Double(pov.position.z))
+            let dist = camPos.distance(to: plane.origin)
+            let height = max(Double(view.bounds.height), 1)
+            let fovRad = Double(cam.fieldOfView) * Double.pi / 180
+            let tol = 14 * (2 * dist * tan(fovRad / 2) / height)
+            if tol.isFinite, tol > 0.05,
+               abs(tol - model.sketchSnapToleranceMM) > model.sketchSnapToleranceMM * 0.05 {
+                model.sketchSnapToleranceMM = tol
+            }
+        }
+        guard coord.sketchModeActive != active else { return }
+        coord.sketchModeActive = active
+        if active {
+            view.allowsCameraControl = false
+            coord.orbitTarget = mesh.triangleCount > 0 ? mesh.bounds.center : .zero
+            coord.sketchTrack?.isEnabled = true
+            coord.orbitPan?.isEnabled = true
+            coord.orbitPinch?.isEnabled = true
+            coord.pencilHover?.isEnabled = true
+        } else {
+            view.allowsCameraControl = true
+            coord.sketchTrack?.isEnabled = false
+            coord.orbitPan?.isEnabled = false
+            coord.orbitPinch?.isEnabled = false
+            coord.pencilHover?.isEnabled = false
+            coord.strokeInFlight = false
+        }
+    }
+
+    static func sketchEntityFingerprint(_ e: SketchEntity) -> String {
+        let pts = e.polyline()
+        guard let f = pts.first, let l = pts.last else { return "\(e.id):0" }
+        return String(format: "%d:%d@%.2f,%.2f-%.2f,%.2f",
+                      e.id, pts.count, f.x, f.y, l.x, l.y)
+    }
+
+    /// Change fingerprint for the session's dynamic layer: the
+    /// selection (ids + their working-copy geometry), the preview
+    /// entities, and the hover point.
+    static func sketchSessionKey(model: EditorModel, working: Sketch) -> String {
+        var parts: [String] = []
+        parts.append("sel:" + model.selectedSketchEntityIDs.sorted()
+            .map(String.init).joined(separator: ","))
+        if let hp = model.sketchHoverPoint {
+            parts.append(String(format: "hov:%.2f,%.2f", hp.x, hp.y))
+        } else {
+            parts.append("hov:-")
+        }
+        for e in model.sketchPreview {
+            parts.append("p" + sketchEntityFingerprint(e))
+        }
+        for e in working.entities
+        where model.selectedSketchEntityIDs.contains(e.id) {
+            parts.append("w" + sketchEntityFingerprint(e))
+        }
+        return parts.joined(separator: "|")
+    }
+
+    /// Change fingerprint for the grid layer: only the sketch, its
+    /// plane, and the snap step — the grid is static while drawing.
+    static func sketchGridKey(model: EditorModel, working: Sketch) -> String {
+        let pl = working.plane
+        return String(format: "%@|o:%.2f,%.2f,%.2f|n:%.3f,%.3f,%.3f|s:%.2f",
+                      model.activeSketchID ?? "-", pl.origin.x, pl.origin.y,
+                      pl.origin.z, pl.normal.x, pl.normal.y, pl.normal.z,
+                      model.sketchSnapStep)
+    }
+
+    /// Keep the session overlays in sync: a root at renderingOrder 7
+    /// (over the sketch overlays at 6, under the selection highlight
+    /// at 9) holding the plane grid (rebuilt only when the plane /
+    /// snap changes) and the dynamic layer — dashed stroke preview,
+    /// selected-entity glow, hover ring — rebuilt when its key moves.
+    private func updateSketchSession(_ view: SCNView, context: Context) {
+        let coord = context.coordinator
+        guard let model = sketchModel, model.activeSketchID != nil,
+              let working = model.activeSketch else {
+            if coord.sketchSessionNode != nil {
+                coord.sketchSessionNode?.removeFromParentNode()
+                coord.sketchSessionNode = nil
+                coord.sketchGridNode = nil
+                coord.sketchDynamicNode = nil
+                coord.sketchGridKey = ""
+                coord.sketchSessionKey = ""
+            }
+            return
+        }
+        let root: SCNNode
+        if let existing = coord.sketchSessionNode {
+            root = existing
+        } else {
+            root = SCNNode()
+            root.name = "sketchSession"
+            root.renderingOrder = 7
+            view.scene?.rootNode.addChildNode(root)
+            coord.sketchSessionNode = root
+        }
+        let gKey = Self.sketchGridKey(model: model, working: working)
+        if coord.sketchGridKey != gKey {
+            coord.sketchGridKey = gKey
+            coord.sketchGridNode?.removeFromParentNode()
+            let grid = Self.makeSketchGridNode(plane: working.plane,
+                                               snapStep: model.sketchSnapStep)
+            root.addChildNode(grid)
+            coord.sketchGridNode = grid
+        }
+        let key = Self.sketchSessionKey(model: model, working: working)
+            + "|acc:\(accentKey)"
+        guard coord.sketchSessionKey != key else { return }
+        coord.sketchSessionKey = key
+        coord.sketchDynamicNode?.removeFromParentNode()
+        let dyn = Self.makeSketchDynamicNode(model: model, working: working,
+                                             accent: accentUIColor)
+        root.addChildNode(dyn)
+        coord.sketchDynamicNode = dyn
+    }
+
+    /// The active plane's grid: ±120 mm of lines, minor every snap
+    /// step (5 mm when the step is finer than 2 mm), major every 5
+    /// minors, at subtle white opacities (0.10 / 0.22) tinted toward
+    /// the plane's axis color for a true base plane. Lifted +0.06 mm
+    /// along the normal so it never sits coplanar with a model face.
+    static func makeSketchGridNode(plane: Plane3, snapStep: Double) -> SCNNode {
+        let node = SCNNode()
+        node.name = "sketchGrid"
+        node.renderingOrder = 7
+        let lift = plane.normal * 0.06
+        node.position = SCNVector3(Float(lift.x), Float(lift.y), Float(lift.z))
+        let tint = basePlaneTint(for: plane)
+        let minorStep = snapStep >= 2 ? snapStep : 5
+        let half = 120.0
+        let count = Int(half / minorStep)
+        var minor: [(Vec3, Vec3)] = []
+        var major: [(Vec3, Vec3)] = []
+        for i in -count...count {
+            let v = Double(i) * minorStep
+            let a1 = plane.toWorld(Vec2(v, -half)), b1 = plane.toWorld(Vec2(v, half))
+            let a2 = plane.toWorld(Vec2(-half, v)), b2 = plane.toWorld(Vec2(half, v))
+            if i % 5 == 0 {
+                major.append((a1, b1)); major.append((a2, b2))
+            } else {
+                minor.append((a1, b1)); minor.append((a2, b2))
+            }
+        }
+        if let geo = lineGeometry(segments: minor,
+                                  material: lineMaterial(tint, opacity: 0.10)) {
+            node.addChildNode(SCNNode(geometry: geo))
+        }
+        if let geo = lineGeometry(segments: major,
+                                  material: lineMaterial(tint, opacity: 0.22)) {
+            node.addChildNode(SCNNode(geometry: geo))
+        }
+        return node
+    }
+
+    /// White, blended 35% toward the axis color when the plane IS
+    /// one of the three base planes (through the origin with an axis
+    /// normal — XY blue, XZ green, YZ red, the v1.11 colors). Datum
+    /// and face planes get plain white.
+    static func basePlaneTint(for plane: Plane3) -> UIColor {
+        let o = plane.origin
+        guard abs(o.x) < 0.01, abs(o.y) < 0.01, abs(o.z) < 0.01 else { return .white }
+        let n = plane.normal
+        func tinted(_ r: CGFloat, _ g: CGFloat, _ b: CGFloat) -> UIColor {
+            UIColor(red: 1 + (r - 1) * 0.35, green: 1 + (g - 1) * 0.35,
+                    blue: 1 + (b - 1) * 0.35, alpha: 1)
+        }
+        if abs(abs(n.z) - 1) < 0.01 { return tinted(0.35, 0.58, 1.0) }  // XY
+        if abs(abs(n.y) - 1) < 0.01 { return tinted(0.30, 0.92, 0.40) }  // XZ
+        if abs(abs(n.x) - 1) < 0.01 { return tinted(1.0, 0.30, 0.30) }   // YZ
+        return .white
+    }
+
+    /// The dynamic session layer: selected entities glow with the
+    /// same accent tube pair a selected sketch uses (plus vertex
+    /// spheres); the stroke preview draws as DASHED accent lines;
+    /// the hover / drag point gets a small accent ring + dot. The
+    /// whole layer floats +0.07 mm along the plane normal.
+    static func makeSketchDynamicNode(model: EditorModel, working: Sketch,
+                                      accent: UIColor) -> SCNNode {
+        let node = SCNNode()
+        node.name = "sketchDynamic"
+        node.renderingOrder = 7
+        let plane = working.plane
+        let lift = plane.normal * 0.07
+        node.position = SCNVector3(Float(lift.x), Float(lift.y), Float(lift.z))
+        let haloMat = lineMaterial(accent, opacity: 0.30)
+        let coreMat = lineMaterial(accent, opacity: 1.0)
+        for e in working.entities
+        where model.selectedSketchEntityIDs.contains(e.id) {
+            let pts = e.polyline().map { plane.toWorld($0) }
+            for i in 0..<(pts.count - 1) {
+                if let halo = tubeNode(from: pts[i], to: pts[i + 1],
+                                       radius: 0.9, material: haloMat) {
+                    node.addChildNode(halo)
+                }
+                if let core = tubeNode(from: pts[i], to: pts[i + 1],
+                                       radius: 0.35, material: coreMat) {
+                    node.addChildNode(core)
+                }
+            }
+            for p in pts {
+                let sphere = SCNSphere(radius: 0.55)
+                sphere.materials = [coreMat]
+                let sNode = SCNNode(geometry: sphere)
+                sNode.position = SCNVector3(Float(p.x), Float(p.y), Float(p.z))
+                node.addChildNode(sNode)
+            }
+        }
+        var dashSegments: [(Vec3, Vec3)] = []
+        for e in model.sketchPreview {
+            let pts = e.polyline()
+            if pts.count == 1 {
+                let c = pts[0], r = 1.2
+                dashSegments.append((plane.toWorld(c + Vec2(-r, 0)),
+                                     plane.toWorld(c + Vec2(r, 0))))
+                dashSegments.append((plane.toWorld(c + Vec2(0, -r)),
+                                     plane.toWorld(c + Vec2(0, r))))
+            }
+            for i in 0..<(pts.count - 1) {
+                dashSegments += dashedSegments(plane.toWorld(pts[i]),
+                                               plane.toWorld(pts[i + 1]),
+                                               on: 2.2, off: 1.6)
+            }
+        }
+        if let geo = lineGeometry(segments: dashSegments,
+                                  material: lineMaterial(accent, opacity: 0.95)) {
+            node.addChildNode(SCNNode(geometry: geo))
+        }
+        if let hp = model.sketchHoverPoint {
+            var ring: [(Vec3, Vec3)] = []
+            let steps = 20
+            let rad = 1.8
+            for i in 0..<steps {
+                let a0 = 2 * Double.pi * Double(i) / Double(steps)
+                let a1 = 2 * Double.pi * Double(i + 1) / Double(steps)
+                ring.append((plane.toWorld(hp + Vec2(cos(a0) * rad, sin(a0) * rad)),
+                             plane.toWorld(hp + Vec2(cos(a1) * rad, sin(a1) * rad))))
+            }
+            if let geo = lineGeometry(segments: ring,
+                                      material: lineMaterial(accent, opacity: 0.9)) {
+                node.addChildNode(SCNNode(geometry: geo))
+            }
+            let c = plane.toWorld(hp)
+            let dot = SCNSphere(radius: 0.45)
+            dot.materials = [coreMat]
+            let dNode = SCNNode(geometry: dot)
+            dNode.position = SCNVector3(Float(c.x), Float(c.y), Float(c.z))
+            node.addChildNode(dNode)
+        }
+        return node
+    }
+
+    /// Split a segment into dash sub-segments (on/off lengths in mm).
+    static func dashedSegments(_ a: Vec3, _ b: Vec3,
+                               on: Double, off: Double) -> [(Vec3, Vec3)] {
+        let len = a.distance(to: b)
+        guard len > 1e-6 else { return [] }
+        var out: [(Vec3, Vec3)] = []
+        var t = 0.0
+        while t < len {
+            let t2 = min(t + on, len)
+            out.append((a + (b - a) * (t / len), a + (b - a) * (t2 / len)))
+            t = t2 + off
+        }
+        return out
+    }
+
     // MARK: Sketch overlays
 
     /// Keep the sketch overlay nodes in sync with the overlay inputs.
     private func updateOverlays(_ view: SCNView, context: Context) {
         let coord = context.coordinator
-        let key = Self.overlayKey(sketches: sketches, selectedID: selectedSketchID,
+        let key = Self.overlayKey(sketches: effectiveSketches, selectedID: selectedSketchID,
                                   hidden: hiddenSketchIDs, show: showSketches)
             + "|acc:\(accentKey)"
         guard coord.overlayKey != key else { return }
@@ -752,7 +1357,7 @@ struct SceneKitView: UIViewRepresentable {
         guard showSketches else { return }
         let root = SCNNode()
         root.name = "sketchOverlays"
-        for sketch in sketches where !hiddenSketchIDs.contains(sketch.id) {
+        for sketch in effectiveSketches where !hiddenSketchIDs.contains(sketch.id) {
             root.addChildNode(Self.makeSketchNode(sketch,
                                                   selected: sketch.id == selectedSketchID,
                                                   accent: accentUIColor))

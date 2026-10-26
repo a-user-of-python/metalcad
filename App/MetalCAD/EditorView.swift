@@ -12,9 +12,18 @@ func mcMass(_ grams: Double) -> String {
     return String(format: "%.1f g", grams)
 }
 
-/// Programmatic navigation target for a sketch (e.g. a fresh face sketch).
-struct SketchNav: Identifiable, Hashable {
-    let id: String
+/// What part of an entity a drag is moving (shared by the
+/// in-place sketch engine's drag state).
+enum DragRole {
+    case point, lineA, lineB, center
+}
+
+/// An in-flight drag's target: which entity, which of its points,
+/// and where that point started.
+struct DragTarget {
+    var entityID: Int
+    var role: DragRole
+    var original: Vec2
 }
 
 /// What a normal-mode tap on the 3D model selected (v4.3,
@@ -37,6 +46,26 @@ extension Sketch {
     /// "⌖ ". Datums are offered as sketch planes and construct-tool
     /// sources, never as feature profiles.
     var isDatumPlane: Bool { name.hasPrefix("⌖ ") && entities.isEmpty }
+}
+
+/// Tools of the in-place sketch session (drawing directly in the
+/// 3D viewport on the active sketch's plane). Mirrors the creation
+/// subset of the old 2D editor's tool enum (deleted in v1.12 with
+/// the rest of that editor) — that enum also carried spline/
+/// ellipse/polygon/slot/text/trim, which the in-place session
+/// does not offer (see the wave-2 report's not-ported list).
+enum InPlaceSketchTool: String, CaseIterable {
+    case select, point, line, rectangle, circle, arc
+    var displayName: String {
+        switch self {
+        case .select: return "Select"
+        case .point: return "Point"
+        case .line: return "Line"
+        case .rectangle: return "Rectangle"
+        case .circle: return "Circle"
+        case .arc: return "Arc"
+        }
+    }
 }
 
 /// Editing session for one open document. Owns the document value, the
@@ -362,7 +391,779 @@ final class EditorModel: ObservableObject {
         faceOutlines[id] = nil
         if selectedSketchID == id { selectedSketchID = nil }
         hiddenSketchIDs.remove(id)
+        if activeSketchID == id { endSketchInPlace() }
         mutate { $0.sketches.removeAll { $0.id == id } }
+    }
+
+    // MARK: In-place sketching (drawing in the 3D viewport)
+
+    /// The sketch being drawn on IN the 3D viewport, or nil when no
+    /// in-place session is live. A String like every other sketch id
+    /// in the app (`Sketch.id` is a UUID string; entity ids are the
+    /// kit's Ints — the in-place API follows those existing types).
+    @Published private(set) var activeSketchID: String?
+    /// Live working copy of the active sketch. Pointer drags mutate
+    /// ONLY this copy (no document rebuild per move); a commit —
+    /// pointer-up after a create or a drag — writes it back through
+    /// `replaceSketch`, the same commit path the 2D editor's
+    /// `changed()` uses. SceneKitView renders this copy in place of
+    /// the committed sketch so drags show live.
+    @Published private(set) var activeSketch: Sketch?
+    /// The in-place tool the next pointer stroke uses.
+    @Published var inPlaceTool: InPlaceSketchTool = .select
+    /// Entities selected inside the active sketch (kit entity ids).
+    @Published var selectedSketchEntityIDs: Set<Int> = []
+    /// Not-yet-committed entities of the stroke in flight (the
+    /// rubber band), drawn dashed by the viewport. Ids are negative
+    /// placeholders — preview entities never enter a real sketch.
+    @Published var sketchPreview: [SketchEntity] = []
+    /// Snapped pointer position on the active plane (pencil hover,
+    /// and the live point while a stroke is down) — the viewport
+    /// draws its marker ring here.
+    @Published var sketchHoverPoint: Vec2?
+    /// Live size readout of the stroke in flight ("128.4 mm",
+    /// "120 × 80 mm", "Ø 48.0 mm", "R 30.0 mm"), nil between strokes.
+    @Published var sketchDragReadout: String?
+    /// Degrees of freedom of the active sketch, refreshed on begin
+    /// and on every commit so constraint state stays visible live.
+    @Published var activeSketchDOF: Int = 0
+    /// Grid snap step in mm for in-place drawing — 1 mm, the same
+    /// grid the 2D editor snaps to.
+    @Published var sketchSnapStep: Double = 1.0
+    /// Screen-derived snap/pick tolerance in mm at the sketch plane.
+    /// SceneKitView refreshes it from the camera distance on every
+    /// update while a session is live (≈14 screen points); the 2.5 mm
+    /// default covers the frames before the first refresh.
+    var sketchSnapToleranceMM: Double = 2.5
+
+    /// True while an in-place sketch session is live.
+    var isSketchingInPlace: Bool { activeSketchID != nil }
+
+    // Stroke state (session-private; a stroke is down→drag→up).
+    private var sketchDragStart: Vec2?
+    private var sketchDragTarget: DragTarget?
+    private var sketchDragEntity: Int?
+    private var sketchDragBase: Sketch?
+    private var sketchDragMoved = false
+    private var sketchArcTangent: Vec2?
+
+    private func resetSketchDrag() {
+        sketchDragStart = nil
+        sketchDragTarget = nil
+        sketchDragEntity = nil
+        sketchDragBase = nil
+        sketchDragMoved = false
+        sketchArcTangent = nil
+    }
+
+    /// Begin drawing on an existing sketch in the viewport. The
+    /// sketch also becomes the 3D selection so the browser row and
+    /// overlay agree with the session.
+    func beginSketchInPlace(_ id: String) {
+        guard let sk = sketch(withID: id), !sk.isDatumPlane else { return }
+        activeSketchID = id
+        activeSketch = sk
+        selectedSketchID = id
+        clearPicked()
+        selectedSketchEntityIDs = []
+        sketchPreview = []
+        sketchHoverPoint = nil
+        sketchDragReadout = nil
+        resetSketchDrag()
+        activeSketchDOF = SketchSolver.degreesOfFreedom(sk)
+        MCLog.shared.info(.sketch, "in-place sketch session began",
+                          context: ["id": id, "name": sk.name])
+    }
+
+    /// End the in-place session. Uncommitted stroke state is dropped
+    /// (commits happen on pointer-up, so nothing else can be lost).
+    func endSketchInPlace() {
+        guard activeSketchID != nil else { return }
+        activeSketchID = nil
+        activeSketch = nil
+        selectedSketchEntityIDs = []
+        sketchPreview = []
+        sketchHoverPoint = nil
+        sketchDragReadout = nil
+        resetSketchDrag()
+        MCLog.shared.info(.sketch, "in-place sketch session ended")
+    }
+
+    /// Sean's open-straight-into-a-sketch rule: a brand-new document
+    /// (no sketches, no features) gets a sketch on the XY base plane
+    /// — created through the same `addSketch` path the New Sketch
+    /// panel uses, with the same "Sketch N" naming — and the
+    /// in-place session begins on it immediately. Called from the
+    /// editor's onAppear; a no-op for any document that already has
+    /// content (or a live session).
+    func autoStartSketchIfEmpty() {
+        guard activeSketchID == nil, let p = part,
+              p.sketches.isEmpty, p.features.isEmpty else { return }
+        let name = "Sketch \((part?.sketches.count ?? 0) + 1)"
+        let sk = addSketch(plane: .xy, name: name)
+        beginSketchInPlace(sk.id)
+    }
+
+    /// Write the working copy back to the document (the document-
+    /// dirty path: mutate → rebuild). With `solveFirst`, a solver
+    /// pass runs on a copy first and the solved geometry is what
+    /// commits; a failed solve never loses the edit — the unsolved
+    /// working copy commits instead (heavy sketches, >250 entities,
+    /// skip the solver exactly like the 2D editor).
+    private func commitActiveSketch(solveFirst: Bool = false) {
+        guard var working = activeSketch else { return }
+        if solveFirst, working.entities.count <= 250 {
+            var copy = working
+            if (try? SketchSolver.solve(&copy)) != nil { working = copy }
+        }
+        activeSketch = working
+        replaceSketch(working)
+        activeSketchDOF = SketchSolver.degreesOfFreedom(working)
+    }
+
+    /// Snap a raw plane point the way the 2D editor snaps: existing
+    /// endpoints (priority 0), centers (1) and midpoints (2) inside
+    /// the tolerance win over the grid (3), which rounds to
+    /// `sketchSnapStep`. A dragged point never snaps onto its own
+    /// start position (`excluding`).
+    private func snappedSketchPoint(_ raw: Vec2, excluding: Vec2? = nil) -> Vec2 {
+        guard let sk = activeSketch else { return raw }
+        let threshold = max(sketchSnapToleranceMM, sketchSnapStep)
+        var candidates: [(point: Vec2, priority: Int)] = []
+        for e in sk.entities {
+            switch e {
+            case .point(_, let at, _):
+                candidates.append((at, 0))
+            case .line(_, let a, let b, _):
+                candidates.append((a, 0))
+                candidates.append((b, 0))
+                candidates.append(((a + b) * 0.5, 2))
+            case .circle(_, let c, _, _):
+                candidates.append((c, 1))
+            case .arc(let id, let c, _, _, _, _):
+                candidates.append((c, 1))
+                if let ent = sk.entity(id) {
+                    if let s = ent.resolve(.start) { candidates.append((s, 0)) }
+                    if let en = ent.resolve(.end) { candidates.append((en, 0)) }
+                }
+            }
+        }
+        if let excluding {
+            candidates.removeAll { $0.point.distance(to: excluding) < 1e-9 }
+        }
+        let step = max(sketchSnapStep, 0.0001)
+        candidates.append((Vec2((raw.x / step).rounded() * step,
+                                (raw.y / step).rounded() * step), 3))
+        var best: (point: Vec2, priority: Int, dist: Double)?
+        for c in candidates {
+            let d = c.point.distance(to: raw)
+            guard d <= threshold else { continue }
+            if let b = best {
+                if c.priority < b.priority ||
+                    (c.priority == b.priority && d < b.dist) {
+                    best = (c.point, c.priority, d)
+                }
+            } else {
+                best = (c.point, c.priority, d)
+            }
+        }
+        return best?.point ?? raw
+    }
+
+    // MARK: In-place pointer API (plane-space points, snapped inside)
+
+    /// Pointer pressed on the active sketch's plane.
+    func sketchPointerDown(at raw: Vec2) {
+        guard var working = activeSketch else { return }
+        let p = snappedSketchPoint(raw)
+        sketchHoverPoint = p
+        switch inPlaceTool {
+        case .point:
+            working.addPoint(p)
+            activeSketch = working
+            commitActiveSketch()
+        case .line, .rectangle, .circle, .arc:
+            sketchDragStart = p
+            sketchArcTangent = nil
+            sketchPreview = []
+            sketchDragReadout = nil
+        case .select:
+            beginSelectDrag(at: raw, snapped: p, working: working)
+        }
+    }
+
+    /// Pointer moved with the stroke down.
+    func sketchPointerDragged(to raw: Vec2) {
+        guard activeSketch != nil else { return }
+        let p = snappedSketchPoint(raw, excluding: sketchDragTarget?.original)
+        sketchHoverPoint = p
+        switch inPlaceTool {
+        case .line:
+            guard let s = sketchDragStart else { return }
+            sketchPreview = [.line(id: -1, a: s, b: p, construction: false)]
+            sketchDragReadout = String(format: "%.1f mm", s.distance(to: p))
+        case .rectangle:
+            guard let s = sketchDragStart else { return }
+            let corners = [s, Vec2(p.x, s.y), p, Vec2(s.x, p.y)]
+            sketchPreview = (0..<4).map { i in
+                SketchEntity.line(id: -1 - i, a: corners[i],
+                                  b: corners[(i + 1) % 4], construction: false)
+            }
+            sketchDragReadout = "\(mcFmt(abs(p.x - s.x))) × \(mcFmt(abs(p.y - s.y))) mm"
+        case .circle:
+            guard let s = sketchDragStart else { return }
+            let r = s.distance(to: p)
+            sketchPreview = [.circle(id: -1, center: s, radius: r, construction: false)]
+            sketchDragReadout = String(format: "Ø %.1f mm", 2 * r)
+        case .arc:
+            guard let s = sketchDragStart else { return }
+            // The arc's tangent at its start is the direction the
+            // drag FIRST pulls in (captured once the pointer has
+            // moved 2 mm from the start); the arc then runs from the
+            // start through the current point with that tangent, so
+            // pulling sideways bulges it out live.
+            if sketchArcTangent == nil, s.distance(to: p) > 2 {
+                sketchArcTangent = (p - s).normalized
+            }
+            if let t = sketchArcTangent,
+               let arc = Self.tangentArc(start: s, tangent: t, through: p) {
+                sketchPreview = [.arc(id: -1, center: arc.center, radius: arc.radius,
+                                      startAngle: arc.startAngle, endAngle: arc.endAngle,
+                                      construction: false)]
+                sketchDragReadout = String(format: "R %.1f mm", arc.radius)
+            } else {
+                sketchPreview = []
+                sketchDragReadout = nil
+            }
+        case .select:
+            updateSelectDrag(to: p)
+        case .point:
+            break
+        }
+    }
+
+    /// Pointer released: the stroke commits.
+    func sketchPointerUp(at raw: Vec2) {
+        guard var working = activeSketch else { return }
+        let p = snappedSketchPoint(raw, excluding: sketchDragTarget?.original)
+        switch inPlaceTool {
+        case .line:
+            if let s = sketchDragStart, s.distance(to: p) > 1e-9 {
+                working.addLine(s, p)
+                activeSketch = working
+                commitActiveSketch()
+            }
+        case .rectangle:
+            if let s = sketchDragStart,
+               abs(s.x - p.x) > 1e-9, abs(s.y - p.y) > 1e-9 {
+                working.addRectangle(from: s, to: p)
+                activeSketch = working
+                commitActiveSketch()
+            }
+        case .circle:
+            if let s = sketchDragStart {
+                let r = s.distance(to: p)
+                if r > 0.1 {
+                    working.addCircle(s, r)
+                    activeSketch = working
+                    commitActiveSketch()
+                }
+            }
+        case .arc:
+            if let s = sketchDragStart, let t = sketchArcTangent,
+               let arc = Self.tangentArc(start: s, tangent: t, through: p) {
+                let id = working.allocateID()
+                working.add(.arc(id: id, center: arc.center, radius: arc.radius,
+                                 startAngle: arc.startAngle, endAngle: arc.endAngle,
+                                 construction: false))
+                activeSketch = working
+                commitActiveSketch()
+            }
+        case .select:
+            if sketchDragMoved { commitActiveSketch(solveFirst: true) }
+        case .point:
+            break
+        }
+        sketchPreview = []
+        sketchDragReadout = nil
+        resetSketchDrag()
+    }
+
+    /// Abort the stroke in flight (a second finger landed and the
+    /// orbit is taking over, or the system cancelled the touch): a
+    /// select-drag rolls back to its drag-start geometry; create
+    /// strokes have committed nothing yet, so only their preview and
+    /// readout clear.
+    func cancelSketchStroke() {
+        if inPlaceTool == .select, let base = sketchDragBase {
+            activeSketch = base
+        }
+        sketchPreview = []
+        sketchDragReadout = nil
+        resetSketchDrag()
+    }
+
+    /// Pencil hover (or any pointer move without a stroke): track
+    /// the snapped point for the viewport's marker ring.
+    func sketchHover(at raw: Vec2) {
+        guard activeSketch != nil else { return }
+        sketchHoverPoint = snappedSketchPoint(raw)
+    }
+
+    /// Hover ended: clear the marker.
+    func endSketchHover() { sketchHoverPoint = nil }
+
+    // MARK: In-place selection drag
+
+    /// Select-mode press: a defining point near the touch (endpoint /
+    /// center) starts a point drag; otherwise the nearest entity
+    /// body within tolerance is selected and starts a whole-entity
+    /// translate; empty space clears the selection.
+    private func beginSelectDrag(at raw: Vec2, snapped: Vec2, working: Sketch) {
+        let tol = max(sketchSnapToleranceMM, 1.5)
+        var bestTarget: DragTarget?
+        var bestDist = Double.greatestFiniteMagnitude
+        for cand in Self.draggablePoints(of: working) {
+            let d = cand.point.distance(to: raw)
+            if d < bestDist {
+                bestDist = d
+                bestTarget = DragTarget(entityID: cand.id, role: cand.role,
+                                        original: cand.point)
+            }
+        }
+        if let target = bestTarget, bestDist <= tol {
+            selectedSketchEntityIDs = [target.entityID]
+            sketchDragTarget = target
+            sketchDragBase = working
+            sketchDragMoved = false
+            return
+        }
+        var hitID: Int?
+        var hitDist = Double.greatestFiniteMagnitude
+        for e in working.entities {
+            let d = Self.sketchEntityDistance(e, to: raw)
+            if d < hitDist { hitDist = d; hitID = e.id }
+        }
+        if let hitID, hitDist <= max(tol, 3.5) {
+            selectedSketchEntityIDs = [hitID]
+            sketchDragEntity = hitID
+            sketchDragBase = working
+            sketchDragStart = snapped
+            sketchDragMoved = false
+        } else {
+            selectedSketchEntityIDs = []
+            sketchDragBase = nil
+        }
+    }
+
+    /// Live half of a select drag: moves land on the working copy
+    /// only (recomputed from the drag-start snapshot each move, so
+    /// the motion is exactly the pointer delta); the solve + commit
+    /// happen on pointer-up.
+    private func updateSelectDrag(to p: Vec2) {
+        guard let base = sketchDragBase else { return }
+        var working = base
+        if let target = sketchDragTarget {
+            Self.moveDraggedPoint(&working, target: target, to: p)
+            sketchDragMoved = true
+            activeSketch = working
+        } else if let eid = sketchDragEntity, let start = sketchDragStart {
+            let delta = p - start
+            if delta.length > 1e-12,
+               let idx = working.entities.firstIndex(where: { $0.id == eid }) {
+                working.entities[idx] = Self.translated(working.entities[idx], by: delta)
+                sketchDragMoved = true
+                activeSketch = working
+            }
+        }
+    }
+
+    /// The points a drag can grab — a port of the 2D editor's
+    /// `draggablePoints` (endpoints for lines, centers for circles
+    /// and arcs, the point itself for points).
+    static func draggablePoints(of sketch: Sketch)
+        -> [(id: Int, role: DragRole, point: Vec2)] {
+        var out: [(Int, DragRole, Vec2)] = []
+        for e in sketch.entities {
+            switch e {
+            case .point(let id, let at, _):
+                out.append((id, .point, at))
+            case .line(let id, let a, let b, _):
+                out.append((id, .lineA, a))
+                out.append((id, .lineB, b))
+            case .circle(let id, let c, _, _):
+                out.append((id, .center, c))
+            case .arc(let id, let c, _, _, _, _):
+                out.append((id, .center, c))
+            }
+        }
+        return out
+    }
+
+    /// Move a grabbed defining point — a port of the 2D editor's
+    /// `moveDraggedPoint`, including its whole-line fallback for the
+    /// unused role mapping.
+    static func moveDraggedPoint(_ sketch: inout Sketch, target: DragTarget, to newPos: Vec2) {
+        guard let idx = sketch.entities.firstIndex(where: { $0.id == target.entityID })
+        else { return }
+        let e = sketch.entities[idx]
+        switch (e, target.role) {
+        case (.point(let id, _, let cons), .point):
+            sketch.entities[idx] = .point(id: id, at: newPos, construction: cons)
+        case (.line(let id, let a, let b, let cons), .lineA):
+            sketch.entities[idx] = .line(id: id, a: newPos, b: b, construction: cons)
+        case (.line(let id, let a, let b, let cons), .lineB):
+            sketch.entities[idx] = .line(id: id, a: a, b: newPos, construction: cons)
+        case (.line(let id, let a, let b, let cons), .point):
+            let da = a.distance(to: target.original), db = b.distance(to: target.original)
+            if da <= db {
+                sketch.entities[idx] = .line(id: id, a: newPos, b: b, construction: cons)
+            } else {
+                sketch.entities[idx] = .line(id: id, a: a, b: newPos, construction: cons)
+            }
+        case (.circle(let id, _, let r, let cons), .center):
+            sketch.entities[idx] = .circle(id: id, center: newPos, radius: r, construction: cons)
+        case (.arc(let id, _, let r, let a0, let a1, let cons), .center):
+            sketch.entities[idx] = .arc(id: id, center: newPos, radius: r,
+                                         startAngle: a0, endAngle: a1, construction: cons)
+        default:
+            break
+        }
+    }
+
+    /// Translate an entity by moving its defining points — a port of
+    /// the 2D editor's `translatedEntity`.
+    static func translated(_ e: SketchEntity, by d: Vec2) -> SketchEntity {
+        switch e {
+        case .point(let id, let at, let c):
+            return .point(id: id, at: at + d, construction: c)
+        case .line(let id, let a, let b, let c):
+            return .line(id: id, a: a + d, b: b + d, construction: c)
+        case .circle(let id, let ctr, let r, let c):
+            return .circle(id: id, center: ctr + d, radius: r, construction: c)
+        case .arc(let id, let ctr, let r, let a0, let a1, let c):
+            return .arc(id: id, center: ctr + d, radius: r,
+                        startAngle: a0, endAngle: a1, construction: c)
+        }
+    }
+
+    /// Distance from a plane point to an entity (picking): exact for
+    /// points, lines and circles; arcs measure against their
+    /// flattened polyline, like the viewport's sketch picking.
+    static func sketchEntityDistance(_ e: SketchEntity, to p: Vec2) -> Double {
+        switch e {
+        case .point(_, let at, _):
+            return p.distance(to: at)
+        case .line(_, let a, let b, _):
+            return distanceToSegment(p, a, b)
+        case .circle(_, let c, let r, _):
+            return abs(p.distance(to: c) - r)
+        case .arc:
+            let pts = e.polyline()
+            guard let first = pts.first else { return .greatestFiniteMagnitude }
+            guard pts.count > 1 else { return p.distance(to: first) }
+            var best = Double.greatestFiniteMagnitude
+            for i in 0..<(pts.count - 1) {
+                best = min(best, distanceToSegment(p, pts[i], pts[i + 1]))
+            }
+            return best
+        }
+    }
+
+    static func distanceToSegment(_ p: Vec2, _ a: Vec2, _ b: Vec2) -> Double {
+        let ab = b - a
+        let len2 = ab.dot(ab)
+        guard len2 > 1e-12 else { return p.distance(to: a) }
+        let t = max(0, min(1, (p - a).dot(ab) / len2))
+        return p.distance(to: a + ab * t)
+    }
+
+    /// The drag-arc construction: the arc starts at `start`, leaves
+    /// it along `tangent` (the direction the drag first pulled in),
+    /// and passes through the current drag point `p`. The center
+    /// sits on the tangent's perpendicular through the start, at the
+    /// λ that puts `p` on the circle: λ = |p−s|² / (2·n̂·(p−s)).
+    /// Nil when the drag runs (near-)parallel to the tangent — the
+    /// "arc" would be a straight line with an astronomical radius.
+    /// The kit arc sweeps CCW from startAngle to endAngle; when the
+    /// CCW sweep would leave the start against the pull direction,
+    /// the endpoints are stored swapped (the identical point set —
+    /// `resolve(.start)` then reports the drag point, documented
+    /// here rather than hidden).
+    static func tangentArc(start s: Vec2, tangent t: Vec2, through p: Vec2)
+        -> (center: Vec2, radius: Double, startAngle: Double, endAngle: Double)? {
+        let d = p - s
+        guard d.length > 1e-6 else { return nil }
+        let n = t.perpendicular
+        let denom = n.dot(d)
+        guard abs(denom) > 0.02 * d.length else { return nil }
+        let lambda = d.dot(d) / (2 * denom)
+        let r = abs(lambda)
+        guard r > 0.1, r < 100_000 else { return nil }
+        let c = s + n * lambda
+        let aS = atan2(s.y - c.y, s.x - c.x)
+        let aE = atan2(p.y - c.y, p.x - c.x)
+        // Direction the CCW sweep leaves the start point: the radius
+        // direction rotated +90°. If that fights the pull, the arc
+        // the user pulled is the complementary sweep — store the
+        // endpoints swapped so the CCW arc IS the pulled one.
+        let radial = (s - c) * (1 / r)
+        let ccwLeave = Vec2(-radial.y, radial.x)
+        if ccwLeave.dot(t) >= 0 {
+            return (c, r, aS, aE)
+        }
+        return (c, r, aE, aS)
+    }
+
+    // MARK: In-place measurements & direct edits (fix a mistake in place)
+
+    /// Readouts for the current in-place selection — one line per
+    /// fact, ready for the layout wave to list verbatim: a point's
+    /// coordinates, a line's length, a circle's radius + diameter,
+    /// an arc's radius + sweep. Four selected lines whose endpoints
+    /// land on two x and two y values (an axis-aligned rectangle)
+    /// also report their width × height ahead of the per-line rows.
+    var selectedSketchMeasurements: [String] {
+        guard let sk = activeSketch else { return [] }
+        let sel = sk.entities.filter { selectedSketchEntityIDs.contains($0.id) }
+        guard !sel.isEmpty else { return [] }
+        func f1(_ v: Double) -> String { String(format: "%.1f", v) }
+        var out: [String] = []
+        if sel.count == 4 {
+            var lines: [(a: Vec2, b: Vec2)] = []
+            var isRect = true
+            for e in sel {
+                if case .line(_, let a, let b, _) = e { lines.append((a, b)) }
+                else { isRect = false }
+            }
+            if isRect {
+                var xs = Set<Double>()
+                var ys = Set<Double>()
+                for l in lines {
+                    xs.insert((l.a.x * 1e6).rounded() / 1e6)
+                    xs.insert((l.b.x * 1e6).rounded() / 1e6)
+                    ys.insert((l.a.y * 1e6).rounded() / 1e6)
+                    ys.insert((l.b.y * 1e6).rounded() / 1e6)
+                }
+                let axisAligned = lines.allSatisfy {
+                    abs($0.a.x - $0.b.x) < 1e-6 || abs($0.a.y - $0.b.y) < 1e-6
+                }
+                let w = (xs.max() ?? 0) - (xs.min() ?? 0)
+                let h = (ys.max() ?? 0) - (ys.min() ?? 0)
+                if xs.count == 2, ys.count == 2, axisAligned, w > 0, h > 0 {
+                    out.append("Rectangle \(mcFmt(w)) × \(mcFmt(h)) mm")
+                }
+            }
+        }
+        for e in sel {
+            switch e {
+            case .point(_, let at, _):
+                out.append("Point (\(mcFmt(at.x)), \(mcFmt(at.y)))")
+            case .line(_, let a, let b, _):
+                out.append("Length \(f1(a.distance(to: b))) mm")
+            case .circle(_, _, let r, _):
+                out.append("Radius \(f1(r)) mm · Ø \(f1(2 * r)) mm")
+            case .arc(_, _, let r, let a0, let a1, _):
+                var sweep = a1 - a0
+                while sweep < 0 { sweep += 2 * Double.pi }
+                out.append("Radius \(f1(r)) mm · Sweep \(f1(sweep * 180 / Double.pi))°")
+            }
+        }
+        return out
+    }
+
+    /// Fix the selected circle's radius in place. Exactly one circle
+    /// must be selected. When the circle already carries a driving
+    /// radius/diameter constraint, the constraint's value is updated
+    /// and the solver places the geometry — the 2D inspector's
+    /// parametric path; otherwise the geometry is set directly.
+    /// Either way the edit commits through a solve, and a failed
+    /// solve never loses the edit (see `commitActiveSketch`).
+    @discardableResult
+    func setSelectedCircleRadius(_ mm: Double) -> Bool {
+        guard var working = activeSketch, mm > 0,
+              selectedSketchEntityIDs.count == 1,
+              let id = selectedSketchEntityIDs.first,
+              let idx = working.entities.firstIndex(where: { $0.id == id }),
+              case .circle(let eid, let center, _, let cons) = working.entities[idx]
+        else { return false }
+        if let ci = working.constraints.firstIndex(where: { c in
+            switch c {
+            case .radius(let e, _), .diameter(let e, _): return e == eid
+            default: return false
+            }
+        }) {
+            switch working.constraints[ci] {
+            case .radius(let e, _):
+                working.constraints[ci] = .radius(entity: e, value: mm)
+            case .diameter(let e, _):
+                working.constraints[ci] = .diameter(entity: e, value: 2 * mm)
+            default: break
+            }
+        } else {
+            working.entities[idx] = .circle(id: eid, center: center,
+                                             radius: mm, construction: cons)
+        }
+        activeSketch = working
+        commitActiveSketch(solveFirst: true)
+        return true
+    }
+
+    /// Fix the selected line's length in place: the line grows or
+    /// shrinks FROM its first endpoint, along its own direction.
+    /// Exactly one line must be selected. An existing driving
+    /// distance constraint between the line's own endpoints is
+    /// updated instead of moving geometry blind (same parametric
+    /// rule as `setSelectedCircleRadius`).
+    @discardableResult
+    func setSelectedLineLength(_ mm: Double) -> Bool {
+        guard var working = activeSketch, mm > 0,
+              selectedSketchEntityIDs.count == 1,
+              let id = selectedSketchEntityIDs.first,
+              let idx = working.entities.firstIndex(where: { $0.id == id }),
+              case .line(let eid, let a, let b, let cons) = working.entities[idx]
+        else { return false }
+        if let ci = working.constraints.firstIndex(where: { c in
+            guard case .distancePoints(let ea, let ka, let eb, let kb, _) = c
+            else { return false }
+            return ea == eid && eb == eid &&
+                ((ka == .start && kb == .end) || (ka == .end && kb == .start))
+        }) {
+            if case .distancePoints(let ea, let ka, let eb, let kb, _) =
+                working.constraints[ci] {
+                working.constraints[ci] = .distancePoints(
+                    entityA: ea, kindA: ka, entityB: eb, kindB: kb, value: mm)
+            }
+        } else {
+            let dir = b - a
+            guard dir.length > 1e-12 else { return false }
+            working.entities[idx] = .line(id: eid, a: a,
+                                          b: a + dir.normalized * mm,
+                                          construction: cons)
+        }
+        activeSketch = working
+        commitActiveSketch(solveFirst: true)
+        return true
+    }
+
+    // MARK: In-place constraints & entity edits (the sketch rail)
+
+    /// The one selected line's id when the in-place selection is
+    /// exactly one line — the rail's Horizontal/Vertical target.
+    var selectedSketchLineID: Int? {
+        guard let sk = activeSketch, selectedSketchEntityIDs.count == 1,
+              let id = selectedSketchEntityIDs.first,
+              let e = sk.entity(id), case .line = e else { return nil }
+        return id
+    }
+
+    /// Port of the 2D editor's line-inspector buttons: pin the
+    /// selected line horizontal / vertical with a solver constraint,
+    /// then re-solve. An already-present identical constraint is
+    /// not duplicated (the 2D editor appended blindly; a duplicate
+    /// only makes the solver report a conflict).
+    @discardableResult
+    func applyHorizontalConstraintToSelectedLine() -> Bool {
+        guard let lineID = selectedSketchLineID,
+              var working = activeSketch else { return false }
+        if !working.constraints.contains(.horizontal(entity: lineID)) {
+            working.constraints.append(.horizontal(entity: lineID))
+        }
+        activeSketch = working
+        commitActiveSketch(solveFirst: true)
+        return true
+    }
+
+    @discardableResult
+    func applyVerticalConstraintToSelectedLine() -> Bool {
+        guard let lineID = selectedSketchLineID,
+              var working = activeSketch else { return false }
+        if !working.constraints.contains(.vertical(entity: lineID)) {
+            working.constraints.append(.vertical(entity: lineID))
+        }
+        activeSketch = working
+        commitActiveSketch(solveFirst: true)
+        return true
+    }
+
+    /// The 2D editor's `constraint(_:withValue:)` transform,
+    /// ported: value-bearing constraints come back with the new
+    /// driving value; every other kind passes through unchanged.
+    static func sketchConstraint(_ c: SketchConstraint, withValue v: Double) -> SketchConstraint {
+        switch c {
+        case .distancePoints(let a, let ka, let b, let kb, _):
+            return .distancePoints(entityA: a, kindA: ka, entityB: b, kindB: kb, value: v)
+        case .radius(let e, _):
+            return .radius(entity: e, value: v)
+        case .diameter(let e, _):
+            return .diameter(entity: e, value: v)
+        case .angleBetween(let a, let b, _):
+            return .angleBetween(entityA: a, entityB: b, degrees: v)
+        default:
+            return c
+        }
+    }
+
+    /// Edit one of the active sketch's constraint values in place
+    /// (the rail's constraint rows) and re-solve.
+    func updateActiveSketchConstraint(at index: Int, value: Double) {
+        guard var working = activeSketch,
+              working.constraints.indices.contains(index) else { return }
+        working.constraints[index] = Self.sketchConstraint(working.constraints[index],
+                                                           withValue: value)
+        activeSketch = working
+        commitActiveSketch(solveFirst: true)
+    }
+
+    /// Remove one of the active sketch's constraints.
+    func deleteActiveSketchConstraint(at index: Int) {
+        guard var working = activeSketch,
+              working.constraints.indices.contains(index) else { return }
+        working.constraints.remove(at: index)
+        activeSketch = working
+        commitActiveSketch()
+    }
+
+    /// Delete the in-place selection's entities — the 2D editor's
+    /// per-entity delete applied to the whole selection: the
+    /// entities go, and every constraint that referenced any of
+    /// them goes with them.
+    func deleteSelectedSketchEntities() {
+        guard var working = activeSketch,
+              !selectedSketchEntityIDs.isEmpty else { return }
+        let ids = selectedSketchEntityIDs
+        for id in ids { working.removeEntity(id) }
+        working.constraints.removeAll {
+            !Set($0.referencedEntities).isDisjoint(with: ids)
+        }
+        selectedSketchEntityIDs = []
+        activeSketch = working
+        commitActiveSketch()
+    }
+
+    /// Fusion's finish-sketch flow, ported from the 2D editor: the
+    /// active sketch must yield at least one closed profile
+    /// (otherwise the coded reason lands in `actionError` and the
+    /// session stays open); on success the session ends and the
+    /// editor's pending-extrude hook opens the Extrude panel
+    /// pre-filled with this sketch.
+    @discardableResult
+    func finishSketchAndExtrude() -> Bool {
+        guard let sk = activeSketch, let id = activeSketchID else { return false }
+        do {
+            let (profiles, _) = try sk.extractProfiles()
+            guard !profiles.isEmpty else { throw CADError.padNoProfile }
+        } catch let e as CADError {
+            actionError = e
+            MCLog.shared.log(error: e, category: .sketch)
+            return false
+        } catch {
+            actionError = .unknown("\(error)")
+            return false
+        }
+        endSketchInPlace()
+        pendingExtrudeSketchID = id
+        return true
     }
 
     // MARK: Renaming
@@ -759,12 +1560,14 @@ final class EditorModel: ObservableObject {
     }
 }
 
-/// The part editor v3 — a Fusion 360-style workspace:
-/// a header strip (part, material, volume, mass, size — always
-/// visible), a grouped ribbon toolbar (Sketch / Create / Modify /
-/// Inspect), a browser on the left (sketches + the feature timeline in
-/// build order), the smooth preview in the middle, and a context panel
-/// on the right for the active tool.
+/// The part editor v3 — a Fusion-style workspace, reshaped in
+/// v1.12: a header strip (part, material, volume, mass, size —
+/// always visible), a browser on the far left (sketches + the
+/// feature timeline in build order), an ALL-LEFT tool rail
+/// (Sketch / Construct / Create / Modify / Inspect groups, and the
+/// sketch tools while an in-place session is live), the 3D viewport
+/// in the middle, and a context panel on the right for the active
+/// tool.
 /// What the browser/history Rename alert is editing: a sketch or a
 /// feature, addressed by ID — the same way features reference
 /// sketches — so a rename can never break the model.
@@ -795,7 +1598,6 @@ struct EditorView: View {
     @State private var renameText: String = ""
     @State private var pickingFace = false
     @State private var pickPurpose: FacePickPurpose = .sketchOnFace
-    @State private var sketchNav: SketchNav?
     @State private var activeTool: ActiveTool?
     @State private var extrudePresetSketchID: String?
     // Left browser panel width (v4.1): persisted, drag-resizable via
@@ -841,6 +1643,15 @@ struct EditorView: View {
     @State private var quickDistance: Double = 10
     @State private var quickSketchID: String = UUID().uuidString
     private var quickActive: Bool { quickFace != nil }
+    /// "Show model edges" (Home ▸ Settings) — the sharp-edge line
+    /// overlay in the 3D view. Same AppStorage key as the Settings
+    /// toggle ("showModelEdges").
+    @AppStorage("showModelEdges") private var showModelEdges: Bool = true
+    /// Rail inspector working copies (one variable per @State):
+    /// the selected circle's radius / the selected line's length,
+    /// reloaded whenever the in-place selection changes.
+    @State private var railRadiusText: String = ""
+    @State private var railLengthText: String = ""
 
     @ViewBuilder
     private var mainRow: some View {
@@ -850,6 +1661,8 @@ struct EditorView: View {
                             .frame(width: effectivePanelWidth)
                     }
                     panelDragHandle
+                    toolRail
+                    Divider()
                     centerColumn
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                     if let tool = activeTool {
@@ -865,7 +1678,12 @@ struct EditorView: View {
                                     activeTool = nil
                                     extrudePresetSketchID = nil
                                 },
-                                openSketch: { id in sketchNav = SketchNav(id: id) },
+                                openSketch: { id in
+                                    // v1.12: a created sketch opens
+                                    // as an in-place session in the
+                                    // viewport, not a pushed editor.
+                                    model.beginSketchInPlace(id)
+                                },
                                 pickFace: { purpose in
                                     pickPurpose = purpose
                                     activeTool = nil
@@ -907,19 +1725,14 @@ struct EditorView: View {
             VStack(spacing: 0) {
                 headerStrip
                 Divider()
-                ribbon
-                Divider()
                 mainRow
             }
             // No navigation bar over the editor (v1.11): the
             // document name moved into the header strip itself, and
             // the bar was a mostly-empty black band eating vertical
-            // space. Scoped to this editor root only — the pushed
-            // SketchEditorView keeps its own bar.
+            // space. Nothing is pushed from the editor anymore
+            // (v1.12) — sketching happens in place, in the viewport.
             .toolbar(.hidden, for: .navigationBar)
-            .navigationDestination(item: $sketchNav) { nav in
-                SketchEditorView(model: model, sketchID: nav.id)
-            }
             // Save / Save As / Export used to live here as text
             // links — they moved into the header strip as separate
             // icon+text chips (top-UI redesign, 2026-10-26).
@@ -937,6 +1750,12 @@ struct EditorView: View {
             model.clearPicked()
             model.clearMeasure()
             if sectionOn { refreshSection() }
+        }
+        .onAppear {
+            // A brand-new document opens straight into an in-place
+            // sketch on the XY plane (Sean's normal-CAD flow); any
+            // document with content is left exactly as it was.
+            model.autoStartSketchIfEmpty()
         }
     }
 
@@ -1162,7 +1981,7 @@ struct EditorView: View {
     /// Header file buttons (top-UI redesign): separate chip
     /// buttons at the far LEFT of the header — Home back to the
     /// files screen, Save As (format sheet) — each an SF Symbol +
-    /// text, chip-styled like the ribbon buttons, never joined and
+    /// text, chip-styled like the rail buttons, never joined and
     /// never bare text links. (Export STL used to sit here too; it
     /// now lives only in the Save As sheet — v1.11.)
     private var headerFileButtons: some View {
@@ -1279,161 +2098,180 @@ struct EditorView: View {
         }
     }
 
-    // MARK: Ribbon toolbar (Fusion-style groups)
+    // MARK: Tool rail (left) — replaces the top ribbon (v1.12)
 
-    private var ribbon: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(alignment: .bottom, spacing: 2) {
-                ribbonGroup("SKETCH") {
-                    ribbonButton("New Sketch", icon: "square.and.pencil", active: activeTool == .newSketch) {
-                        selectTool(.newSketch)
-                    }
-                    ribbonButton("On Face", icon: "square.on.square.dashed", active: pickingFace && pickPurpose == .sketchOnFace) {
-                        pickPurpose = .sketchOnFace
-                        activeTool = nil
-                        startFacePicking()
-                    }
-                }
-                ribbonGroup("CONSTRUCT") {
-                    ribbonButton("Offset Plane", icon: "square.on.square", active: activeTool == .offsetPlane) {
-                        selectTool(.offsetPlane)
-                    }
-                    ribbonButton("Angle Plane", icon: "triangle", active: activeTool == .anglePlane) {
-                        selectTool(.anglePlane)
-                    }
-                    ribbonButton("Midplane", icon: "rectangle.split.3x1", active: activeTool == .midplane) {
-                        selectTool(.midplane)
-                    }
-                }
-                ribbonGroup("CREATE") {
-                    ribbonButton("Extrude", icon: "rectangle.expand.vertical", active: activeTool == .extrude) {
-                        selectTool(.extrude)
-                    }
-                    ribbonButton("Revolve", icon: "rotate.3d", active: activeTool == .revolve) {
-                        selectTool(.revolve)
-                    }
-                    ribbonButton("Thread", icon: "lines.measurement.horizontal", active: false) {
-                        activeTool = nil
-                        if let f = model.addThreadDefault() { featureToEdit = f }
-                    }
-                    ribbonButton("Hole", icon: "circle.circle", active: activeTool == .hole) {
-                        selectTool(.hole)
-                    }
-                    ribbonButton("Loft", icon: "square.2.layers.3d", active: activeTool == .loft) {
-                        selectTool(.loft)
-                    }
-                    ribbonButton("Sweep", icon: "lasso", active: activeTool == .sweep) {
-                        selectTool(.sweep)
-                    }
-                    ribbonButton("Coil", icon: "tornado", active: activeTool == .coil) {
-                        selectTool(.coil)
-                    }
-                    ribbonButton("Pipe", icon: "waveform.path", active: activeTool == .pipe) {
-                        selectTool(.pipe)
-                    }
-                    ribbonButton("Rib", icon: "square.split.2x1", active: activeTool == .rib) {
-                        selectTool(.rib)
-                    }
-                    primitivesMenu
-                }
-                ribbonGroup("MODIFY") {
-                    ribbonButton("Fillet", icon: "capsule", active: activeTool == .fillet) {
-                        selectTool(.fillet)
-                    }
-                    ribbonButton("Chamfer", icon: "octagon", active: activeTool == .chamfer) {
-                        selectTool(.chamfer)
-                    }
-                    ribbonButton("Shell", icon: "cube.transparent", active: activeTool == .shell) {
-                        selectTool(.shell)
-                    }
-                    ribbonButton("Mirror", icon: "flip.horizontal", active: activeTool == .mirror) {
-                        selectTool(.mirror)
-                    }
-                    ribbonButton("Pattern", icon: "square.grid.2x2", active: activeTool == .pattern) {
-                        selectTool(.pattern)
-                    }
-                    ribbonButton("Circ. Pattern", icon: "arrow.triangle.2.circlepath", active: activeTool == .circularPattern) {
-                        selectTool(.circularPattern)
-                    }
-                    ribbonButton("Draft", icon: "pyramid", active: activeTool == .draft) {
-                        selectTool(.draft)
-                    }
-                    ribbonButton("Scale", icon: "arrow.up.and.down.and.arrow.left.and.right", active: activeTool == .scaleBody) {
-                        selectTool(.scaleBody)
-                    }
-                    ribbonButton("Move", icon: "move.3d", active: activeTool == .moveBody) {
-                        selectTool(.moveBody)
-                    }
-                    ribbonButton("Split", icon: "rectangle.split.2x1", active: activeTool == .splitBody) {
-                        selectTool(.splitBody)
-                    }
-                }
-                ribbonGroup("INSPECT") {
-                    ribbonButton("Measure", icon: "ruler", active: activeTool == .measure) {
-                        selectTool(.measure)
-                    }
-                    ribbonButton("Sketches", icon: model.showsSketches ? "eye" : "eye.slash",
-                                 active: model.showsSketches) {
-                        model.showsSketches.toggle()
-                    }
-                    ribbonButton("Section", icon: "square.lefthalf.filled", active: sectionOn) {
-                        toggleSection()
-                    }
+    /// The editor's tools live on the LEFT now: a ~96 pt vertical
+    /// rail between the browser panel and the viewport. Two faces:
+    /// the model tools (New Sketch prominent on top, then every
+    /// tool the old top ribbon carried — same groups, same actions)
+    /// and, while an in-place sketch session is live, the sketch
+    /// face: draw tools, live status, constraints, the selection
+    /// inspector, and Done.
+    private var toolRail: some View {
+        ScrollView(.vertical, showsIndicators: false) {
+            VStack(spacing: 8) {
+                if model.isSketchingInPlace {
+                    sketchRailContent
+                } else {
+                    modelRailContent
                 }
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
+            .padding(.vertical, 10)
+            .padding(.horizontal, 6)
+            .frame(maxWidth: .infinity)
         }
+        .frame(width: 96)
         .background(Color.white.opacity(0.02))
     }
 
-    private func selectTool(_ tool: ActiveTool) {
-        if activeTool == tool {
-            activeTool = nil
-            extrudePresetSketchID = nil
-        } else {
-            activeTool = tool
-        }
-    }
-
-    private func ribbonGroup<Content: View>(_ caption: String,
-                                            @ViewBuilder content: () -> Content) -> some View {
-        VStack(spacing: 3) {
-            HStack(alignment: .bottom, spacing: 4) { content() }
-            Text(caption)
-                .mcFont(14, weight: .bold)
-                .foregroundStyle(.secondary)
-                .tracking(1.5)
-        }
-        .padding(.horizontal, 8)
-        .overlay(alignment: .trailing) {
-            Rectangle()
-                .fill(Color.white.opacity(0.12))
-                .frame(width: 1)
-                .padding(.vertical, 4)
-        }
-    }
-
-    private func ribbonButton(_ label: String, icon: String, active: Bool,
-                              action: @escaping () -> Void) -> some View {
+    private func railButton(_ label: String, icon: String, active: Bool,
+                            action: @escaping () -> Void) -> some View {
         Button(action: action) {
             VStack(spacing: 4) {
                 Image(systemName: icon)
                     .mcFont(24)
                 Text(label)
-                    .mcFont(16, weight: .semibold)
-                    .lineLimit(1)
+                    .mcFont(15, weight: .semibold)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
             }
             .foregroundStyle(active ? .black : .primary)
-            .frame(minWidth: 80, minHeight: 58)
-            .padding(.horizontal, 4)
+            .frame(maxWidth: .infinity, minHeight: 60)
+            .padding(.horizontal, 2)
+            .padding(.vertical, 6)
             .background(RoundedRectangle(cornerRadius: 10)
                 .fill(active ? accent : Color.white.opacity(0.06)))
         }
         .buttonStyle(.plain)
     }
 
-    private var primitivesMenu: some View {
+    private func railCaption(_ text: String) -> some View {
+        Text(text)
+            .mcFont(12, weight: .bold)
+            .foregroundStyle(.secondary)
+            .tracking(1.5)
+            .frame(maxWidth: .infinity)
+            .padding(.top, 6)
+    }
+
+    /// Model face of the rail: New Sketch first (the primary flow,
+    /// accent-filled), then the ribbon's groups 1:1 — SKETCH /
+    /// CONSTRUCT / CREATE / MODIFY / INSPECT — every button setting
+    /// the same activeTool / state the ribbon button set.
+    @ViewBuilder
+    private var modelRailContent: some View {
+        Button {
+            selectTool(.newSketch)
+        } label: {
+            VStack(spacing: 4) {
+                Image(systemName: "square.and.pencil")
+                    .mcFont(26)
+                Text("New Sketch")
+                    .mcFont(16, weight: .bold)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+            }
+            .foregroundStyle(.black)
+            .frame(maxWidth: .infinity, minHeight: 66)
+            .padding(.horizontal, 2)
+            .padding(.vertical, 6)
+            .background(RoundedRectangle(cornerRadius: 10)
+                .fill(activeTool == .newSketch ? accent : accent.opacity(0.75)))
+        }
+        .buttonStyle(.plain)
+        railCaption("SKETCH")
+        railButton("On Face", icon: "square.on.square.dashed", active: pickingFace && pickPurpose == .sketchOnFace) {
+            pickPurpose = .sketchOnFace
+            activeTool = nil
+            startFacePicking()
+        }
+        railCaption("CONSTRUCT")
+        railButton("Offset Plane", icon: "square.on.square", active: activeTool == .offsetPlane) {
+            selectTool(.offsetPlane)
+        }
+        railButton("Angle Plane", icon: "triangle", active: activeTool == .anglePlane) {
+            selectTool(.anglePlane)
+        }
+        railButton("Midplane", icon: "rectangle.split.3x1", active: activeTool == .midplane) {
+            selectTool(.midplane)
+        }
+        railCaption("CREATE")
+        railButton("Extrude", icon: "rectangle.expand.vertical", active: activeTool == .extrude) {
+            selectTool(.extrude)
+        }
+        railButton("Revolve", icon: "rotate.3d", active: activeTool == .revolve) {
+            selectTool(.revolve)
+        }
+        railButton("Thread", icon: "lines.measurement.horizontal", active: false) {
+            activeTool = nil
+            if let f = model.addThreadDefault() { featureToEdit = f }
+        }
+        railButton("Hole", icon: "circle.circle", active: activeTool == .hole) {
+            selectTool(.hole)
+        }
+        railButton("Loft", icon: "square.2.layers.3d", active: activeTool == .loft) {
+            selectTool(.loft)
+        }
+        railButton("Sweep", icon: "lasso", active: activeTool == .sweep) {
+            selectTool(.sweep)
+        }
+        railButton("Coil", icon: "tornado", active: activeTool == .coil) {
+            selectTool(.coil)
+        }
+        railButton("Pipe", icon: "waveform.path", active: activeTool == .pipe) {
+            selectTool(.pipe)
+        }
+        railButton("Rib", icon: "square.split.2x1", active: activeTool == .rib) {
+            selectTool(.rib)
+        }
+        railPrimitivesMenu
+        railCaption("MODIFY")
+        railButton("Fillet", icon: "capsule", active: activeTool == .fillet) {
+            selectTool(.fillet)
+        }
+        railButton("Chamfer", icon: "octagon", active: activeTool == .chamfer) {
+            selectTool(.chamfer)
+        }
+        railButton("Shell", icon: "cube.transparent", active: activeTool == .shell) {
+            selectTool(.shell)
+        }
+        railButton("Mirror", icon: "flip.horizontal", active: activeTool == .mirror) {
+            selectTool(.mirror)
+        }
+        railButton("Pattern", icon: "square.grid.2x2", active: activeTool == .pattern) {
+            selectTool(.pattern)
+        }
+        railButton("Circ. Pattern", icon: "arrow.triangle.2.circlepath", active: activeTool == .circularPattern) {
+            selectTool(.circularPattern)
+        }
+        railButton("Draft", icon: "pyramid", active: activeTool == .draft) {
+            selectTool(.draft)
+        }
+        railButton("Scale", icon: "arrow.up.and.down.and.arrow.left.and.right", active: activeTool == .scaleBody) {
+            selectTool(.scaleBody)
+        }
+        railButton("Move", icon: "move.3d", active: activeTool == .moveBody) {
+            selectTool(.moveBody)
+        }
+        railButton("Split", icon: "rectangle.split.2x1", active: activeTool == .splitBody) {
+            selectTool(.splitBody)
+        }
+        railCaption("INSPECT")
+        railButton("Measure", icon: "ruler", active: activeTool == .measure) {
+            selectTool(.measure)
+        }
+        railButton("Sketches", icon: model.showsSketches ? "eye" : "eye.slash",
+                   active: model.showsSketches) {
+            model.showsSketches.toggle()
+        }
+        railButton("Section", icon: "square.lefthalf.filled", active: sectionOn) {
+            toggleSection()
+        }
+    }
+
+    /// The ribbon's Primitive menu, restyled for the rail: one
+    /// button, the same five kinds, the same activeTool routing.
+    private var railPrimitivesMenu: some View {
         let isActive: Bool = {
             if case .primitive = activeTool ?? .measure { return true }
             return false
@@ -1448,18 +2286,272 @@ struct EditorView: View {
                     .mcFont(24)
                 HStack(spacing: 3) {
                     Text("Primitive")
-                        .mcFont(16, weight: .semibold)
+                        .mcFont(15, weight: .semibold)
                     Image(systemName: "chevron.down")
-                        .mcFont(13, weight: .bold)
+                        .mcFont(11, weight: .bold)
                 }
                 .lineLimit(1)
             }
             .foregroundStyle(isActive ? .black : .primary)
-            .frame(minWidth: 80, minHeight: 58)
-            .padding(.horizontal, 4)
+            .frame(maxWidth: .infinity, minHeight: 60)
+            .padding(.horizontal, 2)
+            .padding(.vertical, 6)
             .background(RoundedRectangle(cornerRadius: 10)
                 .fill(isActive ? accent : Color.white.opacity(0.06)))
         }
+    }
+
+    private func selectTool(_ tool: ActiveTool) {
+        if activeTool == tool {
+            activeTool = nil
+            extrudePresetSketchID = nil
+        } else {
+            activeTool = tool
+        }
+    }
+
+    // MARK: Tool rail — sketch face (in-place session live)
+
+    private func sketchToolIcon(_ tool: InPlaceSketchTool) -> String {
+        switch tool {
+        case .select: return "cursorarrow"
+        case .point: return "circle.circle"
+        case .line: return "line.diagonal"
+        case .rectangle: return "rectangle"
+        case .circle: return "circle"
+        case .arc: return "moon"
+        }
+    }
+
+    /// Sketch face of the rail: the six draw tools, the live
+    /// status card (drag readout while a stroke is down, otherwise
+    /// DOF + snap), the constraint surface ported from the 2D
+    /// editor (Horizontal/Vertical for a selected line + the
+    /// value-editable constraint list), the selection inspector
+    /// (measurements + exact radius/length fields + Delete), and
+    /// the finish actions.
+    @ViewBuilder
+    private var sketchRailContent: some View {
+        Text(model.activeSketch?.name ?? "Sketch")
+            .mcFont(16, weight: .bold)
+            .multilineTextAlignment(.center)
+            .lineLimit(2)
+            .frame(maxWidth: .infinity)
+        railCaption("DRAW")
+        ForEach(InPlaceSketchTool.allCases, id: \.self) { tool in
+            railButton(tool.displayName, icon: sketchToolIcon(tool),
+                       active: model.inPlaceTool == tool) {
+                model.inPlaceTool = tool
+            }
+        }
+        sketchStatusCard
+        sketchConstraintsSection
+        sketchInspectorSection
+        Divider()
+            .padding(.vertical, 2)
+        Button {
+            _ = model.finishSketchAndExtrude()
+        } label: {
+            VStack(spacing: 4) {
+                Image(systemName: "rectangle.expand.vertical")
+                    .mcFont(22)
+                Text("Finish & Extrude")
+                    .mcFont(15, weight: .semibold)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+            }
+            .foregroundStyle(.primary)
+            .frame(maxWidth: .infinity, minHeight: 58)
+            .padding(.horizontal, 2)
+            .padding(.vertical, 6)
+            .background(RoundedRectangle(cornerRadius: 10)
+                .fill(Color.white.opacity(0.10)))
+        }
+        .buttonStyle(.plain)
+        Button {
+            model.endSketchInPlace()
+        } label: {
+            Text("DONE")
+                .mcFont(21, weight: .bold)
+                .foregroundStyle(.black)
+                .frame(maxWidth: .infinity, minHeight: 56)
+                .background(RoundedRectangle(cornerRadius: 10).fill(accent))
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// Live session status: while a stroke is down, its size
+    /// readout (big, accent); otherwise the sketch's freedom —
+    /// DOF count or "Fully constrained" — plus the snap step.
+    private var sketchStatusCard: some View {
+        VStack(spacing: 3) {
+            if let readout = model.sketchDragReadout {
+                Text(readout)
+                    .mcFont(19, weight: .bold)
+                    .foregroundStyle(accent)
+                    .multilineTextAlignment(.center)
+            } else if model.activeSketchDOF == 0,
+                      !(model.activeSketch?.entities.isEmpty ?? true) {
+                Text("Fully constrained")
+                    .mcFont(15, weight: .bold)
+                    .foregroundStyle(.green)
+                    .multilineTextAlignment(.center)
+            } else {
+                Text("\(model.activeSketchDOF) DOF")
+                    .mcFont(17, weight: .bold)
+            }
+            Text("Snap \(mcFmt(model.sketchSnapStep)) mm")
+                .mcFont(13)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 8)
+        .padding(.horizontal, 2)
+        .background(RoundedRectangle(cornerRadius: 10)
+            .fill(Color.white.opacity(0.06)))
+    }
+
+    /// The constraint surface, ported from the 2D editor: with
+    /// exactly one line selected, Horizontal / Vertical buttons
+    /// (the 2D line inspector's pair); below, the sketch's
+    /// constraints as compact rows whose driving values are
+    /// editable in place (the 2D ConstraintRow, restacked for the
+    /// rail's width).
+    @ViewBuilder
+    private var sketchConstraintsSection: some View {
+        let constraints = model.activeSketch?.constraints ?? []
+        if model.selectedSketchLineID != nil || !constraints.isEmpty {
+            railCaption("CONSTRAINTS")
+            if model.selectedSketchLineID != nil {
+                railButton("Horizontal", icon: "arrow.left.and.right", active: false) {
+                    model.applyHorizontalConstraintToSelectedLine()
+                }
+                railButton("Vertical", icon: "arrow.up.and.down", active: false) {
+                    model.applyVerticalConstraintToSelectedLine()
+                }
+            }
+            ForEach(Array(constraints.enumerated()), id: \.offset) { i, c in
+                RailConstraintRow(
+                    constraint: c,
+                    onApplyValue: { v in
+                        model.updateActiveSketchConstraint(at: i, value: v)
+                    },
+                    onDelete: {
+                        model.deleteActiveSketchConstraint(at: i)
+                    }
+                )
+            }
+        }
+    }
+
+    /// The radius of the one selected circle / the length of the
+    /// one selected line — the exact guards the model's setters
+    /// apply, mirrored so their fields show only when they apply.
+    private var singleSelectedCircleRadius: Double? {
+        guard let sk = model.activeSketch,
+              model.selectedSketchEntityIDs.count == 1,
+              let id = model.selectedSketchEntityIDs.first,
+              let e = sk.entity(id),
+              case .circle(_, _, let r, _) = e else { return nil }
+        return r
+    }
+
+    private var singleSelectedLineLength: Double? {
+        guard let sk = model.activeSketch,
+              model.selectedSketchEntityIDs.count == 1,
+              let id = model.selectedSketchEntityIDs.first,
+              let e = sk.entity(id),
+              case .line(_, let a, let b, _) = e else { return nil }
+        return a.distance(to: b)
+    }
+
+    /// Selection inspector: the model's measurement readouts as
+    /// large rows, exact-value fields for the selected circle's
+    /// radius / the selected line's length (type it, tap ✓, the
+    /// model fixes the geometry through its constraint-aware
+    /// setters), and Delete for the selection. The fields reload
+    /// whenever the selection or the measurements change.
+    @ViewBuilder
+    private var sketchInspectorSection: some View {
+        if !model.selectedSketchMeasurements.isEmpty {
+            railCaption("INSPECTOR")
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(model.selectedSketchMeasurements, id: \.self) { line in
+                    Text(line)
+                        .mcFont(16, weight: .semibold)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            if singleSelectedCircleRadius != nil {
+                railValueField(label: "Radius mm", text: $railRadiusText) { v in
+                    _ = model.setSelectedCircleRadius(v)
+                }
+            }
+            if singleSelectedLineLength != nil {
+                railValueField(label: "Length mm", text: $railLengthText) { v in
+                    _ = model.setSelectedLineLength(v)
+                }
+            }
+            Button(role: .destructive) {
+                model.deleteSelectedSketchEntities()
+            } label: {
+                VStack(spacing: 4) {
+                    Image(systemName: "trash")
+                        .mcFont(22)
+                    Text("Delete")
+                        .mcFont(15, weight: .semibold)
+                }
+                .foregroundStyle(.red)
+                .frame(maxWidth: .infinity, minHeight: 56)
+                .padding(.vertical, 6)
+                .background(RoundedRectangle(cornerRadius: 10)
+                    .fill(Color.red.opacity(0.15)))
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    /// One compact exact-value field (PanelNumberRow's style at
+    /// rail width): label over a rounded text field + ✓ apply.
+    private func railValueField(label: String, text: Binding<String>,
+                                apply: @escaping (Double) -> Void) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(label)
+                .mcFont(13, weight: .semibold)
+                .foregroundStyle(.secondary)
+            HStack(spacing: 4) {
+                TextField(label, text: text)
+                    .keyboardType(.numbersAndPunctuation)
+                    .multilineTextAlignment(.trailing)
+                    .mcFont(17, weight: .semibold)
+                    .textFieldStyle(.roundedBorder)
+                Button {
+                    if let v = Double(text.wrappedValue) { apply(v) }
+                } label: {
+                    Image(systemName: "checkmark.circle.fill")
+                        .mcFont(24)
+                        .foregroundStyle(accent)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Apply \(label)")
+            }
+        }
+        .onAppear { reloadRailInspectorFields() }
+        .onChange(of: railInspectorFieldKey) { _, _ in reloadRailInspectorFields() }
+    }
+
+    /// What the inspector fields mirror: the selection + the
+    /// current measurements. Any change reloads the field texts
+    /// from the geometry, so a drag or a solve never leaves a
+    /// stale number in a field.
+    private var railInspectorFieldKey: String {
+        model.selectedSketchEntityIDs.sorted().map(String.init).joined(separator: ",")
+            + "|" + model.selectedSketchMeasurements.joined(separator: ";")
+    }
+
+    private func reloadRailInspectorFields() {
+        if let r = singleSelectedCircleRadius { railRadiusText = mcFmt(r) }
+        if let l = singleSelectedLineLength { railLengthText = mcFmt(l) }
     }
 
     // MARK: Center column (preview + banners + section controls)
@@ -1498,6 +2590,8 @@ struct EditorView: View {
                     hiddenSketchIDs: model.hiddenSketchIDs,
                     showSketches: model.showsSketches,
                     showBasePlanes: model.choosingSketchPlane,
+                    showModelEdges: showModelEdges,
+                    sketchModel: model,
                     isPickingFace: pickingFace,
                     onFacePicked: { index in handleFacePicked(index) },
                     onSketchPicked: { id in
@@ -1676,7 +2770,7 @@ struct EditorView: View {
         guard let face = model.resolvePickedFace(triangleIndex: triangleIndex) else { return }
         switch pickPurpose {
         case .sketchOnFace:
-            sketchNav = SketchNav(id: model.addSketchOnFace(face))
+            model.beginSketchInPlace(model.addSketchOnFace(face))
         case .newSketchFace:
             model.planeChoice = .face(face)
             activeTool = .newSketch
@@ -1757,7 +2851,7 @@ struct EditorView: View {
                         activeTool = .sweep
                     }
                     actionBarButton("Edit Sketch", icon: "pencil") {
-                        sketchNav = SketchNav(id: sketch.id)
+                        model.beginSketchInPlace(sketch.id)
                     }
                     actionBarButton("Hide", icon: "eye.slash") {
                         model.hiddenSketchIDs.insert(sketch.id)
@@ -1795,7 +2889,7 @@ struct EditorView: View {
                     switch picked {
                     case .face(_, let face, let point):
                         actionBarButton("Sketch Here", icon: "square.and.pencil") {
-                            sketchNav = SketchNav(id: model.addSketchOnFace(face))
+                            model.beginSketchInPlace(model.addSketchOnFace(face))
                         }
                         actionBarButton("Pull", icon: "arrow.up.circle.fill") {
                             startQuick(cut: false, face: face)
@@ -2231,20 +3325,32 @@ struct EditorView: View {
             VStack(spacing: 10) {
                 if let part = model.part {
                     ForEach(part.sketches) { sketch in
-                        NavigationLink {
-                            SketchEditorView(model: model, sketchID: sketch.id)
-                        } label: {
-                            Image(systemName: sketch.isDatumPlane ? "square.on.square" : "square.and.pencil")
+                        if sketch.isDatumPlane {
+                            // Datums hold no drawing — no session to
+                            // begin; the icon is display-only here.
+                            Image(systemName: "square.on.square")
                                 .mcFont(22)
-                                .foregroundStyle(sketch.isDatumPlane ? Color.teal : accent)
+                                .foregroundStyle(Color.teal)
                                 .frame(width: 44, height: 44)
                                 .background(RoundedRectangle(cornerRadius: 10)
-                                    .fill(model.selectedSketchID == sketch.id
-                                          ? accent.opacity(0.35)
-                                          : Color.white.opacity(0.06)))
+                                    .fill(Color.white.opacity(0.06)))
+                                .accessibilityLabel(sketch.name)
+                        } else {
+                            Button {
+                                model.beginSketchInPlace(sketch.id)
+                            } label: {
+                                Image(systemName: "square.and.pencil")
+                                    .mcFont(22)
+                                    .foregroundStyle(accent)
+                                    .frame(width: 44, height: 44)
+                                    .background(RoundedRectangle(cornerRadius: 10)
+                                        .fill(model.selectedSketchID == sketch.id
+                                              ? accent.opacity(0.35)
+                                              : Color.white.opacity(0.06)))
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(sketch.name)
                         }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel(sketch.name)
                     }
                     if !part.sketches.isEmpty && !part.features.isEmpty {
                         Divider()
@@ -2283,7 +3389,7 @@ struct EditorView: View {
             Section("Sketches & datum planes") {
                 if let part = model.part {
                     if part.sketches.isEmpty {
-                        Text("No sketches yet — use Sketch ▸ New Sketch in the toolbar and pick a plane.")
+                        Text("No sketches yet — use New Sketch in the rail on the left and pick a plane.")
                             .mcFont(20)
                             .foregroundStyle(.secondary)
                     }
@@ -2299,7 +3405,7 @@ struct EditorView: View {
                         featureRow(feature)
                     }
                 } else {
-                    Text("No features yet. Pick a tool from the toolbar above — Extrude a sketch, or start with a Primitive.")
+                    Text("No features yet. Pick a tool from the rail on the left — Extrude a sketch, or start with a Primitive.")
                         .mcFont(20)
                         .foregroundStyle(.secondary)
                 }
@@ -2313,35 +3419,17 @@ struct EditorView: View {
     /// every row carries a menu with Redefine Plane and Delete.
     private func sketchRow(_ sketch: Sketch) -> some View {
         HStack(spacing: 10) {
-            NavigationLink {
-                SketchEditorView(model: model, sketchID: sketch.id)
-            } label: {
-                HStack(spacing: 10) {
-                    Image(systemName: sketch.isDatumPlane ? "square.on.square" : "square.and.pencil")
-                        .mcFont(22)
-                        .foregroundStyle(sketch.isDatumPlane ? Color.teal : accent)
-                        .frame(width: 30)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(sketch.name)
-                            .mcFont(20, weight: .semibold)
-                            .foregroundStyle(.primary)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                        if sketch.isDatumPlane {
-                            Text("Datum plane · \(mcPlaneText(sketch.plane))")
-                                .mcFont(17)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                                .truncationMode(.tail)
-                        } else {
-                            Text("\(sketch.entities.count) items · \(sketch.constraints.count) constraints")
-                                .mcFont(17)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                                .truncationMode(.tail)
-                        }
-                    }
+            if sketch.isDatumPlane {
+                sketchRowLabel(sketch)
+            } else {
+                // Tapping a sketch row starts drawing on it IN the
+                // viewport (v1.12) — no pushed 2D editor anymore.
+                Button {
+                    model.beginSketchInPlace(sketch.id)
+                } label: {
+                    sketchRowLabel(sketch)
                 }
+                .buttonStyle(.plain)
             }
             Spacer()
             if !sketch.isDatumPlane {
@@ -2387,6 +3475,38 @@ struct EditorView: View {
         }
         .padding(.vertical, 2)
         .listRowBackground(model.selectedSketchID == sketch.id ? accent.opacity(0.16) : Color.clear)
+    }
+
+    /// The icon + name + detail half of a sketch browser row,
+    /// shared by the datum (display-only) and sketch (tap to draw
+    /// in place) variants.
+    private func sketchRowLabel(_ sketch: Sketch) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: sketch.isDatumPlane ? "square.on.square" : "square.and.pencil")
+                .mcFont(22)
+                .foregroundStyle(sketch.isDatumPlane ? Color.teal : accent)
+                .frame(width: 30)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(sketch.name)
+                    .mcFont(20, weight: .semibold)
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                if sketch.isDatumPlane {
+                    Text("Datum plane · \(mcPlaneText(sketch.plane))")
+                        .mcFont(17)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                } else {
+                    Text("\(sketch.entities.count) items · \(sketch.constraints.count) constraints")
+                        .mcFont(17)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+            }
+        }
     }
 
     private func featureRow(_ feature: Feature) -> some View {
@@ -2657,6 +3777,108 @@ struct EditorView: View {
             return "Thread on shaft · Ø\(mcFmt(s.majorDiameter)) × \(mcFmt(s.pitch)) pitch · \(mcFmt(s.length)) mm long"
         case .booleanCutPlaceholder:
             return "Boolean cut"
+        }
+    }
+}
+
+
+/// One constraint row in the sketch rail — the 2D editor's
+/// ConstraintRow ported to the rail's width: name + entity detail
+/// stacked, the driving value editable in place (type it, tap ✓),
+/// delete on the right. The detail strings and the value plumbing
+/// are the 2D editor's, unchanged; only the layout differs (the
+/// full-width row doesn't fit 96 pt).
+private struct RailConstraintRow: View {
+    let constraint: SketchConstraint
+    let onApplyValue: (Double) -> Void
+    let onDelete: () -> Void
+    @State private var text: String
+    @AppStorage(MCAccent.key) private var accentHex: String = MCAccent.defaultHex
+    private var accent: Color { MCAccent.color(hex: accentHex) }
+
+    init(constraint: SketchConstraint,
+         onApplyValue: @escaping (Double) -> Void,
+         onDelete: @escaping () -> Void) {
+        self.constraint = constraint
+        self.onApplyValue = onApplyValue
+        self.onDelete = onDelete
+        _text = State(initialValue: Self.value(of: constraint).map(mcFmt) ?? "")
+    }
+
+    private static func value(of c: SketchConstraint) -> Double? {
+        switch c {
+        case .distancePoints(_, _, _, _, let v): return v
+        case .radius(_, let v): return v
+        case .diameter(_, let v): return v
+        case .angleBetween(_, _, let d): return d
+        default: return nil
+        }
+    }
+
+    private var detail: String {
+        switch constraint {
+        case .coincident(let a, let b): return "#\(a) = #\(b)"
+        case .distancePoints(let a, _, let b, _, _): return "#\(a) – #\(b)"
+        case .radius(let e, _): return "entity #\(e)"
+        case .diameter(let e, _): return "entity #\(e)"
+        case .horizontal(let e): return "entity #\(e)"
+        case .vertical(let e): return "entity #\(e)"
+        case .parallel(let a, let b): return "#\(a) ∥ #\(b)"
+        case .perpendicular(let a, let b): return "#\(a) ⟂ #\(b)"
+        case .tangent(let a, let b): return "#\(a) ~ #\(b)"
+        case .concentric(let a, let b): return "#\(a) ◎ #\(b)"
+        case .equal(let a, let b): return "#\(a) ≡ #\(b)"
+        case .symmetric(let a, let b, let axis): return "#\(a) ↔ #\(b) / #\(axis)"
+        case .pointOnEntity(let p, let e): return "#\(p) on #\(e)"
+        case .midpoint(let p, let e): return "#\(p) mid #\(e)"
+        case .collinear(let a, let b): return "#\(a) — #\(b)"
+        case .angleBetween(let a, let b, _): return "#\(a) ∠ #\(b)"
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(alignment: .top, spacing: 4) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(constraint.displayName)
+                        .mcFont(14, weight: .semibold)
+                    Text(detail)
+                        .mcFont(12)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+                Button(role: .destructive) { onDelete() } label: {
+                    Image(systemName: "trash")
+                        .mcFont(15)
+                        .foregroundStyle(.red)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Delete constraint")
+            }
+            if Self.value(of: constraint) != nil {
+                HStack(spacing: 4) {
+                    TextField("Value", text: $text)
+                        .keyboardType(.numbersAndPunctuation)
+                        .multilineTextAlignment(.trailing)
+                        .mcFont(15, weight: .semibold)
+                        .textFieldStyle(.roundedBorder)
+                    Button {
+                        if let v = Double(text) { onApplyValue(v) }
+                    } label: {
+                        Image(systemName: "checkmark.circle.fill")
+                            .mcFont(20)
+                            .foregroundStyle(accent)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Apply value")
+                }
+            }
+        }
+        .padding(6)
+        .background(RoundedRectangle(cornerRadius: 8)
+            .fill(Color.white.opacity(0.06)))
+        .onChange(of: constraint) { _, newValue in
+            if let v = Self.value(of: newValue) { text = mcFmt(v) }
         }
     }
 }

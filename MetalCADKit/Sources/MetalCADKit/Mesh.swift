@@ -229,12 +229,29 @@ public struct Mesh: Equatable {
     /// duplicated per corner, but normals are shared across faces whose
     /// dihedral angle is below `creaseDegrees` — curved surfaces shade
     /// smooth, sharp edges stay sharp. Triangles are only faceted at export.
-    public func displaySoup(creaseDegrees: Double = 40) -> (positions: [Vec3], normals: [Vec3]) {
+    public func displaySoup(creaseDegrees: Double = 60) -> (positions: [Vec3], normals: [Vec3]) {
         let m = welded()
         let faceN = m.faceNormals()
+        // Relative triangle areas (the cross product's length is
+        // 2×area — the factor cancels in the normalized average).
+        // The smoothed normal is AREA-WEIGHTED: a big facet speaks
+        // louder than a tessellation sliver, so coarse fans and
+        // uneven triangulation no longer tilt the shading.
+        var faceW: [Double] = []
+        faceW.reserveCapacity(m.triangleCount)
+        for t in 0..<m.triangleCount {
+            let a = m.vertices[Int(m.indices[t * 3])]
+            let b = m.vertices[Int(m.indices[t * 3 + 1])]
+            let c = m.vertices[Int(m.indices[t * 3 + 2])]
+            faceW.append((b - a).cross(c - a).length)
+        }
         let cosLimit = cos(creaseDegrees * .pi / 180)
-        // For every (vertex, face) corner, the smoothed normal is the average
-        // of face normals at that vertex whose angle to this face is small.
+        // For every (vertex, face) corner, the smoothed normal is the
+        // average of face normals at that vertex whose angle to this
+        // face is small. The default crease is 60°: gentle curvature
+        // (fillets, large-radius curves, coarse tessellation steps)
+        // blends fully smooth, while manufactured sharp edges — 90°
+        // box corners, 67.5° octagon faces — stay crisp.
         var vertexFaces: [Int: [Int]] = [:]
         vertexFaces.reserveCapacity(m.vertices.count * 2)
         for t in 0..<m.triangleCount {
@@ -250,7 +267,7 @@ public struct Mesh: Equatable {
                 positions.append(m.vertices[vi])
                 var sum = Vec3.zero
                 for f in vertexFaces[vi] ?? [] where faceN[f].dot(faceN[t]) >= cosLimit {
-                    sum = sum + faceN[f]
+                    sum = sum + faceN[f] * faceW[f]
                 }
                 normals.append(sum.length > 1e-12 ? sum.normalized : faceN[t])
             }

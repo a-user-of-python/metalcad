@@ -9,6 +9,7 @@ final class AppSession: ObservableObject {
     @Published var editorModel: EditorModel?
 
     func open(document: CADDocument, url: URL) {
+        CrashTrace.mark("open: session.open")
         editorModel = EditorModel(document: document, url: url)
     }
 

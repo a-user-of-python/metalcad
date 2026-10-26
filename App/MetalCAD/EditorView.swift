@@ -160,9 +160,11 @@ final class EditorModel: ObservableObject {
     let fileURL: URL
 
     init(document: CADDocument, url: URL) {
+        CrashTrace.mark("model: init begin")
         self.document = document
         self.fileURL = url
         rebuildNow()
+        CrashTrace.mark("model: init done")
     }
 
     var part: Part? {
@@ -978,6 +980,7 @@ struct EditorView: View {
             } message: { target in
                 Text("Rename “\(target.currentName)”")
             }
+            .onAppear { CrashTrace.mark("editor: appeared") }
     }
 
     private var renamePresented: Binding<Bool> {

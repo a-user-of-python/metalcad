@@ -82,6 +82,9 @@ struct SceneKitView: UIViewRepresentable {
         var measureNode: SCNNode?
         var cameraNode: SCNNode?
         var framed: Bool = false
+        /// CrashTrace: the first updateUIView has completed (and
+        /// cleared the crash-pending flag) for this view.
+        var tracedFirstUpdate: Bool = false
         /// The document the live camera currently belongs to; a
         /// change triggers a pose restore (or a first-time frame).
         var currentDocumentID: String = ""
@@ -399,6 +402,15 @@ struct SceneKitView: UIViewRepresentable {
            let camNode = context.coordinator.cameraNode {
             Self.poseStore[documentID] = CameraPose(
                 position: camNode.position, orientation: camNode.orientation)
+        }
+
+        // CrashTrace: surviving to the END of the first update
+        // means the editor rendered — the creation attempt is
+        // healthy and any pending crash trail is disarmed.
+        if !context.coordinator.tracedFirstUpdate {
+            context.coordinator.tracedFirstUpdate = true
+            CrashTrace.mark("scene: first update done")
+            CrashTrace.healthy()
         }
     }
 

@@ -161,7 +161,7 @@ final class CSGNode {
 /// Boolean operations on meshes. Operands are welded first; results are
 /// welded triangle meshes. Throws FT405/FT406/KN codes per ERRORS.md.
 public enum CSG {
-    static let maxTriangles = 60_000
+    static let maxTriangles = 300_000
 
     static func polygons(of mesh: Mesh) -> [[Vec3]] {
         let m = mesh.welded()

@@ -77,6 +77,12 @@ final class EditorModel: ObservableObject {
     @Published var hiddenSketchIDs: Set<String> = []
     /// Master switch for sketch overlays in the 3D view.
     @Published var showsSketches: Bool = true
+    /// True while the New Sketch panel is up choosing a plane: the
+    /// 3D view glows the three base planes in their axis colors
+    /// (YZ red, XZ green, XY blue — same colors as the panel's
+    /// plane cards). Set by the panel on appear/disappear and
+    /// force-cleared whenever the tool panel closes.
+    @Published var choosingSketchPlane: Bool = false
     /// What a normal-mode tap on the model selected (face / edge /
     /// shaft / hole wall) — drives the 3D highlight and the floating
     /// picked-action bar. Mutually exclusive with `selectedSketchID`.
@@ -882,14 +888,16 @@ struct EditorView: View {
                 model.pendingPanelOperation = nil
                 model.pendingHoleSketch = nil
                 model.pendingRevolveSketch = nil
+                model.choosingSketchPlane = false
                 model.setDraft(nil)
             }
         }
     }
 
-    /// The editor shell (JOB A layering): navigation stack, title
-    /// and toolbar ONLY. The two sheets and the remaining change
-    /// handlers hang off SEPARATE computed properties below
+    /// The editor shell (JOB A layering): navigation stack ONLY
+    /// (the nav bar itself is hidden, v1.11). The two sheets and the
+    /// remaining change handlers hang off SEPARATE computed
+    /// properties below
     /// (withMaterialSheet, body) and off mainRow — a single giant
     /// modifier chain on one expression repeatedly timed out the
     /// Swift type checker (v4.2 Actions failures), so every layer
@@ -903,8 +911,12 @@ struct EditorView: View {
                 Divider()
                 mainRow
             }
-            .navigationTitle(model.document.name)
-            .navigationBarTitleDisplayMode(.inline)
+            // No navigation bar over the editor (v1.11): the
+            // document name moved into the header strip itself, and
+            // the bar was a mostly-empty black band eating vertical
+            // space. Scoped to this editor root only — the pushed
+            // SketchEditorView keeps its own bar.
+            .toolbar(.hidden, for: .navigationBar)
             .navigationDestination(item: $sketchNav) { nav in
                 SketchEditorView(model: model, sketchID: nav.id)
             }
@@ -1149,22 +1161,16 @@ struct EditorView: View {
 
     /// Header file buttons (top-UI redesign): separate chip
     /// buttons at the far LEFT of the header — Home back to the
-    /// files screen, Save As (format sheet), Export STL — each an
-    /// SF Symbol + text, chip-styled like the ribbon buttons,
-    /// never joined and never bare text links.
+    /// files screen, Save As (format sheet) — each an SF Symbol +
+    /// text, chip-styled like the ribbon buttons, never joined and
+    /// never bare text links. (Export STL used to sit here too; it
+    /// now lives only in the Save As sheet — v1.11.)
     private var headerFileButtons: some View {
         HStack(spacing: 10) {
             headerChip("Home", icon: "house.fill") { session.closeEditor() }
             headerChip("Save As", icon: "square.and.arrow.down") {
                 model.shareURL = nil
                 showSaveAsSheet = true
-            }
-            headerChip("Export STL", icon: "cube") { model.exportSTL() }
-            if let url = model.stlURL {
-                ShareLink(item: url) {
-                    headerChipLabel("Share STL", icon: "square.and.arrow.up")
-                }
-                .buttonStyle(.plain)
             }
             if let msg = model.saveMessage {
                 Text(msg)
@@ -1210,7 +1216,11 @@ struct EditorView: View {
             }
             .buttonStyle(.plain)
             VStack(alignment: .leading, spacing: 1) {
-                Text(model.part?.name ?? "Part")
+                // The DOCUMENT name lives in the header strip now
+                // (v1.11) — the navigation title bar above it is
+                // hidden, so there is no second, mostly-empty black
+                // band carrying just this name.
+                Text(model.document.name)
                     .mcFont(22, weight: .bold)
                     .lineLimit(1)
             }
@@ -1487,6 +1497,7 @@ struct EditorView: View {
                     selectedSketchID: model.selectedSketchID,
                     hiddenSketchIDs: model.hiddenSketchIDs,
                     showSketches: model.showsSketches,
+                    showBasePlanes: model.choosingSketchPlane,
                     isPickingFace: pickingFace,
                     onFacePicked: { index in handleFacePicked(index) },
                     onSketchPicked: { id in
@@ -1984,17 +1995,27 @@ struct EditorView: View {
                 PanelNote(text: note)
             }
             HStack(spacing: 14) {
-                Button("Cancel") { cancelQuick() }
-                    .mcFont(21, weight: .semibold)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 13)
-                    .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.12)))
-                Button("Done") { commitQuick() }
-                    .mcFont(21, weight: .bold)
-                    .foregroundStyle(.black)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 13)
-                    .background(RoundedRectangle(cornerRadius: 10).fill(accent))
+                // Same one-background rule as PanelOKBar: fill on
+                // the label, .plain style — no pill inside a box.
+                Button { cancelQuick() } label: {
+                    Text("Cancel")
+                        .mcFont(21, weight: .semibold)
+                        .foregroundStyle(accent)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 13)
+                        .background(RoundedRectangle(cornerRadius: 10)
+                            .fill(accent.opacity(0.22)))
+                }
+                .buttonStyle(.plain)
+                Button { commitQuick() } label: {
+                    Text("Done")
+                        .mcFont(21, weight: .bold)
+                        .foregroundStyle(.black)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 13)
+                        .background(RoundedRectangle(cornerRadius: 10).fill(accent))
+                }
+                .buttonStyle(.plain)
             }
         }
         .padding(14)

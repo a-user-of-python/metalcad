@@ -1,24 +1,59 @@
 import Foundation
 
 /// A triangle mesh — the v1 kernel's currency (tessellated solids).
+///
+/// `bounds` and `signedVolume` used to be full triangle scans on every
+/// access, and they are read constantly (render keys, headers, guards).
+/// They are now CACHED: computed once in `init(vertices:indices:)` (the
+/// funnel every factory / transform / CSG result passes through) and
+/// kept in sync by the paths that mutate a mesh in place. Direct writes
+/// to `vertices`/`indices` mark the cache dirty via `didSet`; a dirty
+/// cache falls back to the old scan-on-read, so any construction path
+/// this file doesn't know about stays correct, just not accelerated.
 public struct Mesh: Equatable {
-    public var vertices: [Vec3] = []
-    public var indices: [UInt32] = []   // triples
+    public var vertices: [Vec3] = [] { didSet { metadataDirty = true } }
+    public var indices: [UInt32] = [] { didSet { metadataDirty = true } }   // triples
+
+    private var cachedBounds: BoundingBox = .empty
+    private var cachedSignedVolume: Double = 0
+    private var metadataDirty = false
+
     public init() {}
     public init(vertices: [Vec3], indices: [UInt32]) {
         self.vertices = vertices; self.indices = indices
+        // Observers don't fire during init; fill the cache directly.
+        cachedBounds = Self.computeBounds(vertices)
+        cachedSignedVolume = Self.computeSignedVolume(vertices: vertices, indices: indices)
+        metadataDirty = false
+    }
+    /// Equality is geometric identity (vertex + index arrays) — the
+    /// metadata cache must not leak into it (a clean and a dirty copy
+    /// of the same mesh are the same mesh).
+    public static func == (a: Mesh, b: Mesh) -> Bool {
+        a.vertices == b.vertices && a.indices == b.indices
     }
     public var triangleCount: Int { indices.count / 3 }
     public var bounds: BoundingBox {
-        var b = BoundingBox.empty
-        for v in vertices { b.include(v) }
-        return b
+        metadataDirty ? Self.computeBounds(vertices) : cachedBounds
     }
     /// Signed volume via the divergence theorem. Positive = outward normals
     /// for a closed mesh.
     public var signedVolume: Double {
+        metadataDirty
+            ? Self.computeSignedVolume(vertices: vertices, indices: indices)
+            : cachedSignedVolume
+    }
+    public var volume: Double { abs(signedVolume) }
+
+    private static func computeBounds(_ vertices: [Vec3]) -> BoundingBox {
+        var b = BoundingBox.empty
+        for v in vertices { b.include(v) }
+        return b
+    }
+    private static func computeSignedVolume(vertices: [Vec3], indices: [UInt32]) -> Double {
         var vol = 0.0
-        for t in 0..<triangleCount {
+        let n = indices.count / 3
+        for t in 0..<n {
             let a = vertices[Int(indices[t * 3])]
             let b = vertices[Int(indices[t * 3 + 1])]
             let c = vertices[Int(indices[t * 3 + 2])]
@@ -26,7 +61,6 @@ public struct Mesh: Equatable {
         }
         return vol
     }
-    public var volume: Double { abs(signedVolume) }
     /// Count edges used by exactly one triangle (boundary/open edges).
     /// Close T-junctions left by BSP CSG: an edge used by exactly one
     /// triangle whose segment passes through another vertex gets split
@@ -46,6 +80,7 @@ public struct Mesh: Equatable {
     /// true if any triangle was split.
     private func splitOnePass(_ mesh: inout Mesh, tolerance: Double) -> Bool {
         var counts: [UInt64: Int] = [:]
+        counts.reserveCapacity(mesh.triangleCount * 3)
         func key(_ a: UInt32, _ b: UInt32) -> UInt64 { (UInt64(max(a, b)) << 32) | UInt64(min(a, b)) }
         for t in 0..<mesh.triangleCount {
             for k in 0..<3 { counts[key(mesh.indices[t * 3 + k], mesh.indices[t * 3 + (k + 1) % 3]), default: 0] += 1 }
@@ -74,6 +109,7 @@ public struct Mesh: Equatable {
             return out
         }
         var edgeTri: [UInt64: Int] = [:]
+        edgeTri.reserveCapacity(mesh.triangleCount * 3)
         for t in 0..<mesh.triangleCount {
             for k in 0..<3 {
                 let kk = key(mesh.indices[t * 3 + k], mesh.indices[t * 3 + (k + 1) % 3])
@@ -113,6 +149,7 @@ public struct Mesh: Equatable {
 
     public var openEdgeCount: Int {
         var counts: [UInt64: Int] = [:]
+        counts.reserveCapacity(triangleCount * 3)
         func key(_ a: UInt32, _ b: UInt32) -> UInt64 {
             let lo = UInt64(min(a, b)), hi = UInt64(max(a, b))
             return (hi << 32) | lo
@@ -134,8 +171,14 @@ public struct Mesh: Equatable {
         // Spatial hash over the 27 neighboring cells so points near a cell
         // boundary still merge (single-cell rounding splits them).
         var cells: [Int: [Int]] = [:]
+        cells.reserveCapacity(vertices.count * 2)
         var verts: [Vec3] = []
+        verts.reserveCapacity(vertices.count)
         var remap: [UInt32] = []
+        remap.reserveCapacity(vertices.count)
+        // Squared-distance compare: equivalent to distance <= tolerance
+        // for tolerance >= 0, without a sqrt per candidate pair.
+        let tolSq = tolerance * tolerance
         func cellKey(_ cx: Int, _ cy: Int, _ cz: Int) -> Int {
             (cx &* 73856093) ^ (cy &* 19349663) ^ (cz &* 83492791)
         }
@@ -146,7 +189,8 @@ public struct Mesh: Equatable {
                 for dy in -1...1 {
                     for dz in -1...1 {
                         for ci in cells[cellKey(gx + dx, gy + dy, gz + dz)] ?? [] {
-                            if verts[ci].distance(to: v) <= tolerance { found = ci; break outer }
+                            let d = verts[ci] - v
+                            if tolerance >= 0 && d.x * d.x + d.y * d.y + d.z * d.z <= tolSq { found = ci; break outer }
                         }
                     }
                 }
@@ -192,11 +236,14 @@ public struct Mesh: Equatable {
         // For every (vertex, face) corner, the smoothed normal is the average
         // of face normals at that vertex whose angle to this face is small.
         var vertexFaces: [Int: [Int]] = [:]
+        vertexFaces.reserveCapacity(m.vertices.count * 2)
         for t in 0..<m.triangleCount {
             for k in 0..<3 { vertexFaces[Int(m.indices[t * 3 + k]), default: []].append(t) }
         }
         var positions: [Vec3] = []
         var normals: [Vec3] = []
+        positions.reserveCapacity(m.triangleCount * 3)
+        normals.reserveCapacity(m.triangleCount * 3)
         for t in 0..<m.triangleCount {
             for k in 0..<3 {
                 let vi = Int(m.indices[t * 3 + k])
@@ -211,9 +258,22 @@ public struct Mesh: Equatable {
         return (positions, normals)
     }
     public mutating func append(_ other: Mesh) {
+        // Keep the cache exact without a rescan when both sides are
+        // clean: bounds union + signed-volume sum are O(1).
+        let bothClean = !metadataDirty && !other.metadataDirty
+        let otherBounds = other.cachedBounds
+        let otherVolume = other.cachedSignedVolume
         let base = UInt32(vertices.count)
         vertices += other.vertices
         indices += other.indices.map { $0 + base }
+        if bothClean {
+            if !otherBounds.isEmpty {
+                cachedBounds.include(otherBounds.min)
+                cachedBounds.include(otherBounds.max)
+            }
+            cachedSignedVolume += otherVolume
+            metadataDirty = false
+        }
     }
     /// Per-face normals (flat shading).
     public func faceNormals() -> [Vec3] {
@@ -227,22 +287,30 @@ public struct Mesh: Equatable {
 }
 
 /// Builds meshes with consistent outward winding (CCW seen from outside).
+/// Accumulates into private arrays and vends the finished mesh through
+/// `Mesh(vertices:indices:)` so its bounds/volume cache is populated.
 public struct MeshBuilder {
-    public var mesh = Mesh()
+    private var verts: [Vec3] = []
+    private var idx: [UInt32] = []
     public init() {}
+    public var mesh: Mesh { Mesh(vertices: verts, indices: idx) }
     @discardableResult
     public mutating func vertex(_ v: Vec3) -> UInt32 {
-        mesh.vertices.append(v)
-        return UInt32(mesh.vertices.count - 1)
+        verts.append(v)
+        return UInt32(verts.count - 1)
     }
     public mutating func triangle(_ a: UInt32, _ b: UInt32, _ c: UInt32) {
-        mesh.indices += [a, b, c]
+        idx += [a, b, c]
     }
     /// Quad as two triangles; corners must be CCW seen from outside.
     public mutating func quad(_ a: UInt32, _ b: UInt32, _ c: UInt32, _ d: UInt32) {
         triangle(a, b, c); triangle(a, c, d)
     }
-    public mutating func addMesh(_ m: Mesh) { mesh.append(m) }
+    public mutating func addMesh(_ m: Mesh) {
+        let base = UInt32(verts.count)
+        verts += m.vertices
+        idx += m.indices.map { $0 + base }
+    }
 }
 
 public extension Mesh {

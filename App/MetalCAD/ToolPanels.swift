@@ -298,18 +298,34 @@ struct PanelOKBar: View {
 
     var body: some View {
         HStack(spacing: 14) {
-            Button("Cancel") { onCancel() }
-                .mcFont(20, weight: .semibold)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 12)
-                .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.12)))
-            Button(okTitle) { onOK() }
-                .mcFont(20, weight: .bold)
-                .foregroundStyle(.black)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 12)
-                .background(RoundedRectangle(cornerRadius: 10).fill(okEnabled ? accent : Color.gray))
-                .disabled(!okEnabled)
+            // ONE background per button (Sean's rule: "if a button
+            // is colored, remove the grey background"): the fill
+            // lives on the label itself and the style is .plain, so
+            // neither a system capsule behind the text nor a second
+            // box around it can render. Cancel is a single
+            // accent-tinted fill with accent text; OK is the accent
+            // fill (muted grey when disabled), text directly on it.
+            Button { onCancel() } label: {
+                Text("Cancel")
+                    .mcFont(20, weight: .semibold)
+                    .foregroundStyle(accent)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+                    .background(RoundedRectangle(cornerRadius: 10)
+                        .fill(accent.opacity(0.22)))
+            }
+            .buttonStyle(.plain)
+            Button { onOK() } label: {
+                Text(okTitle)
+                    .mcFont(20, weight: .bold)
+                    .foregroundStyle(okEnabled ? .black : .white.opacity(0.8))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+                    .background(RoundedRectangle(cornerRadius: 10)
+                        .fill(okEnabled ? accent : Color.gray.opacity(0.5)))
+            }
+            .buttonStyle(.plain)
+            .disabled(!okEnabled)
         }
         .padding(.top, 8)
     }
@@ -453,13 +469,16 @@ struct PlaneChoiceView: View {
                 .mcFont(17, weight: .semibold)
                 .foregroundStyle(.secondary)
             HStack(spacing: 8) {
-                planeCard("XY", sub: "facing +Z", selected: choice == .base("XY")) {
+                planeCard("XY", sub: "facing +Z", color: Self.basePlaneColor("XY"),
+                          selected: choice == .base("XY")) {
                     choice = .base("XY")
                 }
-                planeCard("XZ", sub: "facing −Y", selected: choice == .base("XZ")) {
+                planeCard("XZ", sub: "facing −Y", color: Self.basePlaneColor("XZ"),
+                          selected: choice == .base("XZ")) {
                     choice = .base("XZ")
                 }
-                planeCard("YZ", sub: "facing +X", selected: choice == .base("YZ")) {
+                planeCard("YZ", sub: "facing +X", color: Self.basePlaneColor("YZ"),
+                          selected: choice == .base("YZ")) {
                     choice = .base("YZ")
                 }
             }
@@ -522,23 +541,44 @@ struct PlaneChoiceView: View {
         }
     }
 
-    private func planeCard(_ name: String, sub: String, selected: Bool,
+    /// Axis colors for the base planes (RGB = XYZ, keyed by the
+    /// plane's NORMAL axis): YZ faces +X → red, XZ faces −Y →
+    /// green, XY faces +Z → blue. The 3D view glows the same
+    /// planes in the same colors while a plane is being chosen,
+    /// so the card and the plane are recognizably a pair.
+    static func basePlaneColor(_ name: String) -> Color {
+        switch name {
+        case "YZ": return Color(red: 1.0, green: 0.30, blue: 0.30)
+        case "XZ": return Color(red: 0.30, green: 0.92, blue: 0.40)
+        default: return Color(red: 0.35, green: 0.58, blue: 1.0) // XY
+        }
+    }
+
+    private func planeCard(_ name: String, sub: String, color: Color,
+                           selected: Bool,
                            action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            VStack(spacing: 2) {
-                Image(systemName: "square.dashed")
-                    .mcFont(22)
+            VStack(spacing: 3) {
+                // Filled swatch dot in the plane's axis color; the
+                // name/sub stay primary/secondary for readability —
+                // the swatch and (when selected) the ring carry the
+                // color, never the text.
+                Circle()
+                    .fill(color)
+                    .frame(width: 14, height: 14)
                 Text(name)
                     .mcFont(20, weight: .bold)
                 Text(sub)
                     .mcFont(14)
                     .foregroundStyle(.secondary)
             }
-            .foregroundStyle(selected ? .black : .primary)
+            .foregroundStyle(.primary)
             .frame(maxWidth: .infinity)
             .padding(.vertical, 10)
             .background(RoundedRectangle(cornerRadius: 10)
-                .fill(selected ? accent : Color.white.opacity(0.08)))
+                .fill(selected ? color.opacity(0.22) : Color.white.opacity(0.08)))
+            .overlay(RoundedRectangle(cornerRadius: 10)
+                .stroke(selected ? color : Color.clear, lineWidth: 2.5))
         }
         .buttonStyle(.plain)
     }
@@ -599,6 +639,13 @@ struct NewSketchPanel: View {
             PanelOKBar(okTitle: "Create Sketch", okEnabled: resolvedPlane != nil,
                        onOK: create, onCancel: close)
         }
+        // This panel IS the plane-choosing step (its whole lifetime
+        // is picking the plane), so the 3D base planes glow in
+        // their axis colors exactly while it is up. EditorView
+        // also force-clears the flag when the tool closes, so it
+        // can never stick.
+        .onAppear { model.choosingSketchPlane = true }
+        .onDisappear { model.choosingSketchPlane = false }
     }
 
     private func create() {

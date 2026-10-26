@@ -42,6 +42,11 @@ struct SceneKitView: UIViewRepresentable {
     var hiddenSketchIDs: Set<String> = []
     /// Master switch for the sketch overlays.
     var showSketches: Bool = true
+    /// When true, the three base planes glow at the origin in their
+    /// axis colors — YZ red (normal +X), XZ green (normal −Y), XY
+    /// blue (normal +Z) — matching the New Sketch panel's plane
+    /// cards while a plane is being chosen.
+    var showBasePlanes: Bool = false
     /// When true, taps hit-test the model and report the triangle index.
     var isPickingFace: Bool = false
     /// Called with the welded-mesh triangle index of the tapped face.
@@ -76,10 +81,12 @@ struct SceneKitView: UIViewRepresentable {
         var overlayKey: String = ""
         var selectionKey: String = ""
         var measureKey: String = ""
+        var basePlanesKey: String = ""
         var modelNode: SCNNode?
         var overlayNode: SCNNode?
         var selectionNode: SCNNode?
         var measureNode: SCNNode?
+        var basePlanesNode: SCNNode?
         var cameraNode: SCNNode?
         var framed: Bool = false
         /// The document the live camera currently belongs to; a
@@ -359,6 +366,7 @@ struct SceneKitView: UIViewRepresentable {
         updateOverlays(view, context: context)
         updateSelection(view, context: context)
         updateMeasure(view, context: context)
+        updateBasePlanes(view, context: context)
 
         // Identity for "geometry must be rebuilt": mesh shape +
         // material + preview state + accent (the preview tint reads
@@ -649,6 +657,84 @@ struct SceneKitView: UIViewRepresentable {
         mat.writesToDepthBuffer = false
         geometry.materials = [mat]
         return geometry
+    }
+
+    // MARK: Base-plane glow (New Sketch plane choice)
+
+    /// Keep the base-plane glow quads in sync with `showBasePlanes`.
+    /// Three translucent 70×70 mm quads through the origin, colored
+    /// by the axis of their normal (RGB = XYZ): YZ red, XZ green,
+    /// XY blue — the same colors as the New Sketch panel's plane
+    /// cards. Rebuilt ONLY when the flag toggles (the key is just
+    /// the flag). Named "basePlanes", renderingOrder 4 — below the
+    /// sketch overlays (6) — and never hit-tested: every pick
+    /// filters to the model node.
+    private func updateBasePlanes(_ view: SCNView, context: Context) {
+        let coord = context.coordinator
+        let key = showBasePlanes ? "planes-on" : "planes-off"
+        guard coord.basePlanesKey != key else { return }
+        coord.basePlanesKey = key
+        coord.basePlanesNode?.removeFromParentNode()
+        coord.basePlanesNode = nil
+        guard showBasePlanes else { return }
+        let root = SCNNode()
+        root.name = "basePlanes"
+        root.renderingOrder = 4
+        // (plane normal, glow color) — normal axis picks the color.
+        let planes: [(normal: Vec3, color: UIColor)] = [
+            (Vec3(1, 0, 0), UIColor(red: 1.0, green: 0.28, blue: 0.28, alpha: 1)),  // YZ
+            (Vec3(0, 1, 0), UIColor(red: 0.30, green: 0.95, blue: 0.38, alpha: 1)),  // XZ
+            (Vec3(0, 0, 1), UIColor(red: 0.32, green: 0.56, blue: 1.0, alpha: 1)),  // XY
+        ]
+        for plane in planes {
+            root.addChildNode(Self.makeBasePlaneNode(normal: plane.normal,
+                                                     color: plane.color))
+        }
+        view.scene?.rootNode.addChildNode(root)
+        coord.basePlanesNode = root
+    }
+
+    /// One glowing base plane: a translucent quad centered on the
+    /// origin (fill reads at ~0.28 opacity) plus a brighter border
+    /// outline (~0.8), neither writing to the depth buffer so the
+    /// three planes blend where they cross instead of slicing each
+    /// other. SCNPlane faces +Z; the node is rotated so +Z lands on
+    /// the plane's normal.
+    static func makeBasePlaneNode(normal: Vec3, color: UIColor) -> SCNNode {
+        let node = SCNNode()
+        node.renderingOrder = 4
+        let fill = SCNMaterial()
+        fill.lightingModel = .constant
+        fill.diffuse.contents = color
+        fill.transparency = 1 - 0.28
+        fill.isDoubleSided = true
+        fill.writesToDepthBuffer = false
+        let quad = SCNPlane(width: 70, height: 70)
+        quad.materials = [fill]
+        node.addChildNode(SCNNode(geometry: quad))
+        let h = 35.0
+        let corners = [Vec3(-h, -h, 0), Vec3(h, -h, 0),
+                       Vec3(h, h, 0), Vec3(-h, h, 0)]
+        var segments: [(Vec3, Vec3)] = []
+        for i in 0..<4 {
+            segments.append((corners[i], corners[(i + 1) % 4]))
+        }
+        if let border = lineGeometry(segments: segments,
+                                     material: lineMaterial(color, opacity: 0.8)) {
+            node.addChildNode(SCNNode(geometry: border))
+        }
+        let zAxis = Vec3(0, 0, 1)
+        let cross = zAxis.cross(normal)
+        if cross.length > 1e-6 {
+            let axis = cross.normalized
+            let angle = acos(max(-1, min(1, zAxis.dot(normal))))
+            node.rotation = SCNVector4(Float(axis.x), Float(axis.y),
+                                       Float(axis.z), Float(angle))
+        } else if normal.z < 0 {
+            // Normal is straight −Z: flip the quad over.
+            node.rotation = SCNVector4(1, 0, 0, Float(Double.pi))
+        }
+        return node
     }
 
     // MARK: Sketch overlays

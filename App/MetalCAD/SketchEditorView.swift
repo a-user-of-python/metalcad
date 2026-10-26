@@ -440,11 +440,13 @@ struct SketchEditorView: View {
                     .padding(.vertical, 10)
                     .background(Capsule().fill(accent))
             }
+            .buttonStyle(.plain)
             Button("Done") { dismiss() }
                 .mcFont(20, weight: .semibold)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 10)
                 .background(Capsule().fill(Color.white.opacity(0.12)))
+                .buttonStyle(.plain)
             Spacer()
             Text("Finish & Extrude needs a closed profile.")
                 .mcFont(16)
@@ -1154,6 +1156,7 @@ struct SketchEditorView: View {
                         .padding(.horizontal, 16)
                         .padding(.vertical, 8)
                         .background(Capsule().fill(accent))
+                        .buttonStyle(.plain)
                     Button("Clear") { clearMeasurement() }
                     .mcFont(20, weight: .semibold)
                     Spacer()
@@ -1212,6 +1215,7 @@ struct SketchEditorView: View {
                     .padding(.horizontal, 16)
                     .padding(.vertical, 8)
                     .background(Capsule().fill(accent))
+                    .buttonStyle(.plain)
                 Spacer()
             }
             Text("Tap the canvas to set the baseline start. Then Extrude the sketch — Join embosses the letters, Cut engraves them. Text adds many small lines, so the sketch may go “heavy” (solver skipped).")
@@ -1614,6 +1618,7 @@ struct SketchEditorView: View {
                         .foregroundStyle(.black)
                         .padding(.horizontal, 14).padding(.vertical, 7)
                         .background(Capsule().fill(accent))
+                        .buttonStyle(.plain)
                 }
                 if !splinePoints.isEmpty {
                     Button("Cancel") { splinePoints = [] }

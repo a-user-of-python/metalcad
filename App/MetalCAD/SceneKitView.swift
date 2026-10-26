@@ -124,7 +124,7 @@ struct SceneKitView: UIViewRepresentable {
         var sketchTrack: UILongPressGestureRecognizer?
         var orbitPan: UIPanGestureRecognizer?
         var orbitPinch: UIPinchGestureRecognizer?
-        var pencilHover: UIPencilHoverGestureRecognizer?
+        var pencilHover: UIHoverGestureRecognizer?
         var sketchSessionNode: SCNNode?
         var sketchGridNode: SCNNode?
         var sketchDynamicNode: SCNNode?
@@ -260,7 +260,7 @@ struct SceneKitView: UIViewRepresentable {
 
         /// Apple Pencil hover: the snapped point follows the pencil
         /// before it ever touches, so the user can aim the stroke.
-        @objc func handlePencilHover(_ gesture: UIPencilHoverGestureRecognizer) {
+        @objc func handlePencilHover(_ gesture: UIHoverGestureRecognizer) {
             guard let view = gesture.view as? SCNView, let model = sketchModel,
                   let plane = model.activeSketch?.plane else { return }
             switch gesture.state {
@@ -537,7 +537,7 @@ struct SceneKitView: UIViewRepresentable {
         view.addGestureRecognizer(orbitPinch)
         context.coordinator.orbitPinch = orbitPinch
 
-        let hover = UIPencilHoverGestureRecognizer(
+        let hover = UIHoverGestureRecognizer(
             target: context.coordinator,
             action: #selector(Coordinator.handlePencilHover(_:)))
         hover.isEnabled = false

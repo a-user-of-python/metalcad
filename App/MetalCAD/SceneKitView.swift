@@ -348,7 +348,7 @@ struct SceneKitView: UIViewRepresentable {
         case .shaft(let fit):
             if let sleeve = Self.sleeveMesh(fit: fit, radius: fit.radius + 0.15) {
                 let node = SCNNode(geometry: Self.makeSleeveGeometry(
-                    sleeve, color: amberColor, opacity: 0.30))
+                    sleeve, color: Self.amberColor, opacity: 0.30))
                 node.renderingOrder = 9
                 root.addChildNode(node)
             }

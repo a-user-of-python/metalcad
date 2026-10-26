@@ -83,7 +83,16 @@ struct SceneKitView: UIViewRepresentable {
         scene.rootNode.addChildNode(ambientNode)
 
         let cameraNode = SCNNode()
-        cameraNode.camera = SCNCamera()
+        let cam = SCNCamera()
+        // The scene is in MILLIMETRES. SceneKit's default clip range
+        // (zNear 1, zFar 100) slices a 60 mm part framed from ~130 mm
+        // away: orbiting moved surfaces across the far plane and the
+        // model "clipped in and out of existence" (device report,
+        // 2026-10-26). Use a range fitted to mm-scale parts instead.
+        cam.zNear = 0.5
+        cam.zFar = 20_000
+        cam.automaticallyAdjustsZRange = false
+        cameraNode.camera = cam
         cameraNode.position = SCNVector3(70, 55, 95)
         cameraNode.look(at: SCNVector3(0, 0, 0))
         scene.rootNode.addChildNode(cameraNode)

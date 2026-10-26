@@ -475,27 +475,90 @@ public enum CylinderFitter {
             rMax = max(rMax, abs(radial))
             hMin = min(hMin, along); hMax = max(hMax, along)
         }
-        let radius = rSum / Double(verts.count)
-        guard radius > 0.05 else { return nil }
+        let radius0 = rSum / Double(verts.count)
+        guard radius0 > 0.05 else { return nil }
+        // Refine the axis point with an algebraic circle fit (Kasa)
+        // in the plane perpendicular to the axis. The raw vertex
+        // centroid is NOT the axis on CSG output: dicing clusters
+        // vertices unevenly around the wall, the centroid drifts off
+        // centre, and the residual check then rejects a true
+        // cylinder (device parts are all CSG output — a collar-split
+        // pillar patch measured radius 4.977 with worst residual
+        // 0.37 against a 0.149 tolerance and the fit failed). Points
+        // on a true circle satisfy the circle equation regardless
+        // of clustering, so the fitted centre is the honest axis.
+        let helper0 = abs(ax.z) < 0.9 ? Vec3(0, 0, 1) : Vec3(1, 0, 0)
+        let bu = helper0.cross(ax).normalized
+        let bw = ax.cross(bu)
+        var center = centroid
+        var radius = radius0
+        do {
+            var sx = 0.0, sy = 0.0, sxx = 0.0, syy = 0.0, sxy = 0.0
+            var sz = 0.0, sxz = 0.0, syz = 0.0
+            var n = 0.0
+            for vi in verts {
+                let d = m.vertices[vi] - centroid
+                let x = d.dot(bu), y = d.dot(bw)
+                let z = x * x + y * y
+                sx += x; sy += y; sxx += x * x; syy += y * y; sxy += x * y
+                sz += z; sxz += x * z; syz += y * z
+                n += 1
+            }
+            // Solve the 3x3 normal system by Cramer.
+            let a11 = sxx, a12 = sxy, a13 = sx
+            let a21 = sxy, a22 = syy, a23 = sy
+            let a31 = sx, a32 = sy, a33 = n
+            let b1 = -sxz, b2 = -syz, b3 = -sz
+            let det = a11 * (a22 * a33 - a23 * a32)
+                    - a12 * (a21 * a33 - a23 * a31)
+                    + a13 * (a21 * a32 - a22 * a31)
+            if abs(det) > 1e-9 {
+                let dA = b1 * (a22 * a33 - a23 * a32)
+                       - a12 * (b2 * a33 - a23 * b3)
+                       + a13 * (b2 * a32 - a22 * b3)
+                let dB = a11 * (b2 * a33 - a23 * b3)
+                       - b1 * (a21 * a33 - a23 * a31)
+                       + a13 * (a21 * b3 - b2 * a31)
+                let dC = a11 * (a22 * b3 - b2 * a32)
+                       - a12 * (a21 * b3 - b2 * a31)
+                       + b1 * (a21 * a32 - a22 * a31)
+                let A = dA / det, B = dB / det, C = dC / det
+                let cx = -A / 2, cy = -B / 2
+                let r2 = (A * A + B * B) / 4 - C
+                if r2 > 0 {
+                    let rFit = r2.squareRoot()
+                    if abs(rFit - radius0) < 0.25 * radius0,
+                       (cx * cx + cy * cy).squareRoot() < radius0 {
+                        center = centroid + bu * cx + bw * cy
+                        // Radius = mean distance to the fitted centre.
+                        var sum = 0.0
+                        for vi in verts {
+                            let d = m.vertices[vi] - center
+                            sum += (d - ax * d.dot(ax)).length
+                        }
+                        radius = sum / Double(verts.count)
+                    }
+                }
+            }
+        }
         // Residual check: every vertex must hug the cylinder.
         for vi in verts {
-            let d = m.vertices[vi] - centroid
+            let d = m.vertices[vi] - center
             let radial = (d - ax * d.dot(ax)).length
             if abs(radial - radius) > max(0.06, 0.03 * radius) { return nil }
         }
         // Angular coverage: a fillet is a true cylinder section too,
         // but it wraps only ~90 degrees, while a shaft or hole wall
         // wraps the full turn. Bin the patch vertices' angles around
-        // the axis (10-degree bins, around the axis point nearest the
-        // patch centroid — the fit's axis line passes through the
-        // centroid) and reject partial wraps so a fillet never
+        // the axis (10-degree bins, around the fitted axis point)
+        // and reject partial wraps so a fillet never
         // masquerades as a shaft.
         let helper = abs(ax.z) < 0.9 ? Vec3(0, 0, 1) : Vec3(1, 0, 0)
         let u = helper.cross(ax).normalized
         let w = ax.cross(u)
         var bins = Set<Int>()
         for vi in verts {
-            let d = m.vertices[vi] - centroid
+            let d = m.vertices[vi] - center
             let radialVec = d - ax * d.dot(ax)
             guard radialVec.length > radius * 0.5 else { continue }
             var angle = atan2(radialVec.dot(w), radialVec.dot(u))
@@ -503,7 +566,7 @@ public enum CylinderFitter {
             bins.insert(Int(angle / (10 * Double.pi / 180)))
         }
         guard Double(bins.count) * 10 >= 150 else { return nil }
-        let origin = centroid + ax * hMin
+        let origin = center + ax * hMin
         // Internal if a patch normal points TOWARD the axis.
         let t0 = patch.first!
         let tc = (m.vertices[Int(m.indices[t0 * 3])] + m.vertices[Int(m.indices[t0 * 3 + 1])] + m.vertices[Int(m.indices[t0 * 3 + 2])]) * (1.0 / 3)

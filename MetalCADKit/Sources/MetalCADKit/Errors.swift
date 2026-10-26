@@ -230,7 +230,7 @@ public enum CADError: Error, Equatable {
         case .booleanFailed(let d): return "The combine operation failed (\(d)). Both shapes are unchanged."
         case .booleanEmptyResult: return "That operation would leave nothing behind."
         case .filletFailed(let d): return "Couldn't round those edges (\(d)). A smaller radius may work."
-        case .filletRadiusTooLarge(let r, let m): return "Radius \(r) is too big here; the largest that fits is \(m)."
+        case .filletRadiusTooLarge(let r, let m): return "Radius \(String(format: "%.2f", r)) is too big here; the largest that fits is \(String(format: "%.2f", m))."
         case .chamferInvalid(let d): return "That chamfer doesn't fit (\(d))."
         case .shellFailed(let d): return "Couldn't hollow this shape (\(d))."
         case .patternCountInvalid: return "A pattern needs at least 1 copy and non-zero spacing."

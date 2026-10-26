@@ -534,9 +534,12 @@ final class EditorModel: ObservableObject {
         }
         selectedSketchID = nil
         // (a) EDGE — nearest sharp edge within 2.5 mm of the hit.
+        // Edges under 1.2 mm are ignored: they are tessellation
+        // noise (thread ridge facets measure ~0.65 mm), never a
+        // design edge a tap could mean (device report, 2026-10-26).
         var bestEdge: SolidEdge?
         var bestDist = 2.5
-        for edge in SolidEdgeExtractor.edges(of: mesh) {
+        for edge in SolidEdgeExtractor.edges(of: mesh) where edge.length >= 1.2 {
             let d = Self.distanceFromPointToSegment(point, edge.start, edge.end)
             if d < bestDist { bestDist = d; bestEdge = edge }
         }

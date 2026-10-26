@@ -308,30 +308,64 @@ public enum EdgeFinisher {
             throw isFillet ? CADError.filletFailed("\(edges.count) sharp edges — too many to finish at once")
                            : CADError.chamferInvalid("\(edges.count) sharp edges — too many to finish at once")
         }
-        var cutters: [Mesh] = [], adders: [Mesh] = []
-        for e in edges {
-            let region: [Vec2]
-            do {
-                region = try self.region(edge: e, value: value, isFillet: isFillet, valueB: valueB)
-            } catch let err as CADError {
-                // Find the largest value that fits every edge, so the error
-                // can name a radius/distance that would have worked.
-                if isFillet, case .filletRadiusTooLarge = err {
-                    var lo = 0.0, hi = value
-                    for _ in 0..<24 {
-                        let mid = (lo + hi) / 2
-                        var ok = true
-                        for e2 in edges {
-                            do { _ = try self.region(edge: e2, value: mid, isFillet: true) }
-                            catch { ok = false; break }
-                        }
-                        if ok { lo = mid } else { hi = mid }
-                    }
-                    throw CADError.filletRadiusTooLarge(requested: value, maxFeasible: lo)
-                }
-                throw err
+        // Feasibility ladder: try the requested value, then hair-smaller
+        // retries (at most 5% under — invisible). At EXACT tangency
+        // (radius = half the stock thickness, say) the region checks
+        // fail on a zero-width offset strip, not on real geometry:
+        // radius 2.0 on a 4 mm plate reported FT408 "largest that fits
+        // is 1.9750776…" while 1.98 mm rounds it perfectly well. Only
+        // when even the smallest retry fails is the value genuinely
+        // too big, and the error path below runs.
+        let ladder = [1.0, 0.999, 0.995, 0.99, 0.98, 0.95]
+        var regions: [[Vec2]]? = nil
+        var usedValue = value
+        var firstError: CADError? = nil
+        for f in ladder {
+            let v = value * f
+            let vB = valueB >= 0 ? valueB * f : valueB
+            var rs: [[Vec2]] = []
+            var failed: CADError? = nil
+            for e in edges {
+                do { rs.append(try self.region(edge: e, value: v, isFillet: isFillet, valueB: vB)) }
+                catch let err as CADError { failed = err; break }
             }
-            let p = prism(edge: e, region: region, overshoot: vmax)
+            if let failed {
+                if firstError == nil { firstError = failed }
+                continue
+            }
+            regions = rs
+            usedValue = v
+            break
+        }
+        guard let regions else {
+            let err = firstError ?? (isFillet ? CADError.filletFailed("no usable edges")
+                                              : CADError.chamferInvalid("no usable edges"))
+            // Find the largest value that fits every edge, so the error
+            // can name a radius/distance that would have worked.
+            if isFillet, case .filletRadiusTooLarge = err {
+                var lo = 0.0, hi = value
+                for _ in 0..<24 {
+                    let mid = (lo + hi) / 2
+                    var ok = true
+                    for e2 in edges {
+                        do { _ = try self.region(edge: e2, value: mid, isFillet: true) }
+                        catch { ok = false; break }
+                    }
+                    if ok { lo = mid } else { hi = mid }
+                }
+                throw CADError.filletRadiusTooLarge(requested: value, maxFeasible: lo)
+            }
+            throw err
+        }
+        var cutters: [Mesh] = [], adders: [Mesh] = []
+        for (e, region) in zip(edges, regions) {
+            // Cutters overshoot past the edge ends so the cut clears
+            // the corners. ADDERS get NO overshoot: the added wedge
+            // must stop at the edge's ends — past an open end (a slot
+            // floor edge meeting the part's side face) an overshooting
+            // wedge floats OUTSIDE the silhouette (bounds grew by the
+            // full distance on device parts, 2026-10-26).
+            let p = prism(edge: e, region: region, overshoot: e.isConvex ? vmax : 0)
             if e.isConvex { cutters.append(p) } else { adders.append(p) }
         }
         var result = body

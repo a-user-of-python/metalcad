@@ -337,19 +337,69 @@ public enum DocumentEngine {
                     warnings += tw
                     let ax = axis.normalized
                     let rOut = vspec.majorDiameter / 2
-                    var cutter = try Tessellation.cylinder(radius: rOut, height: vspec.length + 2, baseZ: -1)
-                    cutter = cutter.placed(axis: ax, origin: origin)
+                    // Measure the shaft's TRUE extent along its axis
+                    // from the body itself. The spec's length comes
+                    // from the app's fitted patch, which stops at
+                    // seams, fillet runouts and junctions and can
+                    // understate the shaft — on device, threads ended
+                    // short of the pillar's end (2026-10-26). Every
+                    // triangle lying wholly inside the shaft column
+                    // (radius major/2 + 0.5 around the axis line)
+                    // votes with its axial span; the thread covers
+                    // that whole span, or spec.length when longer.
+                    // (The triangle-whole test keeps stray in-column
+                    // vertices — a neighbouring hole's wall, a plate
+                    // corner — from stretching the span.)
+                    var lo = 0.0
+                    var hi = vspec.length
+                    for t in 0..<body.triangleCount {
+                        var sMin = Double.infinity
+                        var sMax = -Double.infinity
+                        var inside = true
+                        for k in 0..<3 {
+                            let v = body.vertices[Int(body.indices[t * 3 + k])]
+                            let d = v - origin
+                            let s = d.dot(ax)
+                            if (d - ax * s).length > rOut + 0.5 { inside = false; break }
+                            sMin = min(sMin, s)
+                            sMax = max(sMax, s)
+                        }
+                        if inside {
+                            lo = min(lo, sMin)
+                            hi = max(hi, sMax)
+                        }
+                    }
+                    var effSpec = vspec
+                    effSpec.length = hi - lo
+                    if effSpec.taperDegrees > 0 {
+                        // A longer span shrinks a tapered thread's far
+                        // end further; keep it from closing past the
+                        // minor diameter (validated() checked the
+                        // requested length, not the measured one).
+                        let maxLen = (effSpec.majorDiameter - effSpec.minorDiameter - 0.1)
+                            / (2 * tan(effSpec.taperDegrees * .pi / 180))
+                        effSpec.length = min(effSpec.length, max(maxLen, vspec.length))
+                    }
+                    let effOrigin = origin + ax * lo
+                    // The cutter is a hair WIDER than the shaft
+                    // (+0.05): a cutter exactly the shaft's radius is
+                    // coincident with the wall it must remove, and BSP
+                    // classification of coincident surfaces can leave
+                    // smooth patches of the old wall interrupting the
+                    // thread. The ridge crest defines the outside.
+                    var cutter = try Tessellation.cylinder(radius: rOut + 0.05, height: effSpec.length + 2, baseZ: -1)
+                    cutter = cutter.placed(axis: ax, origin: effOrigin)
                     var rest = try CSG.subtract(body, cutter)
-                    let core = try Tessellation.cylinder(radius: vspec.minorDiameter / 2,
-                                                         height: vspec.length, baseZ: 0,
-                                                         taperDegrees: vspec.taperDegrees)
-                        .placed(axis: ax, origin: origin)
+                    let core = try Tessellation.cylinder(radius: effSpec.minorDiameter / 2,
+                                                         height: effSpec.length, baseZ: 0,
+                                                         taperDegrees: effSpec.taperDegrees)
+                        .placed(axis: ax, origin: effOrigin)
                     rest = try CSG.union(rest, core)
-                    var ridge = try ThreadTessellator.ridgeMesh(spec: vspec)
-                    ridge = ridge.placed(axis: ax, origin: origin)
-                    ridge = ridge.keepingTriangles(axis: origin, axis: ax,
-                                                   between: -vspec.pitch * 0.5,
-                                                   and: vspec.length + vspec.pitch * 0.5)
+                    var ridge = try ThreadTessellator.ridgeMesh(spec: effSpec)
+                    ridge = ridge.placed(axis: ax, origin: effOrigin)
+                    ridge = ridge.keepingTriangles(axis: effOrigin, axis: ax,
+                                                   between: -effSpec.pitch * 0.5,
+                                                   and: effSpec.length + effSpec.pitch * 0.5)
                     rest.append(ridge)
                     body = rest
                     statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))

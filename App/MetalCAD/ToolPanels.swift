@@ -2596,6 +2596,9 @@ struct EdgeFinishPanel: View {
     private let featureName: String
 
     @State private var valueText: String = "2"
+    /// One-shot guard for the FT408/FT409 auto-snap: snap once per
+    /// panel presentation, never in a loop.
+    @State private var autoSnapUsed = false
 
     init(model: EditorModel, isFillet: Bool, source: EdgeFinishSource,
          close: @escaping () -> Void) {
@@ -2660,6 +2663,26 @@ struct EdgeFinishPanel: View {
         }
         .onAppear { refreshDraft() }
         .onChange(of: valueText) { _, _ in refreshDraft() }
+        .onReceive(model.$previewError) { err in
+            // When the live draft fails with FT408/FT409, snap the
+            // value ONCE to 99% of what fits and let the valueText
+            // onChange re-draft, instead of opening on a red error
+            // banner. FT408 carries the feasible maximum; FT409
+            // carries none, so step down from the current value. If
+            // the snapped value still fails, the banner shows.
+            guard !autoSnapUsed, let err, model.draftFeatures != nil,
+                  let current = Double(valueText), current > 0 else { return }
+            switch err {
+            case .filletRadiusTooLarge(_, let maxFeasible):
+                autoSnapUsed = true
+                valueText = mcFmt(maxFeasible * 0.99)
+            case .chamferInvalid:
+                autoSnapUsed = true
+                valueText = mcFmt(current * 0.99)
+            default:
+                break
+            }
+        }
     }
 
     private func apply() {
@@ -2672,9 +2695,11 @@ struct EdgeFinishPanel: View {
 
 /// Cut threads onto exactly the picked shaft. The fields mirror the
 /// feature editor's thread editor; the spec is prefilled from the
-/// fitted cylinder: a preset within 2% of the shaft diameter wins
-/// (keeping its pitch), otherwise major = the measured diameter and
-/// the pitch comes from the nearest smaller preset.
+/// MEASURED shaft: major diameter and length are the fit's numbers
+/// verbatim (never snapped to a preset — the selected shape's actual
+/// measurements win), and only the pitch is borrowed, from the
+/// nearest standard preset. Presets stay available in the picker
+/// as explicit choices.
 struct ThreadShaftPanel: View {
     @ObservedObject var model: EditorModel
     let close: () -> Void
@@ -2720,33 +2745,27 @@ struct ThreadShaftPanel: View {
         _clearanceText = State(initialValue: mcFmt(prefilled.clearance))
     }
 
-    /// Prefill rule: the first preset (list order) whose major
-    /// diameter is within 2% of the shaft's measured diameter wins,
-    /// keeping its pitch; otherwise a custom external spec with
-    /// major = measured diameter and the pitch of the nearest
-    /// smaller preset. Length = the shaft's height either way.
+    /// Prefill rule: the spec IS the measured shaft — major
+    /// diameter exactly 2 x fit radius, length exactly the fit
+    /// height. The pitch comes from the standard preset whose
+    /// major diameter is nearest the measured one (shown in the
+    /// Pitch field, editable). Nothing is snapped: if the user
+    /// wants M10's exact numbers they pick M10 in the Preset menu.
     private static func prefillSpec(diameter: Double, length: Double) -> ThreadSpec {
-        var bestSmaller: ThreadSpec?
+        var nearest: ThreadSpec?
         for name in presetNames {
             guard let p = try? ThreadSpec.preset(name) else { continue }
-            if abs(p.majorDiameter - diameter) <= 0.02 * diameter {
-                var match = p
-                match.kind = .external
-                match.length = length
-                return match
-            }
-            if p.majorDiameter < diameter,
-               bestSmaller == nil || p.majorDiameter > bestSmaller!.majorDiameter {
-                bestSmaller = p
+            if nearest == nil
+                || abs(p.majorDiameter - diameter) < abs(nearest!.majorDiameter - diameter) {
+                nearest = p
             }
         }
-        var custom = ThreadSpec()
-        custom.kind = .external
-        custom.majorDiameter = diameter
-        custom.pitch = bestSmaller?.pitch ?? 1.5
-        if let smaller = bestSmaller { custom.standard = smaller.standard }
-        custom.length = length
-        return custom
+        var s = ThreadSpec()
+        s.kind = .external
+        s.majorDiameter = diameter
+        s.pitch = nearest?.pitch ?? 1.5
+        s.length = length
+        return s
     }
 
     private func applyPreset(_ name: String) {

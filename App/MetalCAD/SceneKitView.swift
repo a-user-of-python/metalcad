@@ -214,11 +214,19 @@ struct SceneKitView: UIViewRepresentable {
             guard let node = modelNode else { return nil }
             let near3 = view.unprojectPoint(SCNVector3(Float(point.x), Float(point.y), 0))
             let far3 = view.unprojectPoint(SCNVector3(Float(point.x), Float(point.y), 1))
-            let hits = node.hitTestWithSegment(
-                from: near3, to: far3,
-                options: [SCNHitTestSearchModeKey: NSNumber(value: SCNHitTestSearchMode.closest.rawValue),
-                          SCNHitTestBoundingBoxOnlyKey: NSNumber(value: false)])
-            guard let hit = hits.first else { return nil }
+            // No options dictionary: this SDK's segment hit-test
+            // takes String keys whose named constants aren't in
+            // scope, and the defaults (bounding-box-only off) are
+            // what we want anyway. "Closest" is picked explicitly
+            // by distance from the segment start, so the choice
+            // doesn't depend on result ordering.
+            let hits = node.hitTestWithSegment(from: near3, to: far3, options: nil)
+            let o = Vec3(Double(near3.x), Double(near3.y), Double(near3.z))
+            guard let hit = hits.min(by: { a, b in
+                let aw = a.worldCoordinates, bw = b.worldCoordinates
+                return o.distance(to: Vec3(Double(aw.x), Double(aw.y), Double(aw.z)))
+                     < o.distance(to: Vec3(Double(bw.x), Double(bw.y), Double(bw.z)))
+            }) else { return nil }
             let c = hit.localCoordinates
             return (hit.faceIndex, Vec3(Double(c.x), Double(c.y), Double(c.z)))
         }

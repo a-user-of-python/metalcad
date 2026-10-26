@@ -591,13 +591,8 @@ struct EditorView: View {
     @State private var sectionSlider: Double = 0.5
     @State private var sectionedMesh: Mesh?
 
-    var body: some View {
-        NavigationStack {
-            VStack(spacing: 0) {
-                headerStrip
-                Divider()
-                ribbon
-                Divider()
+    @ViewBuilder
+    private var mainRow: some View {
                 HStack(spacing: 0) {
                     if browserPanelWidth > 0 {
                         browserPanel
@@ -634,6 +629,16 @@ struct EditorView: View {
                         .background(Color.white.opacity(0.03))
                     }
                 }
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                headerStrip
+                Divider()
+                ribbon
+                Divider()
+                mainRow
             }
             .navigationTitle(model.document.name)
             .navigationBarTitleDisplayMode(.inline)

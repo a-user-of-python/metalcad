@@ -834,10 +834,12 @@ struct EditorView: View {
                     if browserPanelWidth > 0 {
                         browserPanel
                             .frame(width: browserPanelWidth)
+                            .onAppear { CrashTrace.mark("ui: browser") }
                     }
                     panelDragHandle
                     centerColumn
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .onAppear { CrashTrace.mark("ui: center") }
                     if let tool = activeTool {
                         Divider()
                         ScrollView {
@@ -890,6 +892,7 @@ struct EditorView: View {
         NavigationStack {
             VStack(spacing: 0) {
                 headerStrip
+                    .onAppear { CrashTrace.mark("ui: header") }
                 Divider()
                 ribbon
                 Divider()
@@ -937,7 +940,8 @@ struct EditorView: View {
     }
 
     var body: some View {
-        withMaterialSheet
+        CrashTrace.mark("body: begin")
+        let built = withMaterialSheet
             .sheet(item: $featureToEdit) { feature in
                 FeatureEditorSheet(
                     feature: feature,
@@ -981,6 +985,8 @@ struct EditorView: View {
                 Text("Rename “\(target.currentName)”")
             }
             .onAppear { CrashTrace.mark("editor: appeared") }
+        CrashTrace.mark("body: built")
+        return built
     }
 
     private var renamePresented: Binding<Bool> {

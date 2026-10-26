@@ -240,6 +240,7 @@ struct SceneKitView: UIViewRepresentable {
     }
 
     func makeUIView(context: Context) -> SCNView {
+        CrashTrace.mark("scene: make begin")
         let view = SCNView()
         view.backgroundColor = UIColor(red: 0.07, green: 0.08, blue: 0.11, alpha: 1)
         view.allowsCameraControl = true
@@ -323,10 +324,12 @@ struct SceneKitView: UIViewRepresentable {
         doubleTap.numberOfTapsRequired = 2
         view.addGestureRecognizer(doubleTap)
 
+        CrashTrace.mark("scene: make done")
         return view
     }
 
     func updateUIView(_ view: SCNView, context: Context) {
+        CrashTrace.mark("scene: update begin")
         context.coordinator.onFacePicked = onFacePicked
         context.coordinator.onSketchPicked = onSketchPicked
         context.coordinator.onModelHit = onModelHit
@@ -362,6 +365,7 @@ struct SceneKitView: UIViewRepresentable {
         updateOverlays(view, context: context)
         updateSelection(view, context: context)
         updateMeasure(view, context: context)
+        CrashTrace.mark("scene: after overlays")
 
         // Identity for "geometry must be rebuilt": mesh shape +
         // material + preview state + accent (the preview tint reads
@@ -391,6 +395,7 @@ struct SceneKitView: UIViewRepresentable {
                 context.coordinator.framed = true
             }
         }
+        CrashTrace.mark("scene: after geometry")
 
         // Remember the camera exactly as it stands (restored,
         // framed, or orbited since) so the next recreation — or the

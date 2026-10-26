@@ -92,6 +92,17 @@ final class EditorModel: ObservableObject {
     /// Face the Measure panel should preselect as Face A when it next
     /// opens (set by the picked-face bar's "Measure").
     @Published var measureFace: PlanarFace?
+    // MARK: Quick measure (always-on point-to-point, 3D view)
+    /// While true, normal-mode model taps feed the quick measure
+    /// (see `recordMeasureTap`) instead of the picked-selection
+    /// resolution. Face-pick mode still wins — SceneKitView checks
+    /// it before reporting a normal-mode hit.
+    @Published var measureMode: Bool = false
+    /// The 0–2 tapped points of the current quick measurement.
+    @Published var measurePoints: [Vec3] = []
+    /// Length of the sharp edge the latest measure tap landed on
+    /// (within 2.5 mm, the selection flow's edge resolution), if any.
+    @Published var measureEdgeLength: Double?
     // MARK: Live draft preview (uncommitted feature changes)
     /// The feature list the live preview shows, or nil when no panel
     /// is drafting. Panels keep this in sync with their fields (see
@@ -452,6 +463,40 @@ final class EditorModel: ObservableObject {
         return sketch
     }
 
+    // MARK: Quick measure taps
+
+    /// Record one quick-measure tap (measure mode): the first tap
+    /// sets point A, the second sets B — the readout distance is the
+    /// plain Euclidean A–B distance — and a third tap clears and
+    /// starts a new A. Also notes the length when the tap lands on a
+    /// sharp edge, using the same 2.5 mm edge resolution as the
+    /// selection flow. Silent like picking: never raises the banner.
+    func recordMeasureTap(triangleIndex: Int, point: Vec3) {
+        if let mesh = rebuild?.mesh, mesh.triangleCount > 0 {
+            var bestEdge: SolidEdge?
+            var bestDist = 2.5
+            for edge in SolidEdgeExtractor.edges(of: mesh) {
+                let d = Self.distanceFromPointToSegment(point, edge.start, edge.end)
+                if d < bestDist { bestDist = d; bestEdge = edge }
+            }
+            measureEdgeLength = bestEdge?.length
+        } else {
+            measureEdgeLength = nil
+        }
+        if measurePoints.count >= 2 {
+            measurePoints = [point]
+        } else {
+            measurePoints.append(point)
+        }
+    }
+
+    /// Drop the quick measurement (points + edge note). The measure
+    /// MODE stays as it is — clearing is about the readout.
+    func clearMeasure() {
+        measurePoints = []
+        measureEdgeLength = nil
+    }
+
     // MARK: Selection-first picking (tap the model, then act on it)
 
     func clearPicked() { picked = nil }
@@ -711,7 +756,9 @@ struct EditorView: View {
         .onChange(of: baseMeshKey) { _, _ in
             // The result mesh changed — any picked face/edge/shaft
             // referred to the old geometry, so drop the selection.
+            // Quick-measure points referred to it too.
             model.clearPicked()
+            model.clearMeasure()
             if sectionOn { refreshSection() }
         }
     }
@@ -1099,6 +1146,10 @@ struct EditorView: View {
                     isPickingFace: pickingFace,
                     onFacePicked: { index in handleFacePicked(index) },
                     onSketchPicked: { id in
+                        // In quick-measure mode a tap that misses the
+                        // model is just a miss — it must not start
+                        // selecting sketches underneath the user.
+                        guard !model.measureMode else { return }
                         // Sketch and model selections are mutually
                         // exclusive — whichever was tapped last wins.
                         model.clearPicked()
@@ -1106,12 +1157,21 @@ struct EditorView: View {
                     },
                     picked: model.picked,
                     pickedMesh: model.rebuild?.mesh ?? Mesh(),
+                    measurePoints: model.measurePoints,
                     onModelHit: { triangleIndex, point in
                         // In section view the displayed mesh is the
                         // cut mesh, whose triangle indices don't map
                         // to the result mesh — taps select nothing.
                         guard !sectionOn else { return }
-                        model.resolveModelTap(triangleIndex: triangleIndex, point: point)
+                        // Quick measure armed: the tap records a
+                        // measure point instead of resolving a picked
+                        // selection. (Face-pick mode never reaches
+                        // here — SceneKitView routes it first.)
+                        if model.measureMode {
+                            model.recordMeasureTap(triangleIndex: triangleIndex, point: point)
+                        } else {
+                            model.resolveModelTap(triangleIndex: triangleIndex, point: point)
+                        }
                     },
                     onModelDoubleTap: { triangleIndex, point in
                         handleModelDoubleTap(triangleIndex: triangleIndex, point: point)
@@ -1130,6 +1190,25 @@ struct EditorView: View {
                 if quickActive {
                     quickPressPullCard
                 }
+                // Quick-measure chrome, pinned to the TOP of the
+                // viewport so it never collides with the bottom
+                // action bars or the quick press/pull card: the
+                // readout (top-left) shows whenever a measurement
+                // exists — even after measure mode is toggled off —
+                // and the toggle (top-right) is always there.
+                VStack(spacing: 0) {
+                    HStack(alignment: .top, spacing: 10) {
+                        if model.measureMode || !model.measurePoints.isEmpty
+                            || model.measureEdgeLength != nil {
+                            measureReadoutCard
+                        }
+                        Spacer()
+                        measureToggleButton
+                    }
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(10)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             if sectionOn {
@@ -1524,7 +1603,8 @@ struct EditorView: View {
     /// actions live in the picked bar); empty space never reaches
     /// here. Silent by design, like resolveModelTap.
     private func handleModelDoubleTap(triangleIndex: Int, point: Vec3) {
-        guard !sectionOn, activeTool == nil, !pickingFace, !quickActive else { return }
+        guard !sectionOn, activeTool == nil, !pickingFace, !quickActive,
+              !model.measureMode else { return }
         model.resolveModelTap(triangleIndex: triangleIndex, point: point)
         guard case .face(_, let face, _) = model.picked else { return }
         quickFace = face
@@ -1571,6 +1651,78 @@ struct EditorView: View {
         .background(RoundedRectangle(cornerRadius: 14).fill(Color.black.opacity(0.80)))
         .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.orange.opacity(0.5), lineWidth: 1))
         .padding(10)
+    }
+
+    // MARK: Quick measure (always-on, tap two points)
+
+    /// The quick-measure toggle pinned to the viewport's top-right
+    /// corner: always visible, whatever else the viewport is doing.
+    /// Filled orange while measure mode is armed.
+    private var measureToggleButton: some View {
+        Button {
+            model.measureMode.toggle()
+        } label: {
+            HStack(spacing: 7) {
+                Image(systemName: "ruler")
+                    .mcFont(22, weight: .bold)
+                Text("Measure")
+                    .mcFont(18, weight: .bold)
+            }
+            .foregroundStyle(model.measureMode ? Color.black : Color.primary)
+            .padding(.horizontal, 14)
+            .frame(minHeight: 48)
+            .background(RoundedRectangle(cornerRadius: 12)
+                .fill(model.measureMode ? Color.orange : Color.black.opacity(0.75)))
+            .overlay(RoundedRectangle(cornerRadius: 12)
+                .stroke(Color.orange.opacity(0.5), lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Toggle quick measure")
+    }
+
+    /// The quick-measure readout, pinned top-left of the viewport.
+    /// Visible while measuring (as a hint) and for as long as a
+    /// measurement exists — it outlives the mode toggle and only
+    /// goes away via its ✕ (or a rebuild, like the selection).
+    /// "Distance" is the honest point-to-point distance; when a tap
+    /// landed on a sharp edge, that edge's length rides along.
+    private var measureReadoutCard: some View {
+        HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                if model.measurePoints.count == 2 {
+                    Text("Distance \(mcFmt(model.measurePoints[0].distance(to: model.measurePoints[1]))) mm")
+                        .mcFont(21, weight: .bold)
+                        .lineLimit(1)
+                } else if model.measurePoints.count == 1 {
+                    Text("Tap a second point")
+                        .mcFont(19, weight: .semibold)
+                        .foregroundStyle(.secondary)
+                } else if model.measureMode {
+                    Text("Tap two points on the model")
+                        .mcFont(19, weight: .semibold)
+                        .foregroundStyle(.secondary)
+                }
+                if let edge = model.measureEdgeLength {
+                    Text("Edge \(mcFmt(edge)) mm")
+                        .mcFont(17, weight: .semibold)
+                        .foregroundStyle(.orange)
+                }
+            }
+            if !model.measurePoints.isEmpty || model.measureEdgeLength != nil {
+                Button {
+                    model.clearMeasure()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .mcFont(22)
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Clear measurement")
+            }
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 14).fill(Color.black.opacity(0.75)))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.orange.opacity(0.5), lineWidth: 1))
     }
 
     private func actionBarButton(_ label: String, icon: String,

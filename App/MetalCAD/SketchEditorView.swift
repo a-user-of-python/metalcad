@@ -122,6 +122,12 @@ struct SketchEditorView: View {
     @State private var measureA: SketchPointRef?
     @State private var measureB: SketchPointRef?
     @State private var measureText = ""
+    /// Circle-diameter measurement (tap a circle with the Measure
+    /// tool): center + radius snapshots, cleared with the rest of
+    /// the measurement. Separate from the A/B point pair — a tap on
+    /// a circle REPLACES the current measurement, and vice versa.
+    @State private var measureDiaCenter: Vec2?
+    @State private var measureDiaRadius: Double?
 
     // v4 draw-tool state (one variable per @State — see the note above).
     @State private var splinePoints: [Vec2] = []
@@ -380,6 +386,9 @@ struct SketchEditorView: View {
                 if tool == .measure {
                     measureCard
                 }
+                if tool != .measure && hasMeasurement {
+                    measureReadoutRow
+                }
                 if tool == .text {
                     textCard
                 }
@@ -587,7 +596,7 @@ struct SketchEditorView: View {
         case .select:
             selectNearest(to: raw, scale: ft.scale)
         case .measure:
-            pickMeasurePoint(at: raw, scale: ft.scale)
+            pickMeasurePoint(at: p, scale: ft.scale)
         case .line:
             if let start = pending {
                 if start.distance(to: p) > 1e-9 {
@@ -817,6 +826,30 @@ struct SketchEditorView: View {
         if let b = pointB {
             drawMeasureMarker(ctx, at: t.toView(b, in: size), letter: "B", color: .orange)
         }
+        // The measured distance, labelled on the span itself — the
+        // readout that stays on the canvas whatever tool is active.
+        if let a = pointA, let b = pointB {
+            let mid = t.toView((a + b) * 0.5, in: size)
+            let label = Text("\(mcFmt(a.distance(to: b))) mm")
+                .font(Font.system(size: MCTypeScale.scaled(15, for: dynamicTypeSize), weight: .bold))
+                .foregroundColor(.orange)
+            ctx.draw(label, at: CGPoint(x: mid.x, y: mid.y - 18))
+        }
+
+        // Circle diameter measurement: a dashed line straight
+        // across the circle through its center, labelled "Ø …".
+        if let c = measureDiaCenter, let r = measureDiaRadius {
+            var dia = Path()
+            dia.move(to: t.toView(c + Vec2(-r, 0), in: size))
+            dia.addLine(to: t.toView(c + Vec2(r, 0), in: size))
+            ctx.stroke(dia, with: .color(.orange),
+                       style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
+            let cv = t.toView(c, in: size)
+            let label = Text("Ø \(mcFmt(r * 2)) mm")
+                .font(Font.system(size: MCTypeScale.scaled(15, for: dynamicTypeSize), weight: .bold))
+                .foregroundColor(.orange)
+            ctx.draw(label, at: CGPoint(x: cv.x, y: cv.y - r * t.scale - 16))
+        }
 
         // Spline in progress: the sampled curve through the tapped
         // points (plus the live pointer as a tentative last point).
@@ -914,6 +947,24 @@ struct SketchEditorView: View {
 
     // MARK: Measure tool
 
+    private static func distanceToSegment(_ p: Vec2, _ a: Vec2, _ b: Vec2) -> Double {
+        let ab = b - a
+        let len2 = ab.dot(ab)
+        guard len2 > 1e-12 else { return p.distance(to: a) }
+        let t = max(0, min(1, (p - a).dot(ab) / len2))
+        return p.distance(to: a + ab * t)
+    }
+
+    /// One tap of the Measure tool (the caller passes the SNAPPED
+    /// point, so endpoints/centers are easy to hit). Resolution, in
+    /// order:
+    ///  1. An addressable point (line end, center, standalone point)
+    ///     starts or completes the two-tap point-to-point flow.
+    ///  2. A tap ON a line, away from its ends, measures that line:
+    ///     its end refs become A/B, so the length shows with the
+    ///     usual markers, span and canvas label.
+    ///  3. A tap on a circle's outline measures its diameter.
+    /// Each new measurement replaces the previous one.
     private func pickMeasurePoint(at p: Vec2, scale: Double) {
         let threshold = 16 / max(scale, 0.001)
         var best: (ref: SketchPointRef, point: Vec2, dist: Double)?
@@ -926,16 +977,103 @@ struct SketchEditorView: View {
                 best = (cand.ref, cand.point, d)
             }
         }
-        guard let hit = best else { return }
-        if measureA == nil || measureB != nil {
-            // Start (or restart) the pair.
-            measureA = hit.ref
+        if let hit = best {
+            measureDiaCenter = nil
+            measureDiaRadius = nil
+            if measureA == nil || measureB != nil {
+                // Start (or restart) the pair.
+                measureA = hit.ref
+                measureB = nil
+                measureText = ""
+            } else {
+                measureB = hit.ref
+                refreshMeasureText()
+            }
+            return
+        }
+        // Entity taps: nearest line (by segment distance) or circle
+        // (by outline distance) within the same threshold.
+        var bestEntity: (id: Int, dist: Double)?
+        for e in working.entities {
+            let d: Double
+            switch e {
+            case .line(_, let a, let b, _):
+                d = Self.distanceToSegment(p, a, b)
+            case .circle(_, let c, let r, _):
+                d = abs(p.distance(to: c) - r)
+            default:
+                continue
+            }
+            guard d <= threshold else { continue }
+            if d < (bestEntity?.dist ?? Double.greatestFiniteMagnitude) {
+                bestEntity = (e.id, d)
+            }
+        }
+        guard let hitEntity = bestEntity,
+              let e = working.entity(hitEntity.id) else { return }
+        switch e {
+        case .line(let id, _, _, _):
+            measureDiaCenter = nil
+            measureDiaRadius = nil
+            measureA = SketchPointRef(entityID: id, kind: .start)
+            measureB = SketchPointRef(entityID: id, kind: .end)
+            refreshMeasureText()
+        case .circle(_, let c, let r, _):
+            measureA = nil
             measureB = nil
             measureText = ""
-        } else {
-            measureB = hit.ref
-            refreshMeasureText()
+            measureDiaCenter = c
+            measureDiaRadius = r
+        default:
+            break
         }
+    }
+
+    /// Clear every part of the current measurement (point pair and
+    /// diameter alike) — the canvas span/label and the readouts all
+    /// key off this state.
+    private func clearMeasurement() {
+        measureA = nil
+        measureB = nil
+        measureText = ""
+        measureDiaCenter = nil
+        measureDiaRadius = nil
+    }
+
+    /// True while any measurement is on display (a picked point, a
+    /// finished pair, or a circle diameter).
+    private var hasMeasurement: Bool {
+        measureA != nil || measureDiaCenter != nil
+    }
+
+    private var measureReadoutText: String {
+        if let r = measureDiaRadius {
+            return "Ø \(mcFmt(r * 2)) mm"
+        }
+        if let a = measureA?.resolve(in: working),
+           let b = measureB?.resolve(in: working) {
+            return "Distance \(mcFmt(a.distance(to: b))) mm"
+        }
+        if measureA != nil { return "Tap the second point" }
+        return ""
+    }
+
+    /// The measurement, kept on screen after the Measure tool is
+    /// switched away (the full card only shows with the tool): a
+    /// slim row under the toolbar with the value and its Clear.
+    private var measureReadoutRow: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "ruler")
+                .mcFont(20, weight: .bold)
+                .foregroundStyle(.orange)
+            Text(measureReadoutText)
+                .mcFont(19, weight: .semibold)
+            Spacer()
+            Button("Clear") { clearMeasurement() }
+                .mcFont(19, weight: .semibold)
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.06)))
     }
 
     private func refreshMeasureText() {
@@ -978,13 +1116,25 @@ struct SketchEditorView: View {
 
     private var measureCard: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Measure — tap two points (line ends, centers, points)")
+            Text("Measure — tap two points, a line for its length, or a circle for its diameter")
                 .mcFont(20, weight: .bold)
             HStack(spacing: 18) {
                 Text("A: \(measureA?.shortLabel ?? "—")")
                 Text("B: \(measureB?.shortLabel ?? "—")")
             }
             .mcFont(19, weight: .semibold)
+            if let r = measureDiaRadius {
+                HStack(spacing: 10) {
+                    Text("Circle diameter")
+                        .mcFont(20, weight: .semibold)
+                    Text("Ø \(mcFmt(r * 2)) mm")
+                        .mcFont(22, weight: .bold)
+                        .foregroundStyle(.orange)
+                    Button("Clear") { clearMeasurement() }
+                        .mcFont(20, weight: .semibold)
+                    Spacer()
+                }
+            }
             if measureA != nil && measureB != nil {
                 HStack(spacing: 10) {
                     Text("Distance")
@@ -1002,18 +1152,14 @@ struct SketchEditorView: View {
                         .padding(.horizontal, 16)
                         .padding(.vertical, 8)
                         .background(Capsule().fill(Color.orange))
-                    Button("Clear") {
-                        measureA = nil
-                        measureB = nil
-                        measureText = ""
-                    }
+                    Button("Clear") { clearMeasurement() }
                     .mcFont(20, weight: .semibold)
                     Spacer()
                 }
                 Text("Type a new distance and Apply: an existing Distance dimension is updated, otherwise point B moves to the new distance and the sketch re-solves.")
                     .mcFont(16)
                     .foregroundStyle(.secondary)
-            } else {
+            } else if measureDiaRadius == nil {
                 Text(measureA == nil ? "Tap the first point." : "Tap the second point.")
                     .mcFont(18, weight: .semibold)
                     .foregroundStyle(.yellow)
@@ -1375,19 +1521,39 @@ struct SketchEditorView: View {
 
     private var toolBar: some View {
         VStack(spacing: 8) {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(Tool.allCases, id: \.self) { option in
-                        Button(option.rawValue) {
-                            tool = option
-                            pending = nil
-                            splinePoints = []
-                            slotTaps = []
+            HStack(spacing: 8) {
+                // Measure is PINNED outside the scrolling tool row:
+                // always visible, never scrolled off or in a submenu
+                // — measuring is a universal action, not one tool
+                // among many. Same styling as the tool capsules.
+                Button {
+                    tool = .measure
+                    pending = nil
+                    splinePoints = []
+                    slotTaps = []
+                } label: {
+                    Label("Measure", systemImage: "ruler")
+                }
+                .mcFont(20, weight: .semibold)
+                .foregroundStyle(tool == .measure ? .black : .accentColor)
+                .padding(.horizontal, 12).padding(.vertical, 8)
+                .background(Capsule().fill(tool == .measure ? Color.yellow : Color.clear))
+                .overlay(Capsule().stroke(Color.yellow.opacity(tool == .measure ? 0 : 0.45),
+                                          lineWidth: 1))
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(Tool.allCases.filter { $0 != .measure }, id: \.self) { option in
+                            Button(option.rawValue) {
+                                tool = option
+                                pending = nil
+                                splinePoints = []
+                                slotTaps = []
+                            }
+                            .mcFont(20, weight: .semibold)
+                            .foregroundStyle(tool == option ? .black : .accentColor)
+                            .padding(.horizontal, 12).padding(.vertical, 8)
+                            .background(Capsule().fill(tool == option ? Color.yellow : Color.clear))
                         }
-                        .mcFont(20, weight: .semibold)
-                        .foregroundStyle(tool == option ? .black : .accentColor)
-                        .padding(.horizontal, 12).padding(.vertical, 8)
-                        .background(Capsule().fill(tool == option ? Color.yellow : Color.clear))
                     }
                 }
             }

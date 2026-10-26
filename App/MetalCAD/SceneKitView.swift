@@ -39,6 +39,10 @@ struct SceneKitView: UIViewRepresentable {
     /// The result mesh `picked` was resolved against — face
     /// highlights index into its grouped faces.
     var pickedMesh: Mesh = Mesh()
+    /// Tapped points of the always-on quick measure (0–2), drawn as
+    /// amber sphere markers plus a span line — the "measure" node,
+    /// never hit-tested (every pick filters to the model node).
+    var measurePoints: [Vec3] = []
     /// Called when a NORMAL-mode tap lands on the model: the welded
     /// triangle index and the hit point (model-node local coords —
     /// the node sits at the origin, so these are scene coords).
@@ -56,10 +60,12 @@ struct SceneKitView: UIViewRepresentable {
         var ghostKey: String = ""
         var overlayKey: String = ""
         var selectionKey: String = ""
+        var measureKey: String = ""
         var modelNode: SCNNode?
         var ghostNode: SCNNode?
         var overlayNode: SCNNode?
         var selectionNode: SCNNode?
+        var measureNode: SCNNode?
         var cameraNode: SCNNode?
         var framed: Bool = false
         var onFacePicked: ((Int) -> Void)?
@@ -277,6 +283,7 @@ struct SceneKitView: UIViewRepresentable {
         updateGhost(view, context: context)
         updateOverlays(view, context: context)
         updateSelection(view, context: context)
+        updateMeasure(view, context: context)
 
         // Identity for "geometry must be rebuilt": mesh shape + material.
         let mat = material ?? MaterialLibrary.defaultMaterial
@@ -409,6 +416,73 @@ struct SceneKitView: UIViewRepresentable {
         }
         view.scene?.rootNode.addChildNode(root)
         coord.selectionNode = root
+    }
+
+    // MARK: Quick-measure markers
+
+    /// Change fingerprint for the measure markers: the points
+    /// themselves, so moving a point (or clearing) rebuilds the node.
+    static func measureKey(points: [Vec3]) -> String {
+        points.map { String(format: "%.3f,%.3f,%.3f", $0.x, $0.y, $0.z) }
+            .joined(separator: ";")
+    }
+
+    /// Keep the measure marker node in sync with `measurePoints`:
+    /// an amber sphere at each tapped point and, once two points
+    /// exist, a slim amber cylinder for the A–B span (a cylinder,
+    /// not a 1 px line, so it reads at any zoom — same trick as the
+    /// edge highlight). Named "measure", renderingOrder 9 like the
+    /// selection highlight, and never hit-tested: every pick in the
+    /// coordinator filters to the model node only.
+    private func updateMeasure(_ view: SCNView, context: Context) {
+        let coord = context.coordinator
+        let key = Self.measureKey(points: measurePoints)
+        guard coord.measureKey != key else { return }
+        coord.measureKey = key
+        coord.measureNode?.removeFromParentNode()
+        coord.measureNode = nil
+        guard !measurePoints.isEmpty else { return }
+        let root = SCNNode()
+        root.name = "measure"
+        root.renderingOrder = 9
+        let mat = SCNMaterial()
+        mat.lightingModel = .constant
+        mat.diffuse.contents = Self.amberColor
+        mat.isDoubleSided = true
+        for p in measurePoints {
+            let sphere = SCNSphere(radius: 1.4)
+            sphere.materials = [mat]
+            let sNode = SCNNode(geometry: sphere)
+            sNode.position = SCNVector3(Float(p.x), Float(p.y), Float(p.z))
+            root.addChildNode(sNode)
+        }
+        if measurePoints.count == 2 {
+            let a = measurePoints[0], b = measurePoints[1]
+            let length = a.distance(to: b)
+            if length > 1e-6 {
+                let cylinder = SCNCylinder(radius: 0.5, height: CGFloat(length))
+                cylinder.materials = [mat]
+                let cylNode = SCNNode(geometry: cylinder)
+                let mid = (a + b) * 0.5
+                cylNode.position = SCNVector3(Float(mid.x), Float(mid.y), Float(mid.z))
+                // SCNCylinder runs along +Y; rotate +Y onto A→B.
+                let up = Vec3(0, 1, 0)
+                let dir = (b - a).normalized
+                let cross = up.cross(dir)
+                if cross.length > 1e-6 {
+                    let axis = cross.normalized
+                    let angle = acos(max(-1, min(1, up.dot(dir))))
+                    cylNode.rotation = SCNVector4(Float(axis.x), Float(axis.y),
+                                                  Float(axis.z), Float(angle))
+                } else if dir.y < 0 {
+                    // Span runs straight down: flip the cylinder.
+                    cylNode.rotation = SCNVector4(1, 0, 0, Float(Double.pi))
+                }
+                root.addChildNode(cylNode)
+            }
+        }
+        view.scene?.rootNode.addChildNode(root)
+        coord.measureNode = root
     }
 
     /// Flat triangle soup for one grouped face of the mesh, in the

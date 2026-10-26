@@ -16,7 +16,7 @@ struct DiagnosticsView: View {
                 Section("Last error") {
                     if let code = lastCode {
                         Text(code)
-                            .font(.system(size: 34, weight: .bold, design: .monospaced))
+                            .mcFont(34, weight: .bold, design: .monospaced)
                             .foregroundStyle(.red)
                         Button {
                             UIPasteboard.general.string = code
@@ -24,11 +24,11 @@ struct DiagnosticsView: View {
                         } label: {
                             Label(copied ? "Copied" : "Copy last error code",
                                   systemImage: "doc.on.doc")
-                                .font(.system(size: 20, weight: .semibold))
+                                .mcFont(20, weight: .semibold)
                         }
                     } else {
                         Text("No errors yet")
-                            .font(.system(size: 24, weight: .bold))
+                            .mcFont(24, weight: .bold)
                             .foregroundStyle(.green)
                     }
                 }
@@ -37,24 +37,24 @@ struct DiagnosticsView: View {
                     if let url = logFileURL {
                         ShareLink(item: url) {
                             Label("Export log", systemImage: "square.and.arrow.up")
-                                .font(.system(size: 20, weight: .semibold))
+                                .mcFont(20, weight: .semibold)
                         }
                     }
                     Button {
                         refresh()
                     } label: {
                         Label("Refresh", systemImage: "arrow.clockwise")
-                            .font(.system(size: 20, weight: .semibold))
+                            .mcFont(20, weight: .semibold)
                     }
                     Text("\(entries.count) recent entries · \(MCLog.shared.entryCount) total in buffer")
-                        .font(.system(size: 17))
+                        .mcFont(17)
                         .foregroundStyle(.secondary)
                 }
 
                 Section("Recent log") {
                     if entries.isEmpty {
                         Text("Nothing logged yet.")
-                            .font(.system(size: 19))
+                            .mcFont(19)
                             .foregroundStyle(.secondary)
                     }
                     ForEach(Array(entries.reversed().enumerated()), id: \.offset) { _, entry in
@@ -65,18 +65,18 @@ struct DiagnosticsView: View {
                 Section("App") {
                     HStack {
                         Text("Version")
-                            .font(.system(size: 20))
+                            .mcFont(20)
                         Spacer()
                         Text(appVersion)
-                            .font(.system(size: 20, design: .monospaced))
+                            .mcFont(20, design: .monospaced)
                             .foregroundStyle(.secondary)
                     }
                     HStack {
                         Text("Error codes in catalog")
-                            .font(.system(size: 20))
+                            .mcFont(20)
                         Spacer()
                         Text("\(CADErrorCatalog.allCodes.count)")
-                            .font(.system(size: 20, design: .monospaced))
+                            .mcFont(20, design: .monospaced)
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -96,24 +96,24 @@ struct DiagnosticsView: View {
     private func entryRow(_ entry: LogEntry) -> some View {
         HStack(alignment: .top, spacing: 12) {
             Text(entry.level.name)
-                .font(.system(size: 15, weight: .bold, design: .monospaced))
+                .mcFont(15, weight: .bold, design: .monospaced)
                 .foregroundStyle(levelColor(entry.level))
                 .frame(width: 58, alignment: .leading)
             VStack(alignment: .leading, spacing: 2) {
                 Text(entry.message)
-                    .font(.system(size: 18))
+                    .mcFont(18)
                 HStack(spacing: 10) {
                     Text(entry.category.rawValue)
                         .foregroundStyle(.secondary)
                     if let code = entry.code {
                         Text(code)
-                            .font(.system(size: 14, design: .monospaced))
+                            .mcFont(14, design: .monospaced)
                             .foregroundStyle(.red)
                     }
                     Text(entry.timestamp.formatted(date: .omitted, time: .standard))
                         .foregroundStyle(.secondary)
                 }
-                .font(.system(size: 15))
+                .mcFont(15)
             }
         }
         .padding(.vertical, 2)

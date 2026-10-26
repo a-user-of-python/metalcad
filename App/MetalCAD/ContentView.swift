@@ -44,12 +44,12 @@ struct ContentView: View {
         } else {
             VStack(spacing: 14) {
                 Image(systemName: "cube")
-                    .font(.system(size: 54))
+                    .mcFont(54)
                     .foregroundStyle(.secondary)
                 Text("No document open")
-                    .font(.system(size: 26, weight: .bold))
+                    .mcFont(26, weight: .bold)
                 Text("Open one from the Documents tab.")
-                    .font(.system(size: 20))
+                    .mcFont(20)
                     .foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)

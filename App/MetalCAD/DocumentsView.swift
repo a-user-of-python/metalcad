@@ -134,12 +134,12 @@ struct DocumentsView: View {
                 if library.files.isEmpty {
                     VStack(spacing: 14) {
                         Image(systemName: "doc.badge.plus")
-                            .font(.system(size: 54))
+                            .mcFont(54)
                             .foregroundStyle(.secondary)
                         Text("No documents yet")
-                            .font(.system(size: 26, weight: .bold))
+                            .mcFont(26, weight: .bold)
                         Text("Tap New Document to start one with a demo part.")
-                            .font(.system(size: 20))
+                            .mcFont(20)
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
                     }
@@ -150,16 +150,16 @@ struct DocumentsView: View {
                         ForEach(library.files) { file in
                             HStack(spacing: 14) {
                                 Image(systemName: "doc")
-                                    .font(.system(size: 26))
+                                    .mcFont(26)
                                     .foregroundStyle(.orange)
                                 Text(file.displayName)
-                                    .font(.system(size: 22, weight: .semibold))
+                                    .mcFont(22, weight: .semibold)
                                 Spacer()
                                 Button(role: .destructive) {
                                     library.delete(file)
                                 } label: {
                                     Image(systemName: "trash")
-                                        .font(.system(size: 22))
+                                        .mcFont(22)
                                 }
                                 .buttonStyle(.plain)
                             }
@@ -178,7 +178,7 @@ struct DocumentsView: View {
                         }
                     } label: {
                         Label("New Document", systemImage: "plus")
-                            .font(.system(size: 20, weight: .semibold))
+                            .mcFont(20, weight: .semibold)
                     }
                 }
             }

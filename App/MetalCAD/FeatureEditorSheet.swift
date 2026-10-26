@@ -21,16 +21,16 @@ struct MaterialPickerSheet: View {
                                 .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.white.opacity(0.3)))
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(mat.name)
-                                    .font(.system(size: 22, weight: .semibold))
+                                    .mcFont(22, weight: .semibold)
                                     .foregroundStyle(.primary)
                                 Text("\(String(format: "%.2f", mat.density)) g/cm³ · metalness \(mcFmt(mat.metalness)) · roughness \(mcFmt(mat.roughness))")
-                                    .font(.system(size: 16))
+                                    .mcFont(16)
                                     .foregroundStyle(.secondary)
                             }
                             Spacer()
                             if mat.id == currentID {
                                 Image(systemName: "checkmark.circle.fill")
-                                    .font(.system(size: 24))
+                                    .mcFont(24)
                                     .foregroundStyle(.green)
                             }
                         }
@@ -42,7 +42,7 @@ struct MaterialPickerSheet: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { onCancel() }
-                        .font(.system(size: 19, weight: .semibold))
+                        .mcFont(19, weight: .semibold)
                 }
             }
         }
@@ -333,7 +333,7 @@ struct FeatureEditorSheet: View {
             Form {
                 Section("Name") {
                     TextField("Feature name", text: $nameText)
-                        .font(.system(size: 21, weight: .semibold))
+                        .mcFont(21, weight: .semibold)
                 }
                 kindFields
             }
@@ -342,11 +342,11 @@ struct FeatureEditorSheet: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { onCancel() }
-                        .font(.system(size: 19, weight: .semibold))
+                        .mcFont(19, weight: .semibold)
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Apply") { onSave(nameText, buildKind()) }
-                        .font(.system(size: 19, weight: .bold))
+                        .mcFont(19, weight: .bold)
                 }
             }
         }
@@ -383,7 +383,7 @@ struct FeatureEditorSheet: View {
         case .linearPattern:
             Section("Linear pattern") {
                 Stepper("Copies: \(Int(countText) ?? 1)", value: countBinding, in: 1...24)
-                    .font(.system(size: 20, weight: .semibold))
+                    .mcFont(20, weight: .semibold)
                 numberRow("Spacing X (mm)", $spacingX)
                 numberRow("Spacing Y (mm)", $spacingY)
                 numberRow("Spacing Z (mm)", $spacingZ)
@@ -393,7 +393,7 @@ struct FeatureEditorSheet: View {
                 sketchPicker
                 numberRow("Diameter (mm)", $holeDiameterText)
                 Toggle("Through (all the way)", isOn: $holeThrough)
-                    .font(.system(size: 20, weight: .semibold))
+                    .mcFont(20, weight: .semibold)
                 if !holeThrough {
                     numberRow("Depth (mm)", $holeDepthText)
                 }
@@ -402,7 +402,7 @@ struct FeatureEditorSheet: View {
                     Text("Counterbore").tag("counterbore")
                     Text("Countersink").tag("countersink")
                 }
-                .font(.system(size: 20, weight: .semibold))
+                .mcFont(20, weight: .semibold)
                 if holeKindChoice == "counterbore" {
                     numberRow("Bore diameter (mm)", $cbDiameterText)
                     numberRow("Bore depth (mm)", $cbDepthText)
@@ -411,7 +411,7 @@ struct FeatureEditorSheet: View {
                     numberRow("Sink angle (degrees)", $csAngleText)
                 }
                 Text("Drill points are the points and circle centers in the chosen sketch.")
-                    .font(.system(size: 16))
+                    .mcFont(16)
                     .foregroundStyle(.secondary)
             }
         case .mirror:
@@ -421,36 +421,36 @@ struct FeatureEditorSheet: View {
                         Text(plane.displayName).tag(plane)
                     }
                 }
-                .font(.system(size: 20, weight: .semibold))
+                .mcFont(20, weight: .semibold)
             }
         case .fillet:
             Section("Fillet") {
                 numberRow("Radius (mm)", $filletRadiusText)
                 if let maxF = filletMaxFeasible {
                     Text("The current radius is too big for this body — the largest that fits is ≈ \(mcFmt(maxF)) mm. (MCAD-FT408)")
-                        .font(.system(size: 17, weight: .semibold))
+                        .mcFont(17, weight: .semibold)
                         .foregroundStyle(.orange)
                     Button("Use ≈ \(mcFmt(maxF)) mm") {
                         filletRadiusText = mcFmt(maxF)
                     }
-                    .font(.system(size: 19, weight: .semibold))
+                    .mcFont(19, weight: .semibold)
                 }
                 Text("Rounds every sharp edge of the body built so far. If a radius cannot fit, the rebuild reports MCAD-FT408 with the largest radius that does.")
-                    .font(.system(size: 16))
+                    .mcFont(16)
                     .foregroundStyle(.secondary)
             }
         case .chamfer:
             Section("Chamfer") {
                 numberRow("Distance (mm)", $chamferDistanceText)
                 Text("Cuts a flat bevel across every sharp edge of the body built so far, this far back from each edge.")
-                    .font(.system(size: 16))
+                    .mcFont(16)
                     .foregroundStyle(.secondary)
             }
         case .shell:
             Section("Shell") {
                 numberRow("Wall thickness (mm)", $shellThicknessText)
                 Text("Hollows the body built so far, leaving walls of this thickness.")
-                    .font(.system(size: 16))
+                    .mcFont(16)
                     .foregroundStyle(.secondary)
             }
         case .extrude:
@@ -462,13 +462,13 @@ struct FeatureEditorSheet: View {
                     Text("Symmetric").tag("symmetric")
                     Text("Two sides").tag("twoSided")
                 }
-                .font(.system(size: 20, weight: .semibold))
+                .mcFont(20, weight: .semibold)
                 if extrudeModeChoice == "twoSided" {
                     numberRow("Second distance (mm)", $extrudeSecondText)
                 }
                 numberRow("Taper angle (degrees)", $extrudeTaperText)
                 Text("Extrude joins material. A one-sided extrude with no taper is the same shape as a Pad.")
-                    .font(.system(size: 16))
+                    .mcFont(16)
                     .foregroundStyle(.secondary)
             }
         case .loft:
@@ -478,15 +478,15 @@ struct FeatureEditorSheet: View {
                         Text(sk.name).tag(sk.id)
                     }
                 }
-                .font(.system(size: 20, weight: .semibold))
+                .mcFont(20, weight: .semibold)
                 Picker("Second profile sketch", selection: $loftBID) {
                     ForEach(sketches) { sk in
                         Text(sk.name).tag(sk.id)
                     }
                 }
-                .font(.system(size: 20, weight: .semibold))
+                .mcFont(20, weight: .semibold)
                 Text("Blends one closed profile into the other. Both sketches need a closed profile with the same number of corners.")
-                    .font(.system(size: 16))
+                    .mcFont(16)
                     .foregroundStyle(.secondary)
             }
         case .sweep:
@@ -496,21 +496,21 @@ struct FeatureEditorSheet: View {
                         Text(sk.name).tag(sk.id)
                     }
                 }
-                .font(.system(size: 20, weight: .semibold))
+                .mcFont(20, weight: .semibold)
                 Picker("Path sketch", selection: $sweepPathID) {
                     ForEach(sketches) { sk in
                         Text(sk.name).tag(sk.id)
                     }
                 }
-                .font(.system(size: 20, weight: .semibold))
+                .mcFont(20, weight: .semibold)
                 Text("Sweeps the closed profile along the path sketch's connected lines.")
-                    .font(.system(size: 16))
+                    .mcFont(16)
                     .foregroundStyle(.secondary)
             }
         case .booleanCutPlaceholder:
             Section("Boolean") {
                 Text("Placeholder boolean — kept for older documents.")
-                    .font(.system(size: 18))
+                    .mcFont(18)
             }
         case .extrude2:
             Section("Extrude") {
@@ -521,20 +521,20 @@ struct FeatureEditorSheet: View {
                     Text("Intersect (keep overlap)").tag("intersect")
                     Text("New Body").tag("newBody")
                 }
-                .font(.system(size: 20, weight: .semibold))
+                .mcFont(20, weight: .semibold)
                 Picker("End", selection: $ex2EndChoice) {
                     Text("Dimension").tag("dimension")
                     Text("Through All").tag("throughAll")
                     Text("Up to Face").tag("upToFace")
                 }
-                .font(.system(size: 20, weight: .semibold))
+                .mcFont(20, weight: .semibold)
                 if ex2EndChoice == "dimension" {
                     numberRow("Distance (mm)", $ex2DistanceText)
                 }
                 if ex2EndChoice == "upToFace" {
                     if currentFaces.isEmpty {
                         Text("The part has no faces right now — Up to Face will fail until a body exists before this feature.")
-                            .font(.system(size: 16, weight: .semibold))
+                            .mcFont(16, weight: .semibold)
                             .foregroundStyle(.orange)
                     } else {
                         Picker("Target face (part as built now)", selection: $ex2FaceIndex) {
@@ -542,7 +542,7 @@ struct FeatureEditorSheet: View {
                                 Text("Face \(i + 1) · \(mcFaceLabel(face))").tag(i)
                             }
                         }
-                        .font(.system(size: 20, weight: .semibold))
+                        .mcFont(20, weight: .semibold)
                     }
                 }
                 Picker("Type", selection: $ex2ModeChoice) {
@@ -550,13 +550,13 @@ struct FeatureEditorSheet: View {
                     Text("Symmetric").tag("symmetric")
                     Text("Two sides").tag("twoSided")
                 }
-                .font(.system(size: 20, weight: .semibold))
+                .mcFont(20, weight: .semibold)
                 if ex2ModeChoice == "twoSided" {
                     numberRow("Second distance (mm)", $ex2SecondText)
                 }
                 numberRow("Taper angle (degrees)", $ex2TaperText)
                 Text("Join adds, Cut removes, Intersect keeps only the overlap, New Body keeps the solid separate.")
-                    .font(.system(size: 16))
+                    .mcFont(16)
                     .foregroundStyle(.secondary)
             }
         case .chamfer2:
@@ -566,7 +566,7 @@ struct FeatureEditorSheet: View {
                     Text("Two distances").tag("two")
                     Text("Distance + Angle").tag("angle")
                 }
-                .font(.system(size: 20, weight: .semibold))
+                .mcFont(20, weight: .semibold)
                 numberRow(chamferModeChoice == "two" ? "Distance A (mm)" : "Distance (mm)", $chamferAText)
                 if chamferModeChoice == "two" {
                     numberRow("Distance B (mm)", $chamferBText)
@@ -575,7 +575,7 @@ struct FeatureEditorSheet: View {
                     numberRow("Angle (degrees)", $chamferAngleText)
                 }
                 Text("Cuts a flat bevel across every sharp edge of the body built so far.")
-                    .font(.system(size: 16))
+                    .mcFont(16)
                     .foregroundStyle(.secondary)
             }
         case .coil:
@@ -585,7 +585,7 @@ struct FeatureEditorSheet: View {
                 numberRow("Turns", $coilTurnsText)
                 numberRow("Wire radius (mm)", $coilWireText)
                 Text("A spring wound around the Z axis from the origin.")
-                    .font(.system(size: 16))
+                    .mcFont(16)
                     .foregroundStyle(.secondary)
             }
         case .pipe:
@@ -595,10 +595,10 @@ struct FeatureEditorSheet: View {
                         Text(sk.name).tag(sk.id)
                     }
                 }
-                .font(.system(size: 20, weight: .semibold))
+                .mcFont(20, weight: .semibold)
                 numberRow("Pipe radius (mm)", $pipeRadiusText)
                 Text("A round tube swept along the path sketch's connected lines.")
-                    .font(.system(size: 16))
+                    .mcFont(16)
                     .foregroundStyle(.secondary)
             }
         case .rib:
@@ -607,7 +607,7 @@ struct FeatureEditorSheet: View {
                 numberRow("Thickness (mm)", $ribThicknessText)
                 numberRow("Depth into body (mm)", $ribDepthText)
                 Text("A thin wall grown from the profile line toward the body. Trimmed approximately at curved surfaces — exact against flat ones.")
-                    .font(.system(size: 16))
+                    .mcFont(16)
                     .foregroundStyle(.secondary)
             }
         case .draftBody:
@@ -618,9 +618,9 @@ struct FeatureEditorSheet: View {
                     Text("Y").tag(1)
                     Text("Z").tag(2)
                 }
-                .font(.system(size: 20, weight: .semibold))
+                .mcFont(20, weight: .semibold)
                 Text("Mold-release taper: a positive angle narrows the body toward the top of the pull axis. Between −30° and 30°.")
-                    .font(.system(size: 16))
+                    .mcFont(16)
                     .foregroundStyle(.secondary)
             }
         case .scaleBody:
@@ -629,7 +629,7 @@ struct FeatureEditorSheet: View {
                 numberRow("Factor Y", $scaleYText)
                 numberRow("Factor Z", $scaleZText)
                 Text("Scales the body built so far about its center.")
-                    .font(.system(size: 16))
+                    .mcFont(16)
                     .foregroundStyle(.secondary)
             }
         case .moveBody:
@@ -642,10 +642,10 @@ struct FeatureEditorSheet: View {
                     Text("Y").tag(1)
                     Text("Z").tag(2)
                 }
-                .font(.system(size: 20, weight: .semibold))
+                .mcFont(20, weight: .semibold)
                 numberRow("Rotation (degrees)", $moveDegreesText)
                 Text("Moves the whole body, then rotates it around the axis through its center.")
-                    .font(.system(size: 16))
+                    .mcFont(16)
                     .foregroundStyle(.secondary)
             }
         case .splitBody:
@@ -655,25 +655,25 @@ struct FeatureEditorSheet: View {
                     Text("Y").tag(1)
                     Text("Z").tag(2)
                 }
-                .font(.system(size: 20, weight: .semibold))
+                .mcFont(20, weight: .semibold)
                 numberRow("Offset (mm, world)", $splitOffsetText)
                 Text("Cuts the body into two bodies at a plane perpendicular to the axis at this offset.")
-                    .font(.system(size: 16))
+                    .mcFont(16)
                     .foregroundStyle(.secondary)
             }
         case .circularPattern:
             Section("Circular pattern") {
                 Stepper("Copies: \(Int(circCountText) ?? 1)", value: circCountBinding, in: 2...36)
-                    .font(.system(size: 20, weight: .semibold))
+                    .mcFont(20, weight: .semibold)
                 Picker("Around axis", selection: $circAxis) {
                     Text("X").tag(0)
                     Text("Y").tag(1)
                     Text("Z").tag(2)
                 }
-                .font(.system(size: 20, weight: .semibold))
+                .mcFont(20, weight: .semibold)
                 numberRow("Total angle (degrees)", $circTotalText)
                 Text("Repeats the whole body built so far around the axis through its center.")
-                    .font(.system(size: 16))
+                    .mcFont(16)
                     .foregroundStyle(.secondary)
             }
         }
@@ -685,7 +685,7 @@ struct FeatureEditorSheet: View {
                 Text(sk.name).tag(sk.id)
             }
         }
-        .font(.system(size: 20, weight: .semibold))
+        .mcFont(20, weight: .semibold)
     }
 
     private var axisPicker: some View {
@@ -698,7 +698,7 @@ struct FeatureEditorSheet: View {
                 Text("Line #\(e.id)").tag(e.id)
             }
         }
-        .font(.system(size: 20, weight: .semibold))
+        .mcFont(20, weight: .semibold)
     }
 
     private var threadFields: some View {
@@ -710,12 +710,12 @@ struct FeatureEditorSheet: View {
                         Text(name).tag(name)
                     }
                 }
-                .font(.system(size: 20, weight: .semibold))
+                .mcFont(20, weight: .semibold)
                 .onChange(of: presetName) { _, newValue in
                     applyPreset(newValue)
                 }
                 Text("Picking a preset fills diameter, pitch and taper — every field below stays editable.")
-                    .font(.system(size: 16))
+                    .mcFont(16)
                     .foregroundStyle(.secondary)
             }
             Section("Thread size — all editable") {
@@ -723,7 +723,7 @@ struct FeatureEditorSheet: View {
                 numberRow("Pitch (mm)", $pitchText)
                 numberRow("Length (mm)", $threadLengthText)
                 Stepper("Starts: \(spec.starts)", value: $spec.starts, in: 1...4)
-                    .font(.system(size: 20, weight: .semibold))
+                    .mcFont(20, weight: .semibold)
                 numberRow("Profile angle (degrees)", $profileAngleText)
                 numberRow("Taper (degrees)", $taperText)
                 numberRow("Clearance (mm)", $clearanceText)
@@ -734,23 +734,23 @@ struct FeatureEditorSheet: View {
                         Text(standardLabel(s)).tag(s)
                     }
                 }
-                .font(.system(size: 20, weight: .semibold))
+                .mcFont(20, weight: .semibold)
                 Picker("Kind", selection: $spec.kind) {
                     ForEach(Self.kinds, id: \.self) { k in
                         Text(k == .external ? "External (bolt)" : "Internal (nut)").tag(k)
                     }
                 }
-                .font(.system(size: 20, weight: .semibold))
+                .mcFont(20, weight: .semibold)
                 Picker("Hand", selection: $spec.hand) {
                     ForEach(Self.hands, id: \.self) { h in
                         Text(h == .right ? "Right-hand" : "Left-hand").tag(h)
                     }
                 }
-                .font(.system(size: 20, weight: .semibold))
+                .mcFont(20, weight: .semibold)
                 Toggle("Modeled thread (real ridges)", isOn: $spec.modeled)
-                    .font(.system(size: 20, weight: .semibold))
+                    .mcFont(20, weight: .semibold)
                 Text("Minor Ø \(mcFmt(previewSpec.minorDiameter)) · Pitch Ø \(mcFmt(previewSpec.pitchDiameter)) — from the numbers above.")
-                    .font(.system(size: 16))
+                    .mcFont(16)
                     .foregroundStyle(.secondary)
             }
         }
@@ -791,12 +791,12 @@ struct FeatureEditorSheet: View {
     private func numberRow(_ label: String, _ binding: Binding<String>) -> some View {
         HStack {
             Text(label)
-                .font(.system(size: 20, weight: .semibold))
+                .mcFont(20, weight: .semibold)
             Spacer()
             TextField(label, text: binding)
                 .keyboardType(.numbersAndPunctuation)
                 .multilineTextAlignment(.trailing)
-                .font(.system(size: 20, weight: .semibold))
+                .mcFont(20, weight: .semibold)
                 .frame(width: 130)
         }
     }

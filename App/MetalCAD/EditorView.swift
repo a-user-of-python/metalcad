@@ -357,7 +357,13 @@ struct EditorView: View {
     @State private var sketchNav: SketchNav?
     @State private var activeTool: ActiveTool?
     @State private var extrudePresetSketchID: String?
-    @State private var showBrowser = true
+    // Left browser panel width (v4.1): persisted, drag-resizable via
+    // the handle on its trailing edge. 0 = fully collapsed; below 150
+    // the panel renders as a slim icon rail. The header sidebar button
+    // and a double-tap on the handle toggle hidden <-> last width.
+    @AppStorage("browserPanelWidth") private var browserPanelWidth: Double = 300
+    @AppStorage("browserPanelLastWidth") private var browserPanelLastWidth: Double = 300
+    @State private var panelDragStart: Double?
     // Section view state. `sectionT` is the committed cut position;
     // the slider edits `sectionSlider` and commits on release so the
     // CSG section only runs once per drag, not per pixel.
@@ -367,8 +373,6 @@ struct EditorView: View {
     @State private var sectionSlider: Double = 0.5
     @State private var sectionedMesh: Mesh?
 
-    private let rowFont = Font.system(size: 20)
-
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
@@ -377,11 +381,11 @@ struct EditorView: View {
                 ribbon
                 Divider()
                 HStack(spacing: 0) {
-                    if showBrowser {
+                    if browserPanelWidth > 0 {
                         browserPanel
-                            .frame(width: 350)
-                        Divider()
+                            .frame(width: browserPanelWidth)
                     }
+                    panelDragHandle
                     centerColumn
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                     if let tool = activeTool {
@@ -420,16 +424,16 @@ struct EditorView: View {
                 ToolbarItemGroup(placement: .primaryAction) {
                     if let msg = model.saveMessage {
                         Text(msg)
-                            .font(.system(size: 17, weight: .semibold))
+                            .mcFont(17, weight: .semibold)
                             .foregroundStyle(.green)
                     }
                     Button("Save") { model.save() }
-                        .font(.system(size: 19, weight: .semibold))
+                        .mcFont(19, weight: .semibold)
                     Button("Export STL") { model.exportSTL() }
-                        .font(.system(size: 19, weight: .semibold))
+                        .mcFont(19, weight: .semibold)
                     if let url = model.stlURL {
                         ShareLink(item: url) { Text("Share STL") }
-                            .font(.system(size: 19, weight: .semibold))
+                            .mcFont(19, weight: .semibold)
                     }
                 }
             }
@@ -532,17 +536,17 @@ struct EditorView: View {
     private var headerStrip: some View {
         HStack(spacing: 18) {
             Button {
-                showBrowser.toggle()
+                toggleBrowserPanel()
             } label: {
                 Image(systemName: "sidebar.left")
-                    .font(.system(size: 24))
+                    .mcFont(24)
             }
             .buttonStyle(.plain)
             VStack(alignment: .leading, spacing: 1) {
                 Text(model.part?.name ?? "Part")
-                    .font(.system(size: 22, weight: .bold))
+                    .mcFont(22, weight: .bold)
                 Text("Material, size and weight — always up to date")
-                    .font(.system(size: 15))
+                    .mcFont(15)
                     .foregroundStyle(.secondary)
             }
             Spacer()
@@ -555,10 +559,10 @@ struct EditorView: View {
                         .frame(width: 30, height: 30)
                     VStack(alignment: .leading, spacing: 1) {
                         Text(model.part?.material.name ?? "—")
-                            .font(.system(size: 19, weight: .bold))
+                            .mcFont(19, weight: .bold)
                             .foregroundStyle(.primary)
                         Text("\(String(format: "%.2f", model.part?.material.density ?? 0)) g/cm³")
-                            .font(.system(size: 15))
+                            .mcFont(15)
                             .foregroundStyle(.secondary)
                     }
                     Image(systemName: "chevron.up.chevron.down")
@@ -592,10 +596,10 @@ struct EditorView: View {
     private func headerStat(_ label: String, _ value: String) -> some View {
         VStack(alignment: .leading, spacing: 1) {
             Text(label)
-                .font(.system(size: 15, weight: .semibold))
+                .mcFont(15, weight: .semibold)
                 .foregroundStyle(.secondary)
             Text(value)
-                .font(.system(size: 19, weight: .bold))
+                .mcFont(19, weight: .bold)
         }
     }
 
@@ -717,7 +721,7 @@ struct EditorView: View {
         VStack(spacing: 3) {
             HStack(alignment: .bottom, spacing: 4) { content() }
             Text(caption)
-                .font(.system(size: 14, weight: .bold))
+                .mcFont(14, weight: .bold)
                 .foregroundStyle(.secondary)
                 .tracking(1.5)
         }
@@ -735,9 +739,9 @@ struct EditorView: View {
         Button(action: action) {
             VStack(spacing: 4) {
                 Image(systemName: icon)
-                    .font(.system(size: 24))
+                    .mcFont(24)
                 Text(label)
-                    .font(.system(size: 16, weight: .semibold))
+                    .mcFont(16, weight: .semibold)
                     .lineLimit(1)
             }
             .foregroundStyle(active ? .black : .primary)
@@ -761,12 +765,12 @@ struct EditorView: View {
         } label: {
             VStack(spacing: 4) {
                 Image(systemName: "cube")
-                    .font(.system(size: 24))
+                    .mcFont(24)
                 HStack(spacing: 3) {
                     Text("Primitive")
-                        .font(.system(size: 16, weight: .semibold))
+                        .mcFont(16, weight: .semibold)
                     Image(systemName: "chevron.down")
-                        .font(.system(size: 13, weight: .bold))
+                        .mcFont(13, weight: .bold)
                 }
                 .lineLimit(1)
             }
@@ -806,7 +810,7 @@ struct EditorView: View {
             if !model.stlWarnings.isEmpty {
                 ForEach(Array(model.stlWarnings.enumerated()), id: \.offset) { _, w in
                     Text("\(w.userMessage) (\(w.code))")
-                        .font(.system(size: 17, weight: .semibold))
+                        .mcFont(17, weight: .semibold)
                         .foregroundStyle(.orange)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -818,7 +822,7 @@ struct EditorView: View {
     private var sectionControls: some View {
         HStack(spacing: 14) {
             Text("Section")
-                .font(.system(size: 19, weight: .bold))
+                .mcFont(19, weight: .bold)
             Picker("Axis", selection: $sectionAxis) {
                 Text("X").tag(0)
                 Text("Y").tag(1)
@@ -834,10 +838,10 @@ struct EditorView: View {
                 }
             }
             Text(sectionPositionText)
-                .font(.system(size: 18, weight: .semibold))
+                .mcFont(18, weight: .semibold)
                 .frame(width: 150, alignment: .trailing)
             Button("Done") { toggleSection() }
-                .font(.system(size: 19, weight: .semibold))
+                .mcFont(19, weight: .semibold)
         }
         .padding(10)
         .background(RoundedRectangle(cornerRadius: 12).fill(Color.white.opacity(0.06)))
@@ -852,12 +856,12 @@ struct EditorView: View {
     private var pickBanner: some View {
         HStack(spacing: 12) {
             Image(systemName: "hand.tap.fill")
-                .font(.system(size: 26))
+                .mcFont(26)
             Text(pickBannerText)
-                .font(.system(size: 20, weight: .semibold))
+                .mcFont(20, weight: .semibold)
             Spacer()
             Button("Cancel") { pickingFace = false }
-                .font(.system(size: 20, weight: .semibold))
+                .mcFont(20, weight: .semibold)
         }
         .padding(12)
         .background(RoundedRectangle(cornerRadius: 12).fill(Color.orange.opacity(0.25)))
@@ -923,19 +927,19 @@ struct EditorView: View {
             }
             Spacer()
         }
-        .font(.system(size: 19, weight: .semibold))
+        .mcFont(19, weight: .semibold)
     }
 
     private func errorBanner(_ err: CADError, dismissible: Bool) -> some View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: "exclamationmark.octagon.fill")
-                .font(.system(size: 26))
+                .mcFont(26)
                 .foregroundStyle(.red)
             VStack(alignment: .leading, spacing: 2) {
                 Text(err.userMessage)
-                    .font(.system(size: 20, weight: .semibold))
+                    .mcFont(20, weight: .semibold)
                 Text(err.code)
-                    .font(.system(size: 14, design: .monospaced))
+                    .mcFont(14, design: .monospaced)
                     .foregroundStyle(.secondary)
             }
             Spacer()
@@ -944,7 +948,7 @@ struct EditorView: View {
                     model.actionError = nil
                 } label: {
                     Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 22))
+                        .mcFont(22)
                 }
                 .buttonStyle(.plain)
             }
@@ -954,15 +958,142 @@ struct EditorView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    // MARK: Browser panel resize handle
+
+    private func toggleBrowserPanel() {
+        if browserPanelWidth == 0 {
+            browserPanelWidth = browserPanelLastWidth >= 40 ? browserPanelLastWidth : 300
+        } else {
+            browserPanelLastWidth = browserPanelWidth
+            browserPanelWidth = 0
+        }
+    }
+
+    /// The grab strip on the panel's trailing edge: drag to resize
+    /// (live, clamped 0–520, releasing under 40 snaps shut), double-tap
+    /// to toggle hidden <-> last width. It stays on screen at width 0
+    /// so a collapsed panel can be dragged back open.
+    private var panelDragHandle: some View {
+        ZStack {
+            Rectangle()
+                .fill(Color.white.opacity(browserPanelWidth == 0 ? 0.10 : 0.05))
+            VStack(spacing: 5) {
+                ForEach(0..<3, id: \.self) { _ in
+                    Circle()
+                        .fill(Color.white.opacity(0.6))
+                        .frame(width: 4, height: 4)
+                }
+            }
+            if browserPanelWidth == 0 {
+                Image(systemName: "chevron.right")
+                    .mcFont(12, weight: .bold)
+                    .foregroundStyle(.white.opacity(0.8))
+                    .offset(y: 26)
+            }
+        }
+        .frame(width: 16)
+        .frame(maxHeight: .infinity)
+        .contentShape(Rectangle())
+        .gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { value in
+                    if panelDragStart == nil { panelDragStart = browserPanelWidth }
+                    let start = panelDragStart ?? 300
+                    browserPanelWidth = min(520, max(0, start + Double(value.translation.width)))
+                }
+                .onEnded { _ in
+                    if browserPanelWidth < 40 {
+                        browserPanelWidth = 0
+                    } else {
+                        browserPanelLastWidth = browserPanelWidth
+                    }
+                    panelDragStart = nil
+                }
+        )
+        .onTapGesture(count: 2) { toggleBrowserPanel() }
+        .accessibilityLabel(browserPanelWidth == 0 ? "Show browser panel" : "Resize or hide browser panel")
+    }
+
     // MARK: Browser (left): sketches + feature timeline
 
+    /// Width dispatcher: below 150 pt the panel is a slim icon rail;
+    /// at/above it, the full browser list at the chosen width.
     private var browserPanel: some View {
+        Group {
+            if browserPanelWidth < 150 {
+                slimBrowserPanel
+            } else {
+                fullBrowserPanel
+            }
+        }
+    }
+
+    private func slimStatusColor(for feature: Feature) -> Color {
+        guard let st = model.status(for: feature.id) else { return .gray }
+        if !st.ok { return st.errorCode != nil ? .red : .orange }
+        return st.message == "suppressed" ? .gray : .green
+    }
+
+    /// Slim rail (panel width < 150): icon + status dot only, no text.
+    /// Rows stay fully tappable — sketches navigate, features open
+    /// their editor — and every row keeps an accessibility label.
+    private var slimBrowserPanel: some View {
+        ScrollView {
+            VStack(spacing: 10) {
+                if let part = model.part {
+                    ForEach(part.sketches) { sketch in
+                        NavigationLink {
+                            SketchEditorView(model: model, sketchID: sketch.id)
+                        } label: {
+                            Image(systemName: sketch.isDatumPlane ? "square.on.square" : "square.and.pencil")
+                                .mcFont(22)
+                                .foregroundStyle(sketch.isDatumPlane ? .teal : .orange)
+                                .frame(width: 44, height: 44)
+                                .background(RoundedRectangle(cornerRadius: 10)
+                                    .fill(Color.white.opacity(0.06)))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(sketch.name)
+                    }
+                    if !part.sketches.isEmpty && !part.features.isEmpty {
+                        Divider()
+                            .padding(.horizontal, 10)
+                    }
+                    ForEach(part.features) { feature in
+                        Button {
+                            featureToEdit = feature
+                        } label: {
+                            ZStack(alignment: .topTrailing) {
+                                Image(systemName: iconName(for: feature.kind))
+                                    .mcFont(22)
+                                    .foregroundStyle(.orange)
+                                    .frame(width: 44, height: 44)
+                                    .background(RoundedRectangle(cornerRadius: 10)
+                                        .fill(Color.white.opacity(0.06)))
+                                Circle()
+                                    .fill(slimStatusColor(for: feature))
+                                    .frame(width: 10, height: 10)
+                                    .offset(x: 2, y: -2)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(feature.name)
+                    }
+                }
+            }
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity)
+        }
+        .background(Color.white.opacity(0.02))
+    }
+
+    private var fullBrowserPanel: some View {
         List {
             Section("Sketches & datum planes") {
                 if let part = model.part {
                     if part.sketches.isEmpty {
                         Text("No sketches yet — use Sketch ▸ New Sketch in the toolbar and pick a plane.")
-                            .font(rowFont)
+                            .mcFont(20)
                             .foregroundStyle(.secondary)
                     }
                     ForEach(part.sketches) { sketch in
@@ -978,7 +1109,7 @@ struct EditorView: View {
                     }
                 } else {
                     Text("No features yet. Pick a tool from the toolbar above — Extrude a sketch, or start with a Primitive.")
-                        .font(rowFont)
+                        .mcFont(20)
                         .foregroundStyle(.secondary)
                 }
             }
@@ -996,20 +1127,20 @@ struct EditorView: View {
             } label: {
                 HStack(spacing: 10) {
                     Image(systemName: sketch.isDatumPlane ? "square.on.square" : "square.and.pencil")
-                        .font(.system(size: 22))
+                        .mcFont(22)
                         .foregroundStyle(sketch.isDatumPlane ? .teal : .orange)
                         .frame(width: 30)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(sketch.name)
-                            .font(.system(size: 20, weight: .semibold))
+                            .mcFont(20, weight: .semibold)
                             .foregroundStyle(.primary)
                         if sketch.isDatumPlane {
                             Text("Datum plane · \(mcPlaneText(sketch.plane))")
-                                .font(.system(size: 17))
+                                .mcFont(17)
                                 .foregroundStyle(.secondary)
                         } else {
                             Text("\(sketch.entities.count) items · \(sketch.constraints.count) constraints")
-                                .font(.system(size: 17))
+                                .mcFont(17)
                                 .foregroundStyle(.secondary)
                         }
                     }
@@ -1031,7 +1162,7 @@ struct EditorView: View {
                 }
             } label: {
                 Image(systemName: "ellipsis.circle")
-                    .font(.system(size: 24))
+                    .mcFont(24)
             }
             .buttonStyle(.plain)
         }
@@ -1042,27 +1173,27 @@ struct EditorView: View {
         HStack(alignment: .top, spacing: 10) {
             statusIcon(for: feature)
             Image(systemName: iconName(for: feature.kind))
-                .font(.system(size: 22))
+                .mcFont(22)
                 .foregroundStyle(.orange)
                 .frame(width: 30)
             VStack(alignment: .leading, spacing: 2) {
                 Text(feature.name)
-                    .font(.system(size: 20, weight: .semibold))
+                    .mcFont(20, weight: .semibold)
                 Text(kindSummary(feature.kind))
-                    .font(.system(size: 17))
+                    .mcFont(17)
                     .foregroundStyle(.secondary)
                 if let st = model.status(for: feature.id) {
                     if !st.ok, let code = st.errorCode {
                         Text(code)
-                            .font(.system(size: 14, design: .monospaced))
+                            .mcFont(14, design: .monospaced)
                             .foregroundStyle(.red)
                     } else if st.message == "suppressed" {
                         Text("Suppressed")
-                            .font(.system(size: 17))
+                            .mcFont(17)
                             .foregroundStyle(.secondary)
                     } else if st.message == "paused" {
                         Text("Paused — an earlier feature failed")
-                            .font(.system(size: 17))
+                            .mcFont(17)
                             .foregroundStyle(.orange)
                     }
                 }
@@ -1074,18 +1205,18 @@ struct EditorView: View {
                 featureToEdit = feature
             } label: {
                 Image(systemName: "pencil.circle.fill")
-                    .font(.system(size: 24))
+                    .mcFont(24)
             }
             .buttonStyle(.plain)
             Button(feature.suppressed ? "Show" : "Hide") {
                 model.setSuppressed(feature.id, !feature.suppressed)
             }
-            .font(.system(size: 16, weight: .semibold))
+            .mcFont(16, weight: .semibold)
             Button(role: .destructive) {
                 model.deleteFeature(feature.id)
             } label: {
                 Image(systemName: "trash")
-                    .font(.system(size: 20))
+                    .mcFont(20)
             }
             .buttonStyle(.plain)
         }
@@ -1116,7 +1247,7 @@ struct EditorView: View {
                     .foregroundStyle(.gray)
             }
         }
-        .font(.system(size: 24))
+        .mcFont(24)
     }
 
     /// When the feature being edited is a fillet failing with FT408,

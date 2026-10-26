@@ -170,12 +170,12 @@ struct PanelNumberRow: View {
     var body: some View {
         HStack {
             Text(label)
-                .font(.system(size: 19, weight: .semibold))
+                .mcFont(19, weight: .semibold)
             Spacer()
             TextField(label, text: $text)
                 .keyboardType(.numbersAndPunctuation)
                 .multilineTextAlignment(.trailing)
-                .font(.system(size: 20, weight: .semibold))
+                .mcFont(20, weight: .semibold)
                 .frame(width: 120)
                 .textFieldStyle(.roundedBorder)
         }
@@ -191,7 +191,7 @@ struct PanelSketchPicker: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(label)
-                .font(.system(size: 17, weight: .semibold))
+                .mcFont(17, weight: .semibold)
                 .foregroundStyle(.secondary)
             Picker("", selection: $selection) {
                 ForEach(sketches) { sk in
@@ -199,7 +199,7 @@ struct PanelSketchPicker: View {
                 }
             }
             .pickerStyle(.menu)
-            .font(.system(size: 20, weight: .semibold))
+            .mcFont(20, weight: .semibold)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.vertical, 2)
@@ -212,7 +212,7 @@ struct PanelNote: View {
 
     var body: some View {
         Text(text)
-            .font(.system(size: 17, weight: warning ? .semibold : .regular))
+            .mcFont(17, weight: warning ? .semibold : .regular)
             .foregroundStyle(warning ? .orange : .secondary)
             .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -227,12 +227,12 @@ struct PanelOKBar: View {
     var body: some View {
         HStack(spacing: 14) {
             Button("Cancel") { onCancel() }
-                .font(.system(size: 20, weight: .semibold))
+                .mcFont(20, weight: .semibold)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 12)
                 .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.12)))
             Button(okTitle) { onOK() }
-                .font(.system(size: 20, weight: .bold))
+                .mcFont(20, weight: .bold)
                 .foregroundStyle(.black)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 12)
@@ -264,13 +264,13 @@ struct ToolPanelView: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Text(tool.title)
-                    .font(.system(size: 24, weight: .bold))
+                    .mcFont(24, weight: .bold)
                 Spacer()
                 Button {
                     close()
                 } label: {
                     Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 26))
+                        .mcFont(26)
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
@@ -353,7 +353,7 @@ struct PlaneChoiceView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Base planes")
-                .font(.system(size: 17, weight: .semibold))
+                .mcFont(17, weight: .semibold)
                 .foregroundStyle(.secondary)
             HStack(spacing: 8) {
                 planeCard("XY", sub: "facing +Z", selected: choice == .base("XY")) {
@@ -368,7 +368,7 @@ struct PlaneChoiceView: View {
             }
             if !model.datumSketches.isEmpty {
                 Text("Datum planes")
-                    .font(.system(size: 17, weight: .semibold))
+                    .mcFont(17, weight: .semibold)
                     .foregroundStyle(.secondary)
                 ForEach(model.datumSketches) { datum in
                     Button {
@@ -376,19 +376,19 @@ struct PlaneChoiceView: View {
                     } label: {
                         HStack(spacing: 10) {
                             Image(systemName: "square.on.square")
-                                .font(.system(size: 20))
+                                .mcFont(20)
                             VStack(alignment: .leading, spacing: 1) {
                                 Text(datum.name)
-                                    .font(.system(size: 19, weight: .semibold))
+                                    .mcFont(19, weight: .semibold)
                                     .foregroundStyle(.primary)
                                 Text(mcPlaneText(datum.plane))
-                                    .font(.system(size: 16))
+                                    .mcFont(16)
                                     .foregroundStyle(.secondary)
                             }
                             Spacer()
                             if choice == .datum(datum.id) {
                                 Image(systemName: "checkmark.circle.fill")
-                                    .font(.system(size: 22))
+                                    .mcFont(22)
                                     .foregroundStyle(.orange)
                             }
                         }
@@ -400,13 +400,13 @@ struct PlaneChoiceView: View {
                 }
             }
             Text("Or a face of the model")
-                .font(.system(size: 17, weight: .semibold))
+                .mcFont(17, weight: .semibold)
                 .foregroundStyle(.secondary)
             Button {
                 onPickFace()
             } label: {
                 Label("Pick a face on the model…", systemImage: "square.on.square.dashed")
-                    .font(.system(size: 19, weight: .semibold))
+                    .mcFont(19, weight: .semibold)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 10)
             }
@@ -414,9 +414,9 @@ struct PlaneChoiceView: View {
             .buttonStyle(.plain)
             HStack(alignment: .top, spacing: 8) {
                 Text("Selected:")
-                    .font(.system(size: 18, weight: .bold))
+                    .mcFont(18, weight: .bold)
                 Text(choiceText)
-                    .font(.system(size: 18, weight: .semibold))
+                    .mcFont(18, weight: .semibold)
                     .foregroundStyle(choice == .none ? .orange : .primary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -430,11 +430,11 @@ struct PlaneChoiceView: View {
         Button(action: action) {
             VStack(spacing: 2) {
                 Image(systemName: "square.dashed")
-                    .font(.system(size: 22))
+                    .mcFont(22)
                 Text(name)
-                    .font(.system(size: 20, weight: .bold))
+                    .mcFont(20, weight: .bold)
                 Text(sub)
-                    .font(.system(size: 14))
+                    .mcFont(14)
                     .foregroundStyle(.secondary)
             }
             .foregroundStyle(selected ? .black : .primary)
@@ -491,10 +491,10 @@ struct NewSketchPanel: View {
                             onPickFace: { pickFace(.newSketchFace) })
             HStack {
                 Text("Name")
-                    .font(.system(size: 19, weight: .semibold))
+                    .mcFont(19, weight: .semibold)
                 Spacer()
                 TextField("Sketch name", text: $nameText)
-                    .font(.system(size: 20, weight: .semibold))
+                    .mcFont(20, weight: .semibold)
                     .frame(width: 170)
                     .textFieldStyle(.roundedBorder)
             }
@@ -599,7 +599,7 @@ struct DatumSourcePicker: View {
                     Text("Datum plane").tag(true)
                 }
                 .pickerStyle(.segmented)
-                .font(.system(size: 19, weight: .semibold))
+                .mcFont(19, weight: .semibold)
             }
             if sourceIsDatum {
                 PanelSketchPicker(label: "Datum plane", sketches: model.datumSketches,
@@ -611,7 +611,7 @@ struct DatumSourcePicker: View {
                     Text("YZ").tag("YZ")
                 }
                 .pickerStyle(.segmented)
-                .font(.system(size: 20, weight: .semibold))
+                .mcFont(20, weight: .semibold)
             }
         }
     }
@@ -652,7 +652,7 @@ struct OffsetPlanePanel: View {
                 Text("Model face").tag(true)
             }
             .pickerStyle(.segmented)
-            .font(.system(size: 19, weight: .semibold))
+            .mcFont(19, weight: .semibold)
             if useFace {
                 if let face = model.constructFace {
                     PanelNote(text: "Face picked: \(mcFaceLabel(face)) · \(mcPlaneText(face.plane))")
@@ -663,7 +663,7 @@ struct OffsetPlanePanel: View {
                     pickFace(.offsetDatumFace)
                 } label: {
                     Label("Pick a face on the model…", systemImage: "square.on.square.dashed")
-                        .font(.system(size: 19, weight: .semibold))
+                        .mcFont(19, weight: .semibold)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 10)
                 }
@@ -676,10 +676,10 @@ struct OffsetPlanePanel: View {
             PanelNumberRow(label: "Distance along normal (mm)", text: $distanceText)
             HStack {
                 Text("Name")
-                    .font(.system(size: 19, weight: .semibold))
+                    .mcFont(19, weight: .semibold)
                 Spacer()
                 TextField("Datum name", text: $nameText)
-                    .font(.system(size: 20, weight: .semibold))
+                    .mcFont(20, weight: .semibold)
                     .frame(width: 170)
                     .textFieldStyle(.roundedBorder)
             }
@@ -689,7 +689,7 @@ struct OffsetPlanePanel: View {
                     model.planeChoice = .datum(id)
                     switchTool(.newSketch)
                 }
-                .font(.system(size: 19, weight: .bold))
+                .mcFont(19, weight: .bold)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 10)
                 .background(RoundedRectangle(cornerRadius: 10).fill(Color.orange.opacity(0.3)))
@@ -735,21 +735,21 @@ struct AnglePlanePanel: View {
             DatumSourcePicker(model: model, sourceIsDatum: $sourceIsDatum,
                               baseName: $baseName, datumID: $datumID)
             Text("Rotate around")
-                .font(.system(size: 17, weight: .semibold))
+                .mcFont(17, weight: .semibold)
                 .foregroundStyle(.secondary)
             Picker("Axis", selection: $aroundX) {
                 Text("Plane's X axis").tag(true)
                 Text("Plane's Y axis").tag(false)
             }
             .pickerStyle(.segmented)
-            .font(.system(size: 19, weight: .semibold))
+            .mcFont(19, weight: .semibold)
             PanelNumberRow(label: "Angle (degrees)", text: $angleText)
             HStack {
                 Text("Name")
-                    .font(.system(size: 19, weight: .semibold))
+                    .mcFont(19, weight: .semibold)
                 Spacer()
                 TextField("Datum name", text: $nameText)
-                    .font(.system(size: 20, weight: .semibold))
+                    .mcFont(20, weight: .semibold)
                     .frame(width: 170)
                     .textFieldStyle(.roundedBorder)
             }
@@ -759,7 +759,7 @@ struct AnglePlanePanel: View {
                     model.planeChoice = .datum(id)
                     switchTool(.newSketch)
                 }
-                .font(.system(size: 19, weight: .bold))
+                .mcFont(19, weight: .bold)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 10)
                 .background(RoundedRectangle(cornerRadius: 10).fill(Color.orange.opacity(0.3)))
@@ -814,10 +814,10 @@ struct MidplanePanel: View {
             }
             HStack {
                 Text("Name")
-                    .font(.system(size: 19, weight: .semibold))
+                    .mcFont(19, weight: .semibold)
                 Spacer()
                 TextField("Datum name", text: $nameText)
-                    .font(.system(size: 20, weight: .semibold))
+                    .mcFont(20, weight: .semibold)
                     .frame(width: 170)
                     .textFieldStyle(.roundedBorder)
             }
@@ -827,7 +827,7 @@ struct MidplanePanel: View {
                     model.planeChoice = .datum(id)
                     switchTool(.newSketch)
                 }
-                .font(.system(size: 19, weight: .bold))
+                .mcFont(19, weight: .bold)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 10)
                 .background(RoundedRectangle(cornerRadius: 10).fill(Color.orange.opacity(0.3)))
@@ -840,7 +840,7 @@ struct MidplanePanel: View {
                          action: @escaping () -> Void) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(label)
-                .font(.system(size: 17, weight: .semibold))
+                .mcFont(17, weight: .semibold)
                 .foregroundStyle(.secondary)
             if let face {
                 PanelNote(text: "\(mcFaceLabel(face)) · \(mcPlaneText(face.plane))")
@@ -851,7 +851,7 @@ struct MidplanePanel: View {
                 action()
             } label: {
                 Label("Pick on the model…", systemImage: "square.on.square.dashed")
-                    .font(.system(size: 19, weight: .semibold))
+                    .mcFont(19, weight: .semibold)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 10)
             }
@@ -910,7 +910,7 @@ struct ExtrudePanel: View {
                 PanelSketchPicker(label: "Profile sketch", sketches: sketches, selection: $sketchID)
             }
             Text("Operation")
-                .font(.system(size: 17, weight: .semibold))
+                .mcFont(17, weight: .semibold)
                 .foregroundStyle(.secondary)
             Picker("Operation", selection: $operation) {
                 Text("Join (add)").tag("join")
@@ -919,10 +919,10 @@ struct ExtrudePanel: View {
                 Text("New Body").tag("newBody")
             }
             .pickerStyle(.menu)
-            .font(.system(size: 20, weight: .semibold))
+            .mcFont(20, weight: .semibold)
             .frame(maxWidth: .infinity, alignment: .leading)
             Text("End")
-                .font(.system(size: 17, weight: .semibold))
+                .mcFont(17, weight: .semibold)
                 .foregroundStyle(.secondary)
             Picker("End", selection: $endChoice) {
                 Text("Dimension").tag("dimension")
@@ -930,7 +930,7 @@ struct ExtrudePanel: View {
                 Text("Up to Face").tag("upToFace")
             }
             .pickerStyle(.segmented)
-            .font(.system(size: 19, weight: .semibold))
+            .mcFont(19, weight: .semibold)
             if endChoice == "dimension" {
                 PanelNumberRow(label: "Distance (mm)", text: $distanceText)
             }
@@ -943,7 +943,7 @@ struct ExtrudePanel: View {
                 } else {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Target face (of the part as built now)")
-                            .font(.system(size: 17, weight: .semibold))
+                            .mcFont(17, weight: .semibold)
                             .foregroundStyle(.secondary)
                         Picker("", selection: $faceIndex) {
                             ForEach(Array(faces.enumerated()), id: \.offset) { i, face in
@@ -951,13 +951,13 @@ struct ExtrudePanel: View {
                             }
                         }
                         .pickerStyle(.menu)
-                        .font(.system(size: 20, weight: .semibold))
+                        .mcFont(20, weight: .semibold)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
             }
             Text("Type")
-                .font(.system(size: 17, weight: .semibold))
+                .mcFont(17, weight: .semibold)
                 .foregroundStyle(.secondary)
             Picker("Type", selection: $typeChoice) {
                 Text("One side").tag("one")
@@ -1038,7 +1038,7 @@ struct RevolvePanel: View {
                 PanelSketchPicker(label: "Profile sketch", sketches: sketches, selection: $sketchID)
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Axis (a line in the sketch)")
-                        .font(.system(size: 17, weight: .semibold))
+                        .mcFont(17, weight: .semibold)
                         .foregroundStyle(.secondary)
                     Picker("Axis", selection: $axisEntityID) {
                         ForEach(axisLines, id: \.id) { e in
@@ -1046,7 +1046,7 @@ struct RevolvePanel: View {
                         }
                     }
                     .pickerStyle(.menu)
-                    .font(.system(size: 20, weight: .semibold))
+                    .mcFont(20, weight: .semibold)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 if axisLines.isEmpty {
@@ -1101,12 +1101,12 @@ struct HolePanel: View {
             }
             PanelNumberRow(label: "Diameter (mm)", text: $diameterText)
             Toggle("Through (all the way)", isOn: $through)
-                .font(.system(size: 19, weight: .semibold))
+                .mcFont(19, weight: .semibold)
             if !through {
                 PanelNumberRow(label: "Depth (mm)", text: $depthText)
             }
             Text("Type")
-                .font(.system(size: 17, weight: .semibold))
+                .mcFont(17, weight: .semibold)
                 .foregroundStyle(.secondary)
             Picker("Type", selection: $kindChoice) {
                 Text("Simple").tag("simple")
@@ -1325,7 +1325,7 @@ struct FilletPanel: View {
                     radiusText = mcFmt(maxF)
                     apply()
                 }
-                .font(.system(size: 19, weight: .semibold))
+                .mcFont(19, weight: .semibold)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 10)
                 .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.10)))
@@ -1375,7 +1375,7 @@ struct ChamferPanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Mode")
-                .font(.system(size: 17, weight: .semibold))
+                .mcFont(17, weight: .semibold)
                 .foregroundStyle(.secondary)
             Picker("Mode", selection: $modeChoice) {
                 Text("Equal").tag("equal")
@@ -1383,7 +1383,7 @@ struct ChamferPanel: View {
                 Text("Distance + Angle").tag("angle")
             }
             .pickerStyle(.segmented)
-            .font(.system(size: 18, weight: .semibold))
+            .mcFont(18, weight: .semibold)
             if modeChoice == "equal" {
                 PanelNumberRow(label: "Distance (mm)", text: $distanceText)
                 PanelNote(text: "Cuts a flat 45° bevel across every sharp edge of the body built so far, this far back along both faces.")
@@ -1445,7 +1445,7 @@ struct MirrorPanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Mirror plane")
-                .font(.system(size: 17, weight: .semibold))
+                .mcFont(17, weight: .semibold)
                 .foregroundStyle(.secondary)
             Picker("Plane", selection: $plane) {
                 ForEach(MirrorPlane.allCases, id: \.self) { p in
@@ -1475,7 +1475,7 @@ struct PatternPanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Stepper("Copies: \(count)", value: $count, in: 1...24)
-                .font(.system(size: 20, weight: .semibold))
+                .mcFont(20, weight: .semibold)
             PanelNumberRow(label: "Spacing X (mm)", text: $spacingX)
             PanelNumberRow(label: "Spacing Y (mm)", text: $spacingY)
             PanelNumberRow(label: "Spacing Z (mm)", text: $spacingZ)
@@ -1612,9 +1612,9 @@ struct CircularPatternPanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Stepper("Copies: \(count)", value: $count, in: 2...36)
-                .font(.system(size: 20, weight: .semibold))
+                .mcFont(20, weight: .semibold)
             Text("Around axis")
-                .font(.system(size: 17, weight: .semibold))
+                .mcFont(17, weight: .semibold)
                 .foregroundStyle(.secondary)
             Picker("Axis", selection: $axis) {
                 Text("X").tag(0)
@@ -1622,7 +1622,7 @@ struct CircularPatternPanel: View {
                 Text("Z").tag(2)
             }
             .pickerStyle(.segmented)
-            .font(.system(size: 20, weight: .semibold))
+            .mcFont(20, weight: .semibold)
             PanelNumberRow(label: "Total angle (degrees)", text: $totalText)
             PanelNote(text: "Repeats the whole body built so far around the axis through the body's center — copy 1 is the original; 360° spreads the copies evenly all the way around.")
             PanelOKBar(onOK: apply, onCancel: close)
@@ -1647,7 +1647,7 @@ struct DraftPanel: View {
         VStack(alignment: .leading, spacing: 10) {
             PanelNumberRow(label: "Angle (degrees)", text: $angleText)
             Text("Pull axis")
-                .font(.system(size: 17, weight: .semibold))
+                .mcFont(17, weight: .semibold)
                 .foregroundStyle(.secondary)
             Picker("Axis", selection: $axis) {
                 Text("X").tag(0)
@@ -1655,7 +1655,7 @@ struct DraftPanel: View {
                 Text("Z").tag(2)
             }
             .pickerStyle(.segmented)
-            .font(.system(size: 20, weight: .semibold))
+            .mcFont(20, weight: .semibold)
             PanelNote(text: "Mold-release taper: a positive angle narrows the body toward the top of the pull axis, measured from its base. Between −30° and 30°.")
             PanelOKBar(onOK: apply, onCancel: close)
         }
@@ -1680,7 +1680,7 @@ struct ScalePanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Toggle("Uniform (same factor on all axes)", isOn: $uniform)
-                .font(.system(size: 19, weight: .semibold))
+                .mcFont(19, weight: .semibold)
             PanelNumberRow(label: "Factor X", text: $fx)
                 .onChange(of: fx) { _, newValue in
                     if uniform { fy = newValue; fz = newValue }
@@ -1718,7 +1718,7 @@ struct MoveBodyPanel: View {
             PanelNumberRow(label: "Move Y (mm)", text: $ty)
             PanelNumberRow(label: "Move Z (mm)", text: $tz)
             Text("Then rotate around")
-                .font(.system(size: 17, weight: .semibold))
+                .mcFont(17, weight: .semibold)
                 .foregroundStyle(.secondary)
             Picker("Axis", selection: $axis) {
                 Text("X").tag(0)
@@ -1726,7 +1726,7 @@ struct MoveBodyPanel: View {
                 Text("Z").tag(2)
             }
             .pickerStyle(.segmented)
-            .font(.system(size: 20, weight: .semibold))
+            .mcFont(20, weight: .semibold)
             PanelNumberRow(label: "Rotation (degrees)", text: $degreesText)
             PanelNote(text: "Moves the whole body built so far, then rotates it around the chosen axis through its center. Rotation 0 just moves it.")
             PanelOKBar(onOK: apply, onCancel: close)
@@ -1766,7 +1766,7 @@ struct SplitBodyPanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Split across axis")
-                .font(.system(size: 17, weight: .semibold))
+                .mcFont(17, weight: .semibold)
                 .foregroundStyle(.secondary)
             Picker("Axis", selection: $axis) {
                 Text("X").tag(0)
@@ -1774,7 +1774,7 @@ struct SplitBodyPanel: View {
                 Text("Z").tag(2)
             }
             .pickerStyle(.segmented)
-            .font(.system(size: 20, weight: .semibold))
+            .mcFont(20, weight: .semibold)
             if let b = bounds {
                 let e = extent(b)
                 if e.hi - e.lo > 0.02 {

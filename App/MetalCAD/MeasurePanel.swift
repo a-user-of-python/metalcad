@@ -47,7 +47,7 @@ struct MeasurePanel: View {
         let b = mesh.bounds
         return VStack(alignment: .leading, spacing: 6) {
             Text("Part")
-                .font(.system(size: 19, weight: .bold))
+                .mcFont(19, weight: .bold)
             statRow("Volume", mesh.triangleCount > 0 ? "\(String(format: "%.2f", mesh.volume / 1000)) cm³" : "—")
             statRow("Surface area", mesh.triangleCount > 0 ? "\(String(format: "%.1f", meshSurfaceArea(mesh) / 100)) cm²" : "—")
             statRow("Mass", model.rebuild?.massGrams.map(mcMass) ?? "—")
@@ -64,11 +64,11 @@ struct MeasurePanel: View {
     private func statRow(_ label: String, _ value: String) -> some View {
         HStack {
             Text(label)
-                .font(.system(size: 18, weight: .semibold))
+                .mcFont(18, weight: .semibold)
                 .foregroundStyle(.secondary)
             Spacer()
             Text(value)
-                .font(.system(size: 19, weight: .semibold))
+                .mcFont(19, weight: .semibold)
         }
     }
 
@@ -76,7 +76,7 @@ struct MeasurePanel: View {
         let list = faces
         return VStack(alignment: .leading, spacing: 8) {
             Text("Face to face")
-                .font(.system(size: 19, weight: .bold))
+                .mcFont(19, weight: .bold)
             if list.isEmpty {
                 PanelNote(text: "No solid yet — faces appear once the part has a body.")
             } else {
@@ -100,7 +100,7 @@ struct MeasurePanel: View {
     private func facePicker(_ label: String, selection: Binding<Int>, faces list: [PlanarFace]) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(label)
-                .font(.system(size: 17, weight: .semibold))
+                .mcFont(17, weight: .semibold)
                 .foregroundStyle(.secondary)
             Picker("", selection: selection) {
                 Text("None").tag(-1)
@@ -109,7 +109,7 @@ struct MeasurePanel: View {
                 }
             }
             .pickerStyle(.menu)
-            .font(.system(size: 19, weight: .semibold))
+            .mcFont(19, weight: .semibold)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
@@ -134,10 +134,10 @@ struct MeasurePanel: View {
             let d = abs((a.centroid - b.centroid).dot(n1))
             VStack(alignment: .leading, spacing: 2) {
                 Text("Distance between faces")
-                    .font(.system(size: 17, weight: .semibold))
+                    .mcFont(17, weight: .semibold)
                     .foregroundStyle(.secondary)
                 Text("\(mcFmt(d)) mm")
-                    .font(.system(size: 30, weight: .bold))
+                    .mcFont(30, weight: .bold)
                     .foregroundStyle(.orange)
             }
             .padding(.top, 2)

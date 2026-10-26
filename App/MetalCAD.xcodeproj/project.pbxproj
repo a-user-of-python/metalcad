@@ -10,6 +10,7 @@
 		2494647FC5C06D2C0A047E7E = {isa = PBXBuildFile; fileRef = 40A5B1E2E10E2E70C2F51D42; };
 		F569ABDEBBC53A99E905454A = {isa = PBXBuildFile; fileRef = 471A6EEF5C8FDD6150C40363; };
 		45C7944EC51DB71456C4C103 = {isa = PBXBuildFile; fileRef = 59738EC4B0D522A0A01F4C23; };
+		CDC63F138D93452BFCDB43F6 = {isa = PBXBuildFile; fileRef = 71701405E4FF765C4535CEA2; };
 		9F9149344B4E15B857DCD6D9 = {isa = PBXBuildFile; fileRef = 20588C5D3E62C37AFB605620; };
 		67E6CFA3292C95B3A246FCAC = {isa = PBXBuildFile; fileRef = 34EAF74D8F9AD22B1A955824; };
 		13CD248F2BE6E99CDD084E15 = {isa = PBXBuildFile; fileRef = E2B081EF4558CF6FC12889C2; };
@@ -35,6 +36,7 @@
 		40A5B1E2E10E2E70C2F51D42 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DocumentsView.swift; sourceTree = "<group>"; };
 		471A6EEF5C8FDD6150C40363 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorView.swift; sourceTree = "<group>"; };
 		59738EC4B0D522A0A01F4C23 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeatureEditorSheet.swift; sourceTree = "<group>"; };
+		71701405E4FF765C4535CEA2 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Fonts.swift; sourceTree = "<group>"; };
 		20588C5D3E62C37AFB605620 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeasurePanel.swift; sourceTree = "<group>"; };
 		34EAF74D8F9AD22B1A955824 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetalCADApp.swift; sourceTree = "<group>"; };
 		E2B081EF4558CF6FC12889C2 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneKitView.swift; sourceTree = "<group>"; };
@@ -74,6 +76,7 @@
 				40A5B1E2E10E2E70C2F51D42,
 				471A6EEF5C8FDD6150C40363,
 				59738EC4B0D522A0A01F4C23,
+				71701405E4FF765C4535CEA2,
 				20588C5D3E62C37AFB605620,
 				34EAF74D8F9AD22B1A955824,
 				E2B081EF4558CF6FC12889C2,
@@ -159,6 +162,7 @@
 				2494647FC5C06D2C0A047E7E,
 				F569ABDEBBC53A99E905454A,
 				45C7944EC51DB71456C4C103,
+				CDC63F138D93452BFCDB43F6,
 				9F9149344B4E15B857DCD6D9,
 				67E6CFA3292C95B3A246FCAC,
 				13CD248F2BE6E99CDD084E15,

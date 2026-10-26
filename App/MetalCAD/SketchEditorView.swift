@@ -76,6 +76,7 @@ struct SketchEditorView: View {
     @ObservedObject var model: EditorModel
     let sketchID: String
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     enum Tool: String, CaseIterable {
         case select = "Select"
@@ -155,8 +156,6 @@ struct SketchEditorView: View {
 
     private static let textFonts = ["Helvetica-Bold", "Helvetica", "Courier-Bold",
                                     "TimesNewRomanPS-Bold", "Menlo-Bold"]
-
-    private let bigFont = Font.system(size: 20, weight: .semibold)
 
     init(model: EditorModel, sketchID: String) {
         _model = ObservedObject(wrappedValue: model)
@@ -363,7 +362,7 @@ struct SketchEditorView: View {
                 }
                 if let n = solveNote {
                     Text(n)
-                        .font(.system(size: 18))
+                        .mcFont(18)
                         .foregroundStyle(.green)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -374,7 +373,7 @@ struct SketchEditorView: View {
                 toolOptionsRow
                 if isHeavy {
                     Text("Heavy sketch — \(working.entities.count) items. Solver passes are skipped so editing stays responsive; dimensions still apply directly.")
-                        .font(.system(size: 17, weight: .semibold))
+                        .mcFont(17, weight: .semibold)
                         .foregroundStyle(.orange)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -405,9 +404,9 @@ struct SketchEditorView: View {
         HStack(spacing: 14) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(working.name)
-                    .font(.system(size: 24, weight: .bold))
+                    .mcFont(24, weight: .bold)
                 Text("\(working.entities.count) items · \(working.constraints.count) constraints")
-                    .font(.system(size: 17))
+                    .mcFont(17)
                     .foregroundStyle(.secondary)
             }
             Spacer()
@@ -424,20 +423,20 @@ struct SketchEditorView: View {
                 finishAndExtrude()
             } label: {
                 Label("Finish & Extrude", systemImage: "rectangle.expand.vertical")
-                    .font(.system(size: 20, weight: .bold))
+                    .mcFont(20, weight: .bold)
                     .foregroundStyle(.black)
                     .padding(.horizontal, 16)
                     .padding(.vertical, 10)
                     .background(Capsule().fill(Color.orange))
             }
             Button("Done") { dismiss() }
-                .font(.system(size: 20, weight: .semibold))
+                .mcFont(20, weight: .semibold)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 10)
                 .background(Capsule().fill(Color.white.opacity(0.12)))
             Spacer()
             Text("Finish & Extrude needs a closed profile.")
-                .font(.system(size: 16))
+                .mcFont(16)
                 .foregroundStyle(.secondary)
         }
     }
@@ -471,7 +470,7 @@ struct SketchEditorView: View {
 
     private func badge(_ text: String, _ color: Color) -> some View {
         Text(text)
-            .font(.system(size: 19, weight: .bold))
+            .mcFont(19, weight: .bold)
             .foregroundStyle(.black)
             .padding(.horizontal, 14)
             .padding(.vertical, 7)
@@ -481,10 +480,10 @@ struct SketchEditorView: View {
     private func messageRow(text: String, code: String, color: Color) -> some View {
         HStack(spacing: 10) {
             Text(text)
-                .font(.system(size: 18, weight: .semibold))
+                .mcFont(18, weight: .semibold)
                 .foregroundStyle(color)
             Text(code)
-                .font(.system(size: 14, design: .monospaced))
+                .mcFont(14, design: .monospaced)
                 .foregroundStyle(.secondary)
             Spacer()
         }
@@ -504,13 +503,13 @@ struct SketchEditorView: View {
                     HStack(spacing: 8) {
                         if let kind = live.kind {
                             Text(kind.label)
-                                .font(.system(size: 16, weight: .bold))
+                                .mcFont(16, weight: .bold)
                                 .foregroundStyle(.black)
                                 .padding(.horizontal, 8).padding(.vertical, 3)
                                 .background(Capsule().fill(Color.yellow))
                         }
                         Text("X \(mcFmt(live.point.x)) · Y \(mcFmt(live.point.y)) mm")
-                            .font(.system(size: 17, weight: .semibold))
+                            .mcFont(17, weight: .semibold)
                             .foregroundStyle(.yellow)
                     }
                     .padding(8)
@@ -796,7 +795,7 @@ struct SketchEditorView: View {
             let c = t.toView(live.point, in: size)
             drawSnapIndicator(ctx, center: c, kind: kind)
             let label = Text(kind.label)
-                .font(.system(size: 14, weight: .bold))
+                .font(Font.system(size: MCTypeScale.scaled(14, for: dynamicTypeSize), weight: .bold))
                 .foregroundColor(.yellow)
             ctx.draw(label, at: CGPoint(x: c.x + 16, y: c.y - 16))
         }
@@ -869,7 +868,7 @@ struct SketchEditorView: View {
         ctx.stroke(Path(ellipseIn: CGRect(x: c.x - 11, y: c.y - 11, width: 22, height: 22)),
                    with: .color(color), lineWidth: 3)
         let label = Text(letter)
-            .font(.system(size: 15, weight: .bold))
+            .font(Font.system(size: MCTypeScale.scaled(15, for: dynamicTypeSize), weight: .bold))
             .foregroundColor(color)
         ctx.draw(label, at: CGPoint(x: c.x, y: c.y - 24))
     }
@@ -980,25 +979,25 @@ struct SketchEditorView: View {
     private var measureCard: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Measure — tap two points (line ends, centers, points)")
-                .font(.system(size: 20, weight: .bold))
+                .mcFont(20, weight: .bold)
             HStack(spacing: 18) {
                 Text("A: \(measureA?.shortLabel ?? "—")")
                 Text("B: \(measureB?.shortLabel ?? "—")")
             }
-            .font(.system(size: 19, weight: .semibold))
+            .mcFont(19, weight: .semibold)
             if measureA != nil && measureB != nil {
                 HStack(spacing: 10) {
                     Text("Distance")
-                        .font(bigFont)
+                        .mcFont(20, weight: .semibold)
                     TextField("Distance (mm)", text: $measureText)
                         .keyboardType(.numbersAndPunctuation)
-                        .font(.system(size: 22, weight: .bold))
+                        .mcFont(22, weight: .bold)
                         .frame(width: 130)
                         .textFieldStyle(.roundedBorder)
                     Text("mm")
-                        .font(bigFont)
+                        .mcFont(20, weight: .semibold)
                     Button("Apply") { applyMeasure() }
-                        .font(.system(size: 20, weight: .bold))
+                        .mcFont(20, weight: .bold)
                         .foregroundStyle(.black)
                         .padding(.horizontal, 16)
                         .padding(.vertical, 8)
@@ -1008,15 +1007,15 @@ struct SketchEditorView: View {
                         measureB = nil
                         measureText = ""
                     }
-                    .font(bigFont)
+                    .mcFont(20, weight: .semibold)
                     Spacer()
                 }
                 Text("Type a new distance and Apply: an existing Distance dimension is updated, otherwise point B moves to the new distance and the sketch re-solves.")
-                    .font(.system(size: 16))
+                    .mcFont(16)
                     .foregroundStyle(.secondary)
             } else {
                 Text(measureA == nil ? "Tap the first point." : "Tap the second point.")
-                    .font(.system(size: 18, weight: .semibold))
+                    .mcFont(18, weight: .semibold)
                     .foregroundStyle(.yellow)
             }
         }
@@ -1029,14 +1028,14 @@ struct SketchEditorView: View {
     private var textCard: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Text — real letter outlines, added as line loops")
-                .font(.system(size: 20, weight: .bold))
+                .mcFont(20, weight: .bold)
             HStack(spacing: 8) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Text")
-                        .font(.system(size: 15, weight: .semibold))
+                        .mcFont(15, weight: .semibold)
                         .foregroundStyle(.secondary)
                     TextField("Text", text: $textString)
-                        .font(.system(size: 20, weight: .semibold))
+                        .mcFont(20, weight: .semibold)
                         .frame(minWidth: 160)
                         .textFieldStyle(.roundedBorder)
                 }
@@ -1047,7 +1046,7 @@ struct SketchEditorView: View {
                 field("Baseline Y", $textY)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Font")
-                        .font(.system(size: 15, weight: .semibold))
+                        .mcFont(15, weight: .semibold)
                         .foregroundStyle(.secondary)
                     Picker("Font", selection: $textFont) {
                         ForEach(Self.textFonts, id: \.self) { name in
@@ -1055,12 +1054,12 @@ struct SketchEditorView: View {
                         }
                     }
                     .pickerStyle(.menu)
-                    .font(.system(size: 19, weight: .semibold))
+                    .mcFont(19, weight: .semibold)
                 }
             }
             HStack(spacing: 12) {
                 Button("Add Text") { addTextEntities() }
-                    .font(.system(size: 20, weight: .bold))
+                    .mcFont(20, weight: .bold)
                     .foregroundStyle(.black)
                     .padding(.horizontal, 16)
                     .padding(.vertical, 8)
@@ -1068,7 +1067,7 @@ struct SketchEditorView: View {
                 Spacer()
             }
             Text("Tap the canvas to set the baseline start. Then Extrude the sketch — Join embosses the letters, Cut engraves them. Text adds many small lines, so the sketch may go “heavy” (solver skipped).")
-                .font(.system(size: 16))
+                .mcFont(16)
                 .foregroundStyle(.secondary)
         }
         .padding(10)
@@ -1081,7 +1080,7 @@ struct SketchEditorView: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 12) {
                 Text("Edit geometry")
-                    .font(.system(size: 20, weight: .bold))
+                    .mcFont(20, weight: .bold)
                 Spacer()
                 Picker("Applies to", selection: $opScope) {
                     Text("Selected item").tag("selected")
@@ -1092,69 +1091,69 @@ struct SketchEditorView: View {
             }
             if opScope == "selected" && selectedID == nil {
                 Text("Nothing is selected — the operations apply to the whole sketch. Tap an item above the canvas or in the list to target just it.")
-                    .font(.system(size: 16))
+                    .mcFont(16)
                     .foregroundStyle(.secondary)
             }
             // Move
             HStack(spacing: 8) {
                 Text("Move")
-                    .font(bigFont)
+                    .mcFont(20, weight: .semibold)
                     .frame(width: 90, alignment: .leading)
                 field("ΔX mm", $moveDX)
                 field("ΔY mm", $moveDY)
                 Button("Apply") { applyMoveSelection() }
-                    .font(bigFont)
+                    .mcFont(20, weight: .semibold)
                 Spacer()
             }
             // Rotate
             HStack(spacing: 8) {
                 Text("Rotate")
-                    .font(bigFont)
+                    .mcFont(20, weight: .semibold)
                     .frame(width: 90, alignment: .leading)
                 field("Degrees", $rotateDeg)
                 field("Center X", $rotateCX)
                 field("Center Y", $rotateCY)
                 Button("Apply") { applyRotateSelection() }
-                    .font(bigFont)
+                    .mcFont(20, weight: .semibold)
                 Spacer()
             }
             Text("A blank rotate/scale center uses the middle of what's being edited.")
-                .font(.system(size: 15))
+                .mcFont(15)
                 .foregroundStyle(.secondary)
             // Scale
             HStack(spacing: 8) {
                 Text("Scale")
-                    .font(bigFont)
+                    .mcFont(20, weight: .semibold)
                     .frame(width: 90, alignment: .leading)
                 field("Factor", $scaleFactor)
                 field("Center X", $scaleCX)
                 field("Center Y", $scaleCY)
                 Button("Apply") { applyScaleSelection() }
-                    .font(bigFont)
+                    .mcFont(20, weight: .semibold)
                 Spacer()
             }
             // Mirror
             HStack(spacing: 10) {
                 Text("Mirror")
-                    .font(bigFont)
+                    .mcFont(20, weight: .semibold)
                     .frame(width: 90, alignment: .leading)
                 Button("Vertical axis") { applyMirrorSelection(phi: Double.pi / 2) }
-                    .font(bigFont)
+                    .mcFont(20, weight: .semibold)
                 Button("Horizontal axis") { applyMirrorSelection(phi: 0) }
-                    .font(bigFont)
+                    .mcFont(20, weight: .semibold)
                 Button("Across selected line") { mirrorAcrossSelectedLine() }
-                    .font(bigFont)
+                    .mcFont(20, weight: .semibold)
                     .disabled(selectedLineID == nil)
                 Spacer()
             }
             Text("Vertical/horizontal mirror the edit set across the axis through its middle, in place. “Across selected line” mirrors the whole sketch across the selected line (the line itself stays).")
-                .font(.system(size: 15))
+                .mcFont(15)
                 .foregroundStyle(.secondary)
             Divider()
             // Pattern
             HStack(spacing: 12) {
                 Text("Pattern selection")
-                    .font(.system(size: 20, weight: .bold))
+                    .mcFont(20, weight: .bold)
                 Spacer()
                 Picker("Pattern kind", selection: $patternMode) {
                     Text("Rectangular").tag("rect")
@@ -1170,7 +1169,7 @@ struct SketchEditorView: View {
                     field("Spacing X", $patSX)
                     field("Spacing Y", $patSY)
                     Button("Apply") { applyPatternSelection() }
-                        .font(bigFont)
+                        .mcFont(20, weight: .semibold)
                     Spacer()
                 }
             } else {
@@ -1180,38 +1179,38 @@ struct SketchEditorView: View {
                     field("Center X", $patCX)
                     field("Center Y", $patCY)
                     Button("Apply") { applyPatternSelection() }
-                        .font(bigFont)
+                        .mcFont(20, weight: .semibold)
                     Spacer()
                 }
                 Text("Copies counts the original. A blank center uses the middle of the edit set.")
-                    .font(.system(size: 15))
+                    .mcFont(15)
                     .foregroundStyle(.secondary)
             }
             Divider()
             // Offset + project
             HStack(spacing: 8) {
                 Text("Offset profile")
-                    .font(bigFont)
+                    .mcFont(20, weight: .semibold)
                 field("Distance mm", $offsetDist)
                 Button("Apply") { applyOffsetProfile() }
-                    .font(bigFont)
+                    .mcFont(20, weight: .semibold)
                 Spacer()
             }
             Text("Offsets the first closed profile of the sketch (+ grows it, − shrinks it) into a new line loop.")
-                .font(.system(size: 15))
+                .mcFont(15)
                 .foregroundStyle(.secondary)
             HStack(spacing: 10) {
                 Text("Project")
-                    .font(bigFont)
+                    .mcFont(20, weight: .semibold)
                 Button("Body edges") { projectBodyEdges() }
-                    .font(bigFont)
+                    .mcFont(20, weight: .semibold)
                 Button("Face outline") { projectFaceOutline() }
-                    .font(bigFont)
+                    .mcFont(20, weight: .semibold)
                     .disabled(guideOutline.count < 2)
                 Spacer()
             }
             Text("Project Geometry drops the body's sharp edges (or this sketch's host-face outline) into the sketch as gray construction lines to draw against.")
-                .font(.system(size: 15))
+                .mcFont(15)
                 .foregroundStyle(.secondary)
         }
         .padding(10)
@@ -1345,7 +1344,7 @@ struct SketchEditorView: View {
     private var constraintsSection: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Constraints — edit a value, Apply, and the sketch drives from it")
-                .font(.system(size: 19, weight: .bold))
+                .mcFont(19, weight: .bold)
             ForEach(Array(working.constraints.enumerated()), id: \.offset) { i, c in
                 ConstraintRow(
                     constraint: c,
@@ -1385,7 +1384,7 @@ struct SketchEditorView: View {
                             splinePoints = []
                             slotTaps = []
                         }
-                        .font(bigFont)
+                        .mcFont(20, weight: .semibold)
                         .foregroundStyle(tool == option ? .black : .accentColor)
                         .padding(.horizontal, 12).padding(.vertical, 8)
                         .background(Capsule().fill(tool == option ? Color.yellow : Color.clear))
@@ -1394,25 +1393,25 @@ struct SketchEditorView: View {
             }
             HStack(spacing: 14) {
                 Toggle("Snap", isOn: $snapEnabled)
-                    .font(bigFont)
+                    .mcFont(20, weight: .semibold)
                     .fixedSize()
                 if pending != nil {
                     Text("Tap the second point…")
-                        .font(.system(size: 18))
+                        .mcFont(18)
                         .foregroundStyle(.yellow)
                     Button("Cancel") { pending = nil }
-                        .font(bigFont)
+                        .mcFont(20, weight: .semibold)
                 }
                 Spacer()
                 Button("Fit") { frozenTransform = nil }
-                    .font(bigFont)
+                    .mcFont(20, weight: .semibold)
                 Button("Solve") { solve() }
-                    .font(bigFont)
+                    .mcFont(20, weight: .semibold)
             }
             if let lineID = selectedLineID {
                 HStack(spacing: 10) {
                     Text("Line #\(lineID):")
-                        .font(bigFont)
+                        .mcFont(20, weight: .semibold)
                     Button("Horizontal") {
                         working.constraints.append(.horizontal(entity: lineID))
                         changed()
@@ -1423,7 +1422,7 @@ struct SketchEditorView: View {
                     }
                     Spacer()
                 }
-                .font(bigFont)
+                .mcFont(20, weight: .semibold)
             }
         }
     }
@@ -1438,28 +1437,28 @@ struct SketchEditorView: View {
                 Text(splinePoints.isEmpty
                      ? "Spline: tap points — the curve flows through them."
                      : "Spline: \(splinePoints.count) point\(splinePoints.count == 1 ? "" : "s") placed.")
-                    .font(.system(size: 18, weight: .semibold))
+                    .mcFont(18, weight: .semibold)
                     .foregroundStyle(.yellow)
                 Spacer()
                 if splinePoints.count >= 2 {
                     Button("Finish Spline") { finishSpline() }
-                        .font(bigFont)
+                        .mcFont(20, weight: .semibold)
                         .foregroundStyle(.black)
                         .padding(.horizontal, 14).padding(.vertical, 7)
                         .background(Capsule().fill(Color.orange))
                 }
                 if !splinePoints.isEmpty {
                     Button("Cancel") { splinePoints = [] }
-                        .font(bigFont)
+                        .mcFont(20, weight: .semibold)
                 }
             }
         case .polygon:
             HStack(spacing: 12) {
                 Stepper("Sides: \(polygonSides)", value: $polygonSides, in: 3...12)
-                    .font(bigFont)
+                    .mcFont(20, weight: .semibold)
                     .fixedSize()
                 Text("Tap the center, then a corner.")
-                    .font(.system(size: 18))
+                    .mcFont(18)
                     .foregroundStyle(.secondary)
                 Spacer()
             }
@@ -1467,17 +1466,17 @@ struct SketchEditorView: View {
             Text(slotTaps.isEmpty
                  ? "Slot: tap the first center, then the second center, then a point at the radius."
                  : (slotTaps.count == 1 ? "Slot: tap the second center." : "Slot: tap a point at the slot's radius."))
-                .font(.system(size: 18, weight: .semibold))
+                .mcFont(18, weight: .semibold)
                 .foregroundStyle(.yellow)
                 .frame(maxWidth: .infinity, alignment: .leading)
         case .trim:
             Text("Trim: tap a line — the piece between its crossings with other lines is removed. Lines only; a line with no crossings is deleted whole.")
-                .font(.system(size: 18, weight: .semibold))
+                .mcFont(18, weight: .semibold)
                 .foregroundStyle(.yellow)
                 .frame(maxWidth: .infinity, alignment: .leading)
         case .ellipse:
             Text("Ellipse: tap the center, then a corner of its bounding box.")
-                .font(.system(size: 18))
+                .mcFont(18)
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
         default:
@@ -1496,7 +1495,7 @@ struct SketchEditorView: View {
         if let e = working.entity(id) {
             VStack(alignment: .leading, spacing: 8) {
                 Text("Edit — \(describe(e))")
-                    .font(.system(size: 21, weight: .bold))
+                    .mcFont(21, weight: .bold)
                 switch e {
                 case .line:
                     HStack(spacing: 8) {
@@ -1506,11 +1505,11 @@ struct SketchEditorView: View {
                     HStack(spacing: 8) {
                         field("Length mm", $fLength)
                         Button("Apply") { applyLineEdits(id: id) }
-                            .font(bigFont)
+                            .mcFont(20, weight: .semibold)
                         Spacer()
                     }
                     Text("Length is a driving dimension: Apply sets (or updates) a Distance constraint between the line's ends and solves — change 14.3 to 14 and the sketch follows.")
-                        .font(.system(size: 16))
+                        .mcFont(16)
                         .foregroundStyle(.secondary)
                 case .circle:
                     HStack(spacing: 8) {
@@ -1518,17 +1517,17 @@ struct SketchEditorView: View {
                     }
                     HStack {
                         Button("Apply") { applyCircleEdits(id: id) }
-                            .font(bigFont)
+                            .mcFont(20, weight: .semibold)
                         Spacer()
                     }
                     Text("Radius is a driving dimension too: Apply sets (or updates) a Radius constraint and solves.")
-                        .font(.system(size: 16))
+                        .mcFont(16)
                         .foregroundStyle(.secondary)
                 case .point:
                     HStack(spacing: 8) {
                         field("X", $fCX); field("Y", $fCY)
                         Button("Apply") { applyPointEdits(id: id) }
-                            .font(bigFont)
+                            .mcFont(20, weight: .semibold)
                         Spacer()
                     }
                 case .arc:
@@ -1537,22 +1536,22 @@ struct SketchEditorView: View {
                     }
                     HStack {
                         Button("Apply") { applyArcEdits(id: id) }
-                            .font(bigFont)
+                            .mcFont(20, weight: .semibold)
                         Spacer()
                     }
                 }
                 HStack(spacing: 10) {
                     Text("Construction (reference only — not built)")
-                        .font(.system(size: 17, weight: .semibold))
+                        .mcFont(17, weight: .semibold)
                     Spacer()
                     Button(e.isConstruction ? "On" : "Off") { toggleConstruction(id: id) }
-                        .font(bigFont)
+                        .mcFont(20, weight: .semibold)
                         .foregroundStyle(.black)
                         .padding(.horizontal, 14).padding(.vertical, 6)
                         .background(Capsule().fill(e.isConstruction ? Color.yellow : Color.white.opacity(0.15)))
                 }
                 Text("Type exact numbers, then Apply. Dragging a white point also moves it (with snapping).")
-                    .font(.system(size: 16))
+                    .mcFont(16)
                     .foregroundStyle(.secondary)
             }
             .padding(10)
@@ -1563,11 +1562,11 @@ struct SketchEditorView: View {
     private func field(_ label: String, _ binding: Binding<String>) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(label)
-                .font(.system(size: 15, weight: .semibold))
+                .mcFont(15, weight: .semibold)
                 .foregroundStyle(.secondary)
             TextField(label, text: binding)
                 .keyboardType(.numbersAndPunctuation)
-                .font(.system(size: 20, weight: .semibold))
+                .mcFont(20, weight: .semibold)
                 .frame(minWidth: 70)
                 .textFieldStyle(.roundedBorder)
         }
@@ -1646,14 +1645,14 @@ struct SketchEditorView: View {
             ForEach(working.entities, id: \.id) { e in
                 HStack(spacing: 12) {
                     Text(describe(e))
-                        .font(.system(size: 19, weight: e.id == selectedID ? .bold : .regular))
+                        .mcFont(19, weight: e.id == selectedID ? .bold : .regular)
                         .foregroundStyle(e.id == selectedID ? .orange : .primary)
                     Spacer()
                     Button(role: .destructive) {
                         deleteEntity(e.id)
                     } label: {
                         Image(systemName: "trash")
-                            .font(.system(size: 20))
+                            .mcFont(20)
                     }
                     .buttonStyle(.plain)
                 }
@@ -2355,9 +2354,9 @@ struct ConstraintRow: View {
         HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 1) {
                 Text(constraint.displayName)
-                    .font(.system(size: 19, weight: .semibold))
+                    .mcFont(19, weight: .semibold)
                 Text(detail)
-                    .font(.system(size: 16))
+                    .mcFont(16)
                     .foregroundStyle(.secondary)
             }
             Spacer()
@@ -2365,19 +2364,19 @@ struct ConstraintRow: View {
                 TextField("Value", text: $text)
                     .keyboardType(.numbersAndPunctuation)
                     .multilineTextAlignment(.trailing)
-                    .font(.system(size: 20, weight: .bold))
+                    .mcFont(20, weight: .bold)
                     .frame(width: 100)
                     .textFieldStyle(.roundedBorder)
                 Button("Apply") {
                     if let v = Double(text) { onApplyValue(v) }
                 }
-                .font(.system(size: 19, weight: .bold))
+                .mcFont(19, weight: .bold)
             }
             Button(role: .destructive) {
                 onDelete()
             } label: {
                 Image(systemName: "trash")
-                    .font(.system(size: 19))
+                    .mcFont(19)
             }
             .buttonStyle(.plain)
         }

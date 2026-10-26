@@ -77,6 +77,34 @@ public enum IOService {
         return warnings
     }
 
+    /// Wavefront OBJ: one `v` line per vertex of the mesh as given
+    /// (callers pass the welded mesh, so vertices are shared), then
+    /// one 1-indexed `f` line per triangle. Plain and correct — no
+    /// normals or texture coordinates; readers compute flat shading.
+    public static func writeOBJ(_ mesh: Mesh, to url: URL, logger: MCLog = .shared) throws -> [CADError] {
+        var warnings: [CADError] = []
+        if !mesh.isWatertight {
+            warnings.append(.exportNotWatertight(openEdges: mesh.openEdgeCount))
+        }
+        if mesh.hasNaN { throw CADError.kernelShapeInvalid("mesh contains NaN vertices") }
+        func num(_ v: Double) -> String { String(format: "%.6f", v == 0 ? 0 : v) }
+        var text = "# MetalCAD OBJ export\n"
+        for v in mesh.vertices {
+            text += "v \(num(v.x)) \(num(v.y)) \(num(v.z))\n"
+        }
+        for t in 0..<mesh.triangleCount {
+            let a = Int(mesh.indices[t * 3]) + 1
+            let b = Int(mesh.indices[t * 3 + 1]) + 1
+            let c = Int(mesh.indices[t * 3 + 2]) + 1
+            text += "f \(a) \(b) \(c)\n"
+        }
+        do {
+            try text.write(to: url, atomically: true, encoding: .utf8)
+        } catch { throw CADError.exportWriteFailed("\(error)") }
+        logger.info(.io, "OBJ written", context: ["tris": "\(mesh.triangleCount)", "verts": "\(mesh.vertices.count)"])
+        return warnings
+    }
+
     public static func readSTL(data: Data) throws -> Mesh {
         guard data.count >= 84 else { throw CADError.importFileUnreadable("STL too short") }
         let count = data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 80, as: UInt32.self).littleEndian }

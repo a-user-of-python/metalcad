@@ -62,6 +62,35 @@ final class DocumentLibrary: ObservableObject {
         }
     }
 
+    /// Create a BLANK document — one empty part, default material,
+    /// no sketches, no features, no solid — save it, and return it
+    /// ready to open. (User documents start blank; the demo part is
+    /// `createDemoDocument`, kept separate and untouched.)
+    func createBlankDocument() -> (doc: CADDocument, url: URL)? {
+        var n = files.count + 1
+        var name = "Untitled \(n)"
+        var url = docsDir.appendingPathComponent(name + ".json")
+        while FileManager.default.fileExists(atPath: url.path) {
+            n += 1
+            name = "Untitled \(n)"
+            url = docsDir.appendingPathComponent(name + ".json")
+        }
+        var doc = CADDocument(name: name)
+        // Part's default materialID is the library default material.
+        doc.parts.append(Part(name: "Part"))
+        do {
+            try IOService.saveJSON(doc, to: url)
+            refresh()
+            return (doc, url)
+        } catch let e as CADError {
+            MCLog.shared.log(error: e, category: .io)
+            return nil
+        } catch {
+            MCLog.shared.log(error: .unknown("\(error)"), category: .io)
+            return nil
+        }
+    }
+
     func delete(_ file: DocFile) {
         do {
             try FileManager.default.removeItem(at: file.url)
@@ -127,6 +156,9 @@ struct DocumentsView: View {
     @StateObject private var library = DocumentLibrary()
     @EnvironmentObject private var session: AppSession
     @State private var alertInfo: DocAlert?
+    @State private var showSettings = false
+    @AppStorage(MCAccent.key) private var accentHex: String = MCAccent.defaultHex
+    private var accent: Color { MCAccent.color(hex: accentHex) }
 
     var body: some View {
         NavigationStack {
@@ -138,7 +170,7 @@ struct DocumentsView: View {
                             .foregroundStyle(.secondary)
                         Text("No documents yet")
                             .mcFont(26, weight: .bold)
-                        Text("Tap New Document to start one with a demo part.")
+                        Text("Tap New Document to start a blank document.")
                             .mcFont(20)
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
@@ -151,7 +183,7 @@ struct DocumentsView: View {
                             HStack(spacing: 14) {
                                 Image(systemName: "doc")
                                     .mcFont(26)
-                                    .foregroundStyle(.orange)
+                                    .foregroundStyle(accent)
                                 Text(file.displayName)
                                     .mcFont(22, weight: .semibold)
                                 Spacer()
@@ -171,9 +203,17 @@ struct DocumentsView: View {
             }
             .navigationTitle("Documents")
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        showSettings = true
+                    } label: {
+                        Label("Settings", systemImage: "gearshape")
+                            .mcFont(20, weight: .semibold)
+                    }
+                }
                 ToolbarItem(placement: .primaryAction) {
                     Button {
-                        if let made = library.createDemoDocument() {
+                        if let made = library.createBlankDocument() {
                             session.open(document: made.doc, url: made.url)
                         }
                     } label: {
@@ -183,6 +223,9 @@ struct DocumentsView: View {
                 }
             }
             .onAppear { library.refresh() }
+            .sheet(isPresented: $showSettings) {
+                HomeSettingsView()
+            }
             .alert(item: $alertInfo) { info in
                 Alert(
                     title: Text(info.title),
@@ -208,5 +251,92 @@ struct DocumentsView: View {
             alertInfo = DocAlert(title: "Couldn't open document",
                                  message: e.userMessage, code: e.code)
         }
+    }
+}
+
+/// Home ▸ Settings (gear on the Documents screen): the accent
+/// color picker and the Diagnostics entry. The accent choice is
+/// one @AppStorage hex shared by the whole app — editor chrome,
+/// 3D highlights, preview tint — and applies the moment it changes.
+struct HomeSettingsView: View {
+    @Environment(\.dismiss) private var dismiss
+    @AppStorage(MCAccent.key) private var accentHex: String = MCAccent.defaultHex
+    @State private var showDiagnostics = false
+
+    private var accentBinding: Binding<Color> {
+        Binding(
+            get: { MCAccent.color(hex: accentHex) },
+            set: { accentHex = MCAccent.hexString(from: $0) }
+        )
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 64))], spacing: 14) {
+                        ForEach(MCAccent.swatches, id: \.name) { swatch in
+                            Button {
+                                accentHex = swatch.hex
+                            } label: {
+                                VStack(spacing: 4) {
+                                    Circle()
+                                        .fill(MCAccent.color(hex: swatch.hex))
+                                        .frame(width: 44, height: 44)
+                                        .overlay(
+                                            Circle().stroke(Color.white, lineWidth: 3)
+                                                .opacity(accentHex.uppercased() == swatch.hex.uppercased() ? 1 : 0)
+                                        )
+                                    Text(swatch.name)
+                                        .mcFont(14, weight: .semibold)
+                                        .foregroundStyle(.primary)
+                                }
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("\(swatch.name) accent")
+                        }
+                    }
+                    .padding(.vertical, 6)
+                    ColorPicker("Custom color", selection: accentBinding,
+                                supportsOpacity: false)
+                        .mcFont(20, weight: .semibold)
+                } header: {
+                    Text("Accent color")
+                } footer: {
+                    Text("Colors the buttons, selection highlights, sketch glow and previews across the app. Your parts' materials are not affected.")
+                        .mcFont(15)
+                }
+
+                Section("Diagnostics") {
+                    Button {
+                        showDiagnostics = true
+                    } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: "list.bullet.rectangle")
+                                .mcFont(22)
+                            Text("View diagnostics log")
+                                .mcFont(20, weight: .semibold)
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .mcFont(17, weight: .semibold)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .navigationTitle("Settings")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                        .mcFont(19, weight: .semibold)
+                }
+            }
+            .sheet(isPresented: $showDiagnostics) {
+                DiagnosticsView()
+            }
+        }
+        .preferredColorScheme(.dark)
     }
 }

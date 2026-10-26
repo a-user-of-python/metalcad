@@ -1,58 +1,42 @@
 import SwiftUI
 
-/// Shared app state: which document is open in the Editor tab, and which
-/// tab is showing. Documents are opened from DocumentsView via `open`.
+/// Session state for the app's two-screen flow: Home (the document
+/// library) ⇄ Editor. There is no tab bar anymore (top-UI redesign,
+/// 2026-10-26): Home is the root, opening a document presents the
+/// editor, and the editor's Home button returns here. Diagnostics
+/// moved into Home ▸ Settings.
 final class AppSession: ObservableObject {
     @Published var editorModel: EditorModel?
-    @Published var tab: Int = 0
 
     func open(document: CADDocument, url: URL) {
         editorModel = EditorModel(document: document, url: url)
-        tab = 1
+    }
+
+    /// Back to the files screen.
+    func closeEditor() {
+        editorModel = nil
     }
 }
 
-/// Top-level shell: Documents / Editor / Diagnostics.
-/// Dark, high-contrast, large type throughout (hard requirement).
+/// Top-level shell. Dark, high-contrast, large type throughout
+/// (hard requirement).
 struct ContentView: View {
     @StateObject private var session = AppSession()
+    @AppStorage(MCAccent.key) private var accentHex: String = MCAccent.defaultHex
 
     var body: some View {
-        TabView(selection: $session.tab) {
-            DocumentsView()
-                .environmentObject(session)
-                .tabItem { Label("Documents", systemImage: "folder") }
-                .tag(0)
-
-            editorTab
-                .tabItem { Label("Editor", systemImage: "cube") }
-                .tag(1)
-
-            DiagnosticsView()
-                .tabItem { Label("Diagnostics", systemImage: "list.bullet.rectangle") }
-                .tag(2)
+        Group {
+            if let model = session.editorModel {
+                EditorView(model: model)
+                    .id(model.fileURL.path)
+                    .environmentObject(session)
+            } else {
+                DocumentsView()
+                    .environmentObject(session)
+            }
         }
         .preferredColorScheme(.dark)
-        .tint(.orange)
-    }
-
-    @ViewBuilder
-    private var editorTab: some View {
-        if let model = session.editorModel {
-            EditorView(model: model)
-                .id(model.fileURL.path)
-        } else {
-            VStack(spacing: 14) {
-                Image(systemName: "cube")
-                    .mcFont(54)
-                    .foregroundStyle(.secondary)
-                Text("No document open")
-                    .mcFont(26, weight: .bold)
-                Text("Open one from the Documents tab.")
-                    .mcFont(20)
-                    .foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
+        // The user's accent color tints the whole app's chrome.
+        .tint(MCAccent.color(hex: accentHex))
     }
 }

@@ -49,6 +49,9 @@ final class EditorModel: ObservableObject {
     @Published var actionError: CADError?
     @Published var saveMessage: String?
     @Published var stlURL: URL?
+    /// File produced by the latest Save As format export — the Save
+    /// As sheet presents it with the standard share/save sheet.
+    @Published var shareURL: URL?
     @Published var stlWarnings: [CADError] = []
     @Published var partIndex: Int = 0
     /// Face outlines (in sketch-plane coordinates) for sketches created
@@ -106,8 +109,9 @@ final class EditorModel: ObservableObject {
     // MARK: Live draft preview (uncommitted feature changes)
     /// The feature list the live preview shows, or nil when no panel
     /// is drafting. Panels keep this in sync with their fields (see
-    /// draftAppend / draftReplacing) so the 3D view ghosts the result
-    /// BEFORE the user commits with OK.
+    /// draftAppend / draftReplacing) so the 3D view shows the result
+    /// — as a tinted preview REPLACING the model — BEFORE the user
+    /// commits with OK.
     @Published var draftFeatures: [Feature]?
     /// Mesh of the latest draft rebuild (nil when no draft).
     @Published var previewMesh: Mesh?
@@ -118,17 +122,31 @@ final class EditorModel: ObservableObject {
     /// draft itself still applies on OK.
     @Published var previewNote: String?
     private var draftWorkItem: DispatchWorkItem?
-    private var draftBusy = false
-    /// One pending draft rebuild: the candidate feature list, plus —
-    /// for flows that generate their own sketch (face pull, hole
-    /// here) — the full sketch list the preview part should carry
-    /// instead of the committed part's. nil sketches = the part's own.
-    private struct DraftRequest: Equatable {
-        var features: [Feature]?
-        var sketches: [Sketch]?
+    /// Serial background queue for draft rebuilds. The kit rebuild is
+    /// pure value math (and MCLog's ring buffer / file sink are
+    /// NSLock-protected), so it is safe off the main thread; results
+    /// hop back to the main queue to publish.
+    private let draftQueue = DispatchQueue(label: "metalcad.draft-preview",
+                                           qos: .userInitiated)
+    /// Monotonic draft generation, bumped by EVERY setDraft call. A
+    /// rebuild that finishes for an older generation is dropped, so
+    /// while the user scrubs a slider the preview tracks the newest
+    /// value and can never jump backwards to a stale intermediate.
+    private var draftGeneration = 0
+    private let draftGenerationLock = NSLock()
+
+    private func bumpDraftGeneration() -> Int {
+        draftGenerationLock.lock()
+        defer { draftGenerationLock.unlock() }
+        draftGeneration += 1
+        return draftGeneration
     }
-    /// Latest coalesced request while a draft rebuild was running.
-    private var draftQueued: DraftRequest?
+
+    private func currentDraftGeneration() -> Int {
+        draftGenerationLock.lock()
+        defer { draftGenerationLock.unlock() }
+        return draftGeneration
+    }
     /// The New Sketch panel's plane selection (kept here so it
     /// survives the panel closing while a face is picked).
     @Published var planeChoice: PlaneChoice = .none
@@ -160,61 +178,80 @@ final class EditorModel: ObservableObject {
     // MARK: Draft previews
 
     /// Schedule a live preview rebuild of `features` (nil clears the
-    /// preview). Debounced ~250 ms so dragging a slider or typing in
-    /// a field doesn't rebuild per keystroke; if a rebuild is already
-    /// running, only the newest request is kept (coalesced). The
-    /// rebuild itself is the same synchronous kit call the committed
-    /// rebuild uses. Pass `sketches` when the candidate feature needs
-    /// a generated sketch the committed part doesn't have yet — the
+    /// preview). The rebuild runs ASYNCHRONOUSLY on a background
+    /// queue after a ~50 ms debounce (device report, 2026-10-26: the
+    /// preview must track a slider IN REAL TIME, not land whenever
+    /// the user pauses) — 50 ms is just enough to batch the burst of
+    /// changes a scrub or a keystroke produces. Each call bumps the
+    /// draft generation; a result that finishes stale is dropped, so
+    /// the on-screen preview always corresponds to the newest field
+    /// values. Pass `sketches` when the candidate feature needs a
+    /// generated sketch the committed part doesn't have yet — the
     /// preview part carries that list instead; the committed part is
     /// never touched.
     func setDraft(_ features: [Feature]?, sketches: [Sketch]? = nil) {
         draftFeatures = features
+        // Bump FIRST, before anything else: this alone invalidates
+        // every in-flight rebuild, including when the outcome below
+        // is "clear" or "paused".
+        let generation = bumpDraftGeneration()
         draftWorkItem?.cancel()
-        let request = DraftRequest(features: features, sketches: sketches)
-        let item = DispatchWorkItem { [weak self] in
-            self?.requestDraftRun(request)
-        }
-        draftWorkItem = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: item)
-    }
-
-    private func requestDraftRun(_ request: DraftRequest) {
-        if draftBusy {
-            draftQueued = request
-            return
-        }
-        runDraft(request)
-    }
-
-    private func runDraft(_ request: DraftRequest) {
-        guard let features = request.features, var p = part else {
+        draftWorkItem = nil
+        guard let features else {
             previewMesh = nil
             previewError = nil
             previewNote = nil
             return
         }
-        draftBusy = true
         // Very large parts make every draft rebuild expensive (the
         // iPad ran hot, 2026-10-26): past ~150k triangles in the
-        // current result, skip the ghost entirely and say so — the
-        // feature still applies, exactly, on OK.
+        // current result, skip the preview entirely and say so — the
+        // feature still applies, exactly, on OK. Decided here, before
+        // scheduling; the generation bump above keeps an in-flight
+        // stale result from landing after the pause.
         if (rebuild?.mesh.triangleCount ?? 0) > 150_000 {
             previewMesh = nil
             previewError = nil
             previewNote = "Preview paused — the part is large; the result applies on OK"
-        } else {
-            previewNote = nil
-            p.features = features
-            if let sketches = request.sketches { p.sketches = sketches }
-            let result = DocumentEngine.rebuild(part: p)
-            previewMesh = result.mesh
-            previewError = result.firstError
+            return
         }
-        draftBusy = false
-        if let queued = draftQueued {
-            draftQueued = nil
-            if queued != request { runDraft(queued) }
+        previewNote = nil
+        guard var snapshot = part else {
+            previewMesh = nil
+            previewError = nil
+            return
+        }
+        snapshot.features = features
+        if let sketches { snapshot.sketches = sketches }
+        let item = DispatchWorkItem { [weak self] in
+            self?.runDraft(snapshot: snapshot, generation: generation)
+        }
+        draftWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: item)
+    }
+
+    /// Run one draft rebuild on the background queue and publish its
+    /// result on the main queue — unless a newer draft superseded it
+    /// in the meantime, at either end of the trip.
+    private func runDraft(snapshot: Part, generation: Int) {
+        draftQueue.async { [weak self] in
+            // Superseded before we even started: don't burn the
+            // rebuild at all (a fast scrub queues several of these).
+            guard let self, self.currentDraftGeneration() == generation else { return }
+            let result = DocumentEngine.rebuild(part: snapshot)
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.currentDraftGeneration() == generation else { return }
+                // Invariant: a FAILED draft shows the COMMITTED
+                // model plus the error banner — never a stale or
+                // partial preview mesh.
+                if let err = result.firstError {
+                    self.previewMesh = nil
+                    self.previewError = err
+                } else {
+                    self.previewMesh = result.mesh
+                    self.previewError = nil
+                }
+            }
         }
     }
 
@@ -320,6 +357,38 @@ final class EditorModel: ObservableObject {
         if selectedSketchID == id { selectedSketchID = nil }
         hiddenSketchIDs.remove(id)
         mutate { $0.sketches.removeAll { $0.id == id } }
+    }
+
+    // MARK: Renaming
+
+    /// Rename a sketch. Names are display-only — every feature
+    /// reference keys on the sketch's ID, so a rename can never
+    /// break the feature tree. No rebuild is needed (names don't
+    /// affect geometry); the document mutation alone refreshes the
+    /// lists, and the change persists with the next Save like every
+    /// other edit. Empty / whitespace-only names are ignored.
+    func renameSketch(id: String, name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !document.parts.isEmpty else { return }
+        let i = min(partIndex, document.parts.count - 1)
+        guard let idx = document.parts[i].sketches.firstIndex(where: { $0.id == id }),
+              document.parts[i].sketches[idx].name != trimmed else { return }
+        document.parts[i].sketches[idx].name = trimmed
+        saveMessage = nil
+        MCLog.shared.info(.sketch, "sketch renamed", context: ["id": id])
+    }
+
+    /// Rename a feature (same rules as `renameSketch` — display-only,
+    /// no rebuild, persists on Save).
+    func renameFeature(id: String, name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !document.parts.isEmpty else { return }
+        let i = min(partIndex, document.parts.count - 1)
+        guard let idx = document.parts[i].features.firstIndex(where: { $0.id == id }),
+              document.parts[i].features[idx].name != trimmed else { return }
+        document.parts[i].features[idx].name = trimmed
+        saveMessage = nil
+        MCLog.shared.info(.feature, "feature renamed", context: ["id": id])
     }
 
     func setMaterial(_ materialID: String) {
@@ -615,6 +684,16 @@ final class EditorModel: ObservableObject {
     }
 
     func exportSTL() {
+        exportSTL(toShare: false)
+    }
+
+    /// Save As ▸ STL — the same binary STL as the Export STL button,
+    /// but the file lands in `shareURL` for the sheet's share step.
+    func exportSTLForShare() {
+        exportSTL(toShare: true)
+    }
+
+    private func exportSTL(toShare: Bool) {
         guard let mesh = rebuild?.mesh, mesh.triangleCount > 0 else {
             actionError = .exportWriteFailed("there is no solid to export yet")
             MCLog.shared.log(error: .exportWriteFailed("empty mesh"), category: .io)
@@ -627,7 +706,45 @@ final class EditorModel: ObservableObject {
             // Export uses the raw welded mesh — triangles live here,
             // never in the smooth preview.
             stlWarnings = try IOService.writeSTL(mesh.welded(), to: url)
-            stlURL = url
+            if toShare { shareURL = url } else { stlURL = url }
+        } catch let e as CADError {
+            actionError = e
+        } catch {
+            actionError = .unknown("\(error)")
+        }
+    }
+
+    /// Save As ▸ MetalCAD Document (.metaldoc): the current document
+    /// serialized as its native Codable JSON — reopens in MetalCAD
+    /// exactly as-is, sketches and feature history included.
+    func exportMetalDoc() {
+        let safeName = document.name.replacingOccurrences(of: "/", with: "-")
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(safeName).metaldoc")
+        do {
+            try IOService.saveJSON(document, to: url)
+            shareURL = url
+            actionError = nil
+        } catch let e as CADError {
+            actionError = e
+        } catch {
+            actionError = .unknown("\(error)")
+        }
+    }
+
+    /// Save As ▸ OBJ: the welded result mesh as a Wavefront OBJ.
+    func exportOBJ() {
+        guard let mesh = rebuild?.mesh, mesh.triangleCount > 0 else {
+            actionError = .exportWriteFailed("there is no solid to export yet")
+            MCLog.shared.log(error: .exportWriteFailed("empty mesh"), category: .io)
+            return
+        }
+        let safeName = document.name.replacingOccurrences(of: "/", with: "-")
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(safeName).obj")
+        do {
+            stlWarnings = try IOService.writeOBJ(mesh.welded(), to: url)
+            shareURL = url
         } catch let e as CADError {
             actionError = e
         } catch {
@@ -642,10 +759,34 @@ final class EditorModel: ObservableObject {
 /// Inspect), a browser on the left (sketches + the feature timeline in
 /// build order), the smooth preview in the middle, and a context panel
 /// on the right for the active tool.
+/// What the browser/history Rename alert is editing: a sketch or a
+/// feature, addressed by ID — the same way features reference
+/// sketches — so a rename can never break the model.
+private struct RenameTarget: Identifiable {
+    enum Kind { case sketch, feature }
+    let kind: Kind
+    let targetID: String
+    let currentName: String
+    var id: String { "\(kind == .sketch ? "sketch" : "feature"):\(targetID)" }
+}
+
 struct EditorView: View {
     @ObservedObject var model: EditorModel
+    /// App navigation (Home ⇄ Editor) — the header's Home button
+    /// closes the editor back to the files screen.
+    @EnvironmentObject private var session: AppSession
+    /// The user's accent color (Home ▸ Settings) — one stored hex
+    /// drives this view's chrome and is handed to SceneKitView for
+    /// the 3D highlights/tint.
+    @AppStorage(MCAccent.key) private var accentHex: String = MCAccent.defaultHex
+    private var accent: Color { MCAccent.color(hex: accentHex) }
     @State private var featureToEdit: Feature?
     @State private var showMaterialPicker = false
+    @State private var showSaveAsSheet = false
+    /// Rename alert state (browser / history rows): the target whose
+    /// name is being edited, and the text field's working copy.
+    @State private var renameTarget: RenameTarget?
+    @State private var renameText: String = ""
     @State private var pickingFace = false
     @State private var pickPurpose: FacePickPurpose = .sketchOnFace
     @State private var sketchNav: SketchNav?
@@ -757,23 +898,9 @@ struct EditorView: View {
             .navigationDestination(item: $sketchNav) { nav in
                 SketchEditorView(model: model, sketchID: nav.id)
             }
-            .toolbar {
-                ToolbarItemGroup(placement: .primaryAction) {
-                    if let msg = model.saveMessage {
-                        Text(msg)
-                            .mcFont(17, weight: .semibold)
-                            .foregroundStyle(.green)
-                    }
-                    Button("Save") { model.save() }
-                        .mcFont(19, weight: .semibold)
-                    Button("Export STL") { model.exportSTL() }
-                        .mcFont(19, weight: .semibold)
-                    if let url = model.stlURL {
-                        ShareLink(item: url) { Text("Share STL") }
-                            .mcFont(19, weight: .semibold)
-                    }
-                }
-            }
+            // Save / Save As / Export used to live here as text
+            // links — they moved into the header strip as separate
+            // icon+text chips (top-UI redesign, 2026-10-26).
         }
         .onChange(of: model.pendingExtrudeSketchID) { _, newID in
             guard let newID else { return }
@@ -833,6 +960,123 @@ struct EditorView: View {
                     onDraftEnd: { model.setDraft(nil) }
                 )
             }
+            .sheet(isPresented: $showSaveAsSheet) {
+                saveAsSheet
+            }
+            .alert("Rename", isPresented: renamePresented,
+                   presenting: renameTarget) { target in
+                TextField("Name", text: $renameText)
+                    .mcFont(20)
+                Button("Rename") {
+                    switch target.kind {
+                    case .sketch: model.renameSketch(id: target.targetID, name: renameText)
+                    case .feature: model.renameFeature(id: target.targetID, name: renameText)
+                    }
+                    renameTarget = nil
+                }
+                Button("Cancel", role: .cancel) { renameTarget = nil }
+            } message: { target in
+                Text("Rename “\(target.currentName)”")
+            }
+    }
+
+    private var renamePresented: Binding<Bool> {
+        Binding(get: { renameTarget != nil },
+                set: { if !$0 { renameTarget = nil } })
+    }
+
+    private func beginRename(kind: RenameTarget.Kind, id: String, name: String) {
+        renameText = name
+        renameTarget = RenameTarget(kind: kind, targetID: id, currentName: name)
+    }
+
+    /// Save As sheet (header): in-place Save on top — saving in
+    /// MetalCAD is manual, nothing autosaves, so the ability stays
+    /// in the sheet — then the export formats. Tapping a format
+    /// generates the file and the share row appears (the same
+    /// generate-then-share pattern as Export STL ▸ Share STL).
+    private var saveAsSheet: some View {
+        NavigationStack {
+            List {
+                Section {
+                    Button {
+                        model.save()
+                        showSaveAsSheet = false
+                    } label: {
+                        saveAsRow("Save", icon: "square.and.arrow.down",
+                                  detail: "Save in place, in your Documents library — same file, same name.")
+                    }
+                    .buttonStyle(.plain)
+                }
+                Section("Export a copy") {
+                    Button { model.exportMetalDoc() } label: {
+                        saveAsRow("MetalCAD Document (.metaldoc)", icon: "doc.fill",
+                                  detail: "The native file — reopens in MetalCAD exactly as-is, sketches and history included.")
+                    }
+                    .buttonStyle(.plain)
+                    Button { model.exportSTLForShare() } label: {
+                        saveAsRow("STL (.stl)", icon: "cube.fill",
+                                  detail: "Binary mesh for 3D printing and slicers.")
+                    }
+                    .buttonStyle(.plain)
+                    Button { model.exportOBJ() } label: {
+                        saveAsRow("OBJ (.obj)", icon: "square.stack.3d.up.fill",
+                                  detail: "Mesh for Blender and other 3D tools.")
+                    }
+                    .buttonStyle(.plain)
+                }
+                if let url = model.shareURL {
+                    Section {
+                        ShareLink(item: url) {
+                            HStack(spacing: 10) {
+                                Image(systemName: "square.and.arrow.up")
+                                    .mcFont(22)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text("Share / Save file")
+                                        .mcFont(20, weight: .semibold)
+                                    Text(url.lastPathComponent)
+                                        .mcFont(16)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                if let err = model.actionError {
+                    Section {
+                        Text("\(err.userMessage) (\(err.code))")
+                            .mcFont(17, weight: .semibold)
+                            .foregroundStyle(.red)
+                    }
+                }
+            }
+            .navigationTitle("Save As")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close") { showSaveAsSheet = false }
+                }
+            }
+        }
+        .preferredColorScheme(.dark)
+    }
+
+    private func saveAsRow(_ title: String, icon: String, detail: String) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .mcFont(24)
+                .frame(width: 34)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                    .mcFont(20, weight: .semibold)
+                Text(detail)
+                    .mcFont(16)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
     }
 
     // MARK: Mesh / section plumbing
@@ -852,10 +1096,6 @@ struct EditorView: View {
 
     private var displayMesh: Mesh {
         sectionOn ? (sectionedMesh ?? baseMesh) : baseMesh
-    }
-
-    private var meshKey: String {
-        "\(displayMesh.triangleCount)-\(displayMesh.volume)-\(model.part?.materialID ?? "")-sec\(sectionOn)-\(sectionT)"
     }
 
     private var sectionNormal: Vec3 {
@@ -896,8 +1136,57 @@ struct EditorView: View {
 
     // MARK: Header strip (always visible)
 
+    /// Header file buttons (top-UI redesign): separate chip
+    /// buttons at the far LEFT of the header — Home back to the
+    /// files screen, Save As (format sheet), Export STL — each an
+    /// SF Symbol + text, chip-styled like the ribbon buttons,
+    /// never joined and never bare text links.
+    private var headerFileButtons: some View {
+        HStack(spacing: 10) {
+            headerChip("Home", icon: "house.fill") { session.closeEditor() }
+            headerChip("Save As", icon: "square.and.arrow.down") {
+                model.shareURL = nil
+                showSaveAsSheet = true
+            }
+            headerChip("Export STL", icon: "cube") { model.exportSTL() }
+            if let url = model.stlURL {
+                ShareLink(item: url) {
+                    headerChipLabel("Share STL", icon: "square.and.arrow.up")
+                }
+                .buttonStyle(.plain)
+            }
+            if let msg = model.saveMessage {
+                Text(msg)
+                    .mcFont(17, weight: .semibold)
+                    .foregroundStyle(.green)
+            }
+        }
+    }
+
+    private func headerChip(_ title: String, icon: String,
+                            action: @escaping () -> Void) -> some View {
+        Button(action: action) { headerChipLabel(title, icon: icon) }
+            .buttonStyle(.plain)
+    }
+
+    private func headerChipLabel(_ title: String, icon: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: icon)
+                .mcFont(19, weight: .semibold)
+            Text(title)
+                .mcFont(19, weight: .semibold)
+        }
+        .padding(.horizontal, 14)
+        .frame(minHeight: 46)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.06)))
+        .overlay(RoundedRectangle(cornerRadius: 10)
+            .stroke(Color.white.opacity(0.12), lineWidth: 1))
+        .foregroundStyle(.primary)
+    }
+
     private var headerStrip: some View {
         HStack(spacing: 18) {
+            headerFileButtons
             Button {
                 toggleBrowserPanel()
             } label: {
@@ -1115,7 +1404,7 @@ struct EditorView: View {
             .frame(minWidth: 80, minHeight: 58)
             .padding(.horizontal, 4)
             .background(RoundedRectangle(cornerRadius: 10)
-                .fill(active ? Color.orange : Color.white.opacity(0.06)))
+                .fill(active ? accent : Color.white.opacity(0.06)))
         }
         .buttonStyle(.plain)
     }
@@ -1145,7 +1434,7 @@ struct EditorView: View {
             .frame(minWidth: 80, minHeight: 58)
             .padding(.horizontal, 4)
             .background(RoundedRectangle(cornerRadius: 10)
-                .fill(isActive ? Color.orange : Color.white.opacity(0.06)))
+                .fill(isActive ? accent : Color.white.opacity(0.06)))
         }
     }
 
@@ -1164,9 +1453,16 @@ struct EditorView: View {
             }
             ZStack(alignment: .bottom) {
                 SceneKitView(
-                    mesh: displayMesh,
+                    // A live draft PREVIEW REPLACES the model while a
+                    // panel drafts (isPreview tints it) — no overlay
+                    // ghost: coincident surfaces z-fought into orange
+                    // shards. The preview also takes precedence over
+                    // the section-cut display mesh while active.
+                    mesh: model.previewMesh ?? displayMesh,
                     material: model.part?.material,
-                    ghostMesh: model.previewMesh,
+                    isPreview: model.previewMesh != nil,
+                    documentID: model.document.id,
+                    accentUIColor: MCAccent.uiColor(hex: accentHex),
                     sketches: model.part?.sketches ?? [],
                     selectedSketchID: model.selectedSketchID,
                     hiddenSketchIDs: model.hiddenSketchIDs,
@@ -1205,7 +1501,11 @@ struct EditorView: View {
                         handleModelDoubleTap(triangleIndex: triangleIndex, point: point)
                     }
                 )
-                .id(meshKey)
+                // NO .id() here: pinning the view's identity to the
+                // mesh used to recreate the SCNView on every commit,
+                // which reset the camera to its default framing.
+                // Geometry rebuilds in place (SceneKitView's own
+                // key), and the camera pose persists per document.
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 if let selID = model.selectedSketchID, activeTool == nil, !pickingFace,
                    model.picked == nil,
@@ -1315,7 +1615,7 @@ struct EditorView: View {
                 .mcFont(20, weight: .semibold)
         }
         .padding(12)
-        .background(RoundedRectangle(cornerRadius: 12).fill(Color.orange.opacity(0.25)))
+        .background(RoundedRectangle(cornerRadius: 12).fill(accent.opacity(0.25)))
     }
 
     private var pickBannerText: String {
@@ -1370,7 +1670,7 @@ struct EditorView: View {
             Text("Triangles: \(displayMesh.triangleCount)")
             if sectionOn {
                 Text("Section view")
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(accent)
             }
             if let w = model.rebuild?.warnings, !w.isEmpty {
                 Text("\(w.count) warning\(w.count == 1 ? "" : "s")")
@@ -1437,7 +1737,7 @@ struct EditorView: View {
         }
         .padding(12)
         .background(RoundedRectangle(cornerRadius: 14).fill(Color.black.opacity(0.75)))
-        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.orange.opacity(0.5), lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(accent.opacity(0.5), lineWidth: 1))
         .padding(10)
     }
 
@@ -1536,7 +1836,7 @@ struct EditorView: View {
         }
         .padding(12)
         .background(RoundedRectangle(cornerRadius: 14).fill(Color.black.opacity(0.75)))
-        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.orange.opacity(0.5), lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(accent.opacity(0.5), lineWidth: 1))
         .padding(10)
     }
 
@@ -1651,7 +1951,7 @@ struct EditorView: View {
             HStack(spacing: 12) {
                 Image(systemName: quickCut ? "arrow.down.circle.fill" : "arrow.up.circle.fill")
                     .mcFont(30)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(accent)
                 Text("\(quickCut ? "Press" : "Pull") · \(mcFmt(quickDistance)) mm")
                     .mcFont(30, weight: .bold)
                     .lineLimit(1)
@@ -1674,12 +1974,12 @@ struct EditorView: View {
                     .foregroundStyle(.black)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 13)
-                    .background(RoundedRectangle(cornerRadius: 10).fill(Color.orange))
+                    .background(RoundedRectangle(cornerRadius: 10).fill(accent))
             }
         }
         .padding(14)
         .background(RoundedRectangle(cornerRadius: 14).fill(Color.black.opacity(0.80)))
-        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.orange.opacity(0.5), lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(accent.opacity(0.5), lineWidth: 1))
         .padding(10)
     }
 
@@ -1702,9 +2002,9 @@ struct EditorView: View {
             .padding(.horizontal, 14)
             .frame(minHeight: 48)
             .background(RoundedRectangle(cornerRadius: 12)
-                .fill(model.measureMode ? Color.orange : Color.black.opacity(0.75)))
+                .fill(model.measureMode ? accent : Color.black.opacity(0.75)))
             .overlay(RoundedRectangle(cornerRadius: 12)
-                .stroke(Color.orange.opacity(0.5), lineWidth: 1))
+                .stroke(accent.opacity(0.5), lineWidth: 1))
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Toggle quick measure")
@@ -1735,7 +2035,7 @@ struct EditorView: View {
                 if let edge = model.measureEdgeLength {
                     Text("Edge \(mcFmt(edge)) mm")
                         .mcFont(17, weight: .semibold)
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(accent)
                 }
             }
             if !model.measurePoints.isEmpty || model.measureEdgeLength != nil {
@@ -1752,7 +2052,7 @@ struct EditorView: View {
         }
         .padding(12)
         .background(RoundedRectangle(cornerRadius: 14).fill(Color.black.opacity(0.75)))
-        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.orange.opacity(0.5), lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(accent.opacity(0.5), lineWidth: 1))
     }
 
     private func actionBarButton(_ label: String, icon: String,
@@ -1890,11 +2190,11 @@ struct EditorView: View {
                         } label: {
                             Image(systemName: sketch.isDatumPlane ? "square.on.square" : "square.and.pencil")
                                 .mcFont(22)
-                                .foregroundStyle(sketch.isDatumPlane ? .teal : .orange)
+                                .foregroundStyle(sketch.isDatumPlane ? Color.teal : accent)
                                 .frame(width: 44, height: 44)
                                 .background(RoundedRectangle(cornerRadius: 10)
                                     .fill(model.selectedSketchID == sketch.id
-                                          ? Color.orange.opacity(0.35)
+                                          ? accent.opacity(0.35)
                                           : Color.white.opacity(0.06)))
                         }
                         .buttonStyle(.plain)
@@ -1911,7 +2211,7 @@ struct EditorView: View {
                             ZStack(alignment: .topTrailing) {
                                 Image(systemName: iconName(for: feature.kind))
                                     .mcFont(22)
-                                    .foregroundStyle(.orange)
+                                    .foregroundStyle(accent)
                                     .frame(width: 44, height: 44)
                                     .background(RoundedRectangle(cornerRadius: 10)
                                         .fill(Color.white.opacity(0.06)))
@@ -1973,7 +2273,7 @@ struct EditorView: View {
                 HStack(spacing: 10) {
                     Image(systemName: sketch.isDatumPlane ? "square.on.square" : "square.and.pencil")
                         .mcFont(22)
-                        .foregroundStyle(sketch.isDatumPlane ? .teal : .orange)
+                        .foregroundStyle(sketch.isDatumPlane ? Color.teal : accent)
                         .frame(width: 30)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(sketch.name)
@@ -2017,6 +2317,11 @@ struct EditorView: View {
             }
             Menu {
                 Button {
+                    beginRename(kind: .sketch, id: sketch.id, name: sketch.name)
+                } label: {
+                    Label("Rename…", systemImage: "pencil")
+                }
+                Button {
                     model.redefineChoice = .none
                     activeTool = .redefinePlane(sketch.id)
                 } label: {
@@ -2035,7 +2340,7 @@ struct EditorView: View {
             .buttonStyle(.plain)
         }
         .padding(.vertical, 2)
-        .listRowBackground(model.selectedSketchID == sketch.id ? Color.orange.opacity(0.16) : Color.clear)
+        .listRowBackground(model.selectedSketchID == sketch.id ? accent.opacity(0.16) : Color.clear)
     }
 
     private func featureRow(_ feature: Feature) -> some View {
@@ -2043,7 +2348,7 @@ struct EditorView: View {
             statusIcon(for: feature)
             Image(systemName: iconName(for: feature.kind))
                 .mcFont(22)
-                .foregroundStyle(.orange)
+                .foregroundStyle(accent)
                 .frame(width: 30)
             VStack(alignment: .leading, spacing: 2) {
                 Text(feature.name)
@@ -2094,6 +2399,13 @@ struct EditorView: View {
             .buttonStyle(.plain)
         }
         .padding(.vertical, 4)
+        .contextMenu {
+            Button {
+                beginRename(kind: .feature, id: feature.id, name: feature.name)
+            } label: {
+                Label("Rename…", systemImage: "pencil")
+            }
+        }
     }
 
     @ViewBuilder

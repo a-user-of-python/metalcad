@@ -289,6 +289,8 @@ struct PanelDraftError: View {
 }
 
 struct PanelOKBar: View {
+    @AppStorage(MCAccent.key) private var accentHex: String = MCAccent.defaultHex
+    private var accent: Color { MCAccent.color(hex: accentHex) }
     var okTitle = "OK"
     var okEnabled = true
     let onOK: () -> Void
@@ -306,7 +308,7 @@ struct PanelOKBar: View {
                 .foregroundStyle(.black)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 12)
-                .background(RoundedRectangle(cornerRadius: 10).fill(okEnabled ? Color.orange : Color.gray))
+                .background(RoundedRectangle(cornerRadius: 10).fill(okEnabled ? accent : Color.gray))
                 .disabled(!okEnabled)
         }
         .padding(.top, 8)
@@ -438,6 +440,8 @@ struct ToolPanelView: View {
 /// model. Nothing is chosen until the user taps one; the summary at
 /// the bottom always says what is currently selected.
 struct PlaneChoiceView: View {
+    @AppStorage(MCAccent.key) private var accentHex: String = MCAccent.defaultHex
+    private var accent: Color { MCAccent.color(hex: accentHex) }
     @ObservedObject var model: EditorModel
     @Binding var choice: PlaneChoice
     /// Enter face-pick mode (the hosting panel supplies its purpose).
@@ -482,12 +486,12 @@ struct PlaneChoiceView: View {
                             if choice == .datum(datum.id) {
                                 Image(systemName: "checkmark.circle.fill")
                                     .mcFont(22)
-                                    .foregroundStyle(.orange)
+                                    .foregroundStyle(accent)
                             }
                         }
                         .padding(10)
                         .background(RoundedRectangle(cornerRadius: 10)
-                            .fill(choice == .datum(datum.id) ? Color.orange.opacity(0.25) : Color.white.opacity(0.06)))
+                            .fill(choice == .datum(datum.id) ? accent.opacity(0.25) : Color.white.opacity(0.06)))
                     }
                     .buttonStyle(.plain)
                 }
@@ -534,7 +538,7 @@ struct PlaneChoiceView: View {
             .frame(maxWidth: .infinity)
             .padding(.vertical, 10)
             .background(RoundedRectangle(cornerRadius: 10)
-                .fill(selected ? Color.orange : Color.white.opacity(0.08)))
+                .fill(selected ? accent : Color.white.opacity(0.08)))
         }
         .buttonStyle(.plain)
     }
@@ -713,6 +717,8 @@ struct DatumSourcePicker: View {
 /// Offset Plane: a datum parallel to a base plane, a datum, or a
 /// model face, slid along its normal by the given distance.
 struct OffsetPlanePanel: View {
+    @AppStorage(MCAccent.key) private var accentHex: String = MCAccent.defaultHex
+    private var accent: Color { MCAccent.color(hex: accentHex) }
     @ObservedObject var model: EditorModel
     let close: () -> Void
     let pickFace: (FacePickPurpose) -> Void
@@ -785,7 +791,7 @@ struct OffsetPlanePanel: View {
                 .mcFont(19, weight: .bold)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 10)
-                .background(RoundedRectangle(cornerRadius: 10).fill(Color.orange.opacity(0.3)))
+                .background(RoundedRectangle(cornerRadius: 10).fill(accent.opacity(0.3)))
             }
             PanelOKBar(okTitle: "Create Datum", okEnabled: sourcePlane != nil,
                        onOK: create, onCancel: close)
@@ -811,6 +817,8 @@ struct OffsetPlanePanel: View {
 /// Plane at Angle: a datum through the source plane's origin,
 /// rotated around one of the source plane's own axes.
 struct AnglePlanePanel: View {
+    @AppStorage(MCAccent.key) private var accentHex: String = MCAccent.defaultHex
+    private var accent: Color { MCAccent.color(hex: accentHex) }
     @ObservedObject var model: EditorModel
     let close: () -> Void
     let switchTool: (ActiveTool) -> Void
@@ -855,7 +863,7 @@ struct AnglePlanePanel: View {
                 .mcFont(19, weight: .bold)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 10)
-                .background(RoundedRectangle(cornerRadius: 10).fill(Color.orange.opacity(0.3)))
+                .background(RoundedRectangle(cornerRadius: 10).fill(accent.opacity(0.3)))
             }
             PanelOKBar(okTitle: "Create Datum", onOK: create, onCancel: close)
         }
@@ -883,6 +891,8 @@ struct AnglePlanePanel: View {
 /// Midplane: a datum exactly halfway between two parallel faces of
 /// the model.
 struct MidplanePanel: View {
+    @AppStorage(MCAccent.key) private var accentHex: String = MCAccent.defaultHex
+    private var accent: Color { MCAccent.color(hex: accentHex) }
     @ObservedObject var model: EditorModel
     let close: () -> Void
     let pickFace: (FacePickPurpose) -> Void
@@ -923,7 +933,7 @@ struct MidplanePanel: View {
                 .mcFont(19, weight: .bold)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 10)
-                .background(RoundedRectangle(cornerRadius: 10).fill(Color.orange.opacity(0.3)))
+                .background(RoundedRectangle(cornerRadius: 10).fill(accent.opacity(0.3)))
             }
             PanelOKBar(okTitle: "Create Datum", okEnabled: ready, onOK: create, onCancel: close)
         }

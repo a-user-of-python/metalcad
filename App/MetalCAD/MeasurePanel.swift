@@ -19,6 +19,8 @@ func meshSurfaceArea(_ mesh: Mesh) -> Double {
 /// exact distance between their planes.
 struct MeasurePanel: View {
     @ObservedObject var model: EditorModel
+    @AppStorage(MCAccent.key) private var accentHex: String = MCAccent.defaultHex
+    private var accent: Color { MCAccent.color(hex: accentHex) }
 
     @State private var faceAIndex = -1
     @State private var faceBIndex = -1
@@ -154,7 +156,7 @@ struct MeasurePanel: View {
                     .foregroundStyle(.secondary)
                 Text("\(mcFmt(d)) mm")
                     .mcFont(30, weight: .bold)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(accent)
             }
             .padding(.top, 2)
         } else {

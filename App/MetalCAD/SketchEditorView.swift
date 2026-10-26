@@ -74,6 +74,8 @@ struct SketchPointRef: Equatable {
 ///    Extrude panel, like Fusion's finish-sketch flow.
 struct SketchEditorView: View {
     @ObservedObject var model: EditorModel
+    @AppStorage(MCAccent.key) private var accentHex: String = MCAccent.defaultHex
+    private var accent: Color { MCAccent.color(hex: accentHex) }
     let sketchID: String
     @Environment(\.dismiss) private var dismiss
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
@@ -436,7 +438,7 @@ struct SketchEditorView: View {
                     .foregroundStyle(.black)
                     .padding(.horizontal, 16)
                     .padding(.vertical, 10)
-                    .background(Capsule().fill(Color.orange))
+                    .background(Capsule().fill(accent))
             }
             Button("Done") { dismiss() }
                 .mcFont(20, weight: .semibold)
@@ -729,7 +731,7 @@ struct SketchEditorView: View {
         // Entities.
         for e in working.entities {
             let selected = e.id == selectedID
-            let color: Color = selected ? .orange : (e.isConstruction ? .gray : .cyan)
+            let color: Color = selected ? accent : (e.isConstruction ? .gray : .cyan)
             if case .point(_, let at, _) = e {
                 let c = t.toView(at, in: size)
                 ctx.fill(Path(ellipseIn: CGRect(x: c.x - 5, y: c.y - 5, width: 10, height: 10)),
@@ -809,7 +811,7 @@ struct SketchEditorView: View {
             ctx.draw(label, at: CGPoint(x: c.x + 16, y: c.y - 16))
         }
 
-        // Measure picks: A (white) and B (orange), joined by a dashed
+        // Measure picks: A (white) and B (accent), joined by a dashed
         // line so the measured span is visible.
         let pointA = measureA?.resolve(in: working)
         let pointB = measureB?.resolve(in: working)
@@ -817,14 +819,14 @@ struct SketchEditorView: View {
             var span = Path()
             span.move(to: t.toView(a, in: size))
             span.addLine(to: t.toView(b, in: size))
-            ctx.stroke(span, with: .color(.orange),
+            ctx.stroke(span, with: .color(accent),
                        style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
         }
         if let a = pointA {
             drawMeasureMarker(ctx, at: t.toView(a, in: size), letter: "A", color: .white)
         }
         if let b = pointB {
-            drawMeasureMarker(ctx, at: t.toView(b, in: size), letter: "B", color: .orange)
+            drawMeasureMarker(ctx, at: t.toView(b, in: size), letter: "B", color: accent)
         }
         // The measured distance, labelled on the span itself — the
         // readout that stays on the canvas whatever tool is active.
@@ -832,7 +834,7 @@ struct SketchEditorView: View {
             let mid = t.toView((a + b) * 0.5, in: size)
             let label = Text("\(mcFmt(a.distance(to: b))) mm")
                 .font(Font.system(size: MCTypeScale.scaled(15, for: dynamicTypeSize), weight: .bold))
-                .foregroundColor(.orange)
+                .foregroundColor(accent)
             ctx.draw(label, at: CGPoint(x: mid.x, y: mid.y - 18))
         }
 
@@ -842,12 +844,12 @@ struct SketchEditorView: View {
             var dia = Path()
             dia.move(to: t.toView(c + Vec2(-r, 0), in: size))
             dia.addLine(to: t.toView(c + Vec2(r, 0), in: size))
-            ctx.stroke(dia, with: .color(.orange),
+            ctx.stroke(dia, with: .color(accent),
                        style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
             let cv = t.toView(c, in: size)
             let label = Text("Ø \(mcFmt(r * 2)) mm")
                 .font(Font.system(size: MCTypeScale.scaled(15, for: dynamicTypeSize), weight: .bold))
-                .foregroundColor(.orange)
+                .foregroundColor(accent)
             ctx.draw(label, at: CGPoint(x: cv.x, y: cv.y - r * t.scale - 16))
         }
 
@@ -1065,7 +1067,7 @@ struct SketchEditorView: View {
         HStack(spacing: 12) {
             Image(systemName: "ruler")
                 .mcFont(20, weight: .bold)
-                .foregroundStyle(.orange)
+                .foregroundStyle(accent)
             Text(measureReadoutText)
                 .mcFont(19, weight: .semibold)
             Spacer()
@@ -1129,7 +1131,7 @@ struct SketchEditorView: View {
                         .mcFont(20, weight: .semibold)
                     Text("Ø \(mcFmt(r * 2)) mm")
                         .mcFont(22, weight: .bold)
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(accent)
                     Button("Clear") { clearMeasurement() }
                         .mcFont(20, weight: .semibold)
                     Spacer()
@@ -1151,7 +1153,7 @@ struct SketchEditorView: View {
                         .foregroundStyle(.black)
                         .padding(.horizontal, 16)
                         .padding(.vertical, 8)
-                        .background(Capsule().fill(Color.orange))
+                        .background(Capsule().fill(accent))
                     Button("Clear") { clearMeasurement() }
                     .mcFont(20, weight: .semibold)
                     Spacer()
@@ -1209,7 +1211,7 @@ struct SketchEditorView: View {
                     .foregroundStyle(.black)
                     .padding(.horizontal, 16)
                     .padding(.vertical, 8)
-                    .background(Capsule().fill(Color.orange))
+                    .background(Capsule().fill(accent))
                 Spacer()
             }
             Text("Tap the canvas to set the baseline start. Then Extrude the sketch — Join embosses the letters, Cut engraves them. Text adds many small lines, so the sketch may go “heavy” (solver skipped).")
@@ -1611,7 +1613,7 @@ struct SketchEditorView: View {
                         .mcFont(20, weight: .semibold)
                         .foregroundStyle(.black)
                         .padding(.horizontal, 14).padding(.vertical, 7)
-                        .background(Capsule().fill(Color.orange))
+                        .background(Capsule().fill(accent))
                 }
                 if !splinePoints.isEmpty {
                     Button("Cancel") { splinePoints = [] }
@@ -1812,7 +1814,7 @@ struct SketchEditorView: View {
                 HStack(spacing: 12) {
                     Text(describe(e))
                         .mcFont(19, weight: e.id == selectedID ? .bold : .regular)
-                        .foregroundStyle(e.id == selectedID ? .orange : .primary)
+                        .foregroundStyle(e.id == selectedID ? accent : .primary)
                     Spacer()
                     Button(role: .destructive) {
                         deleteEntity(e.id)

@@ -15,9 +15,25 @@ struct SceneKitView: UIViewRepresentable {
     var mesh: Mesh
     /// Display material; nil falls back to the library default.
     var material: Material? = nil
-    /// Translucent amber preview of an uncommitted (draft) feature
-    /// result — rendered over the committed model, never hit-tested.
-    var ghostMesh: Mesh? = nil
+    /// True when `mesh` is an uncommitted DRAFT result. The preview
+    /// REPLACES the committed model (Fusion-style): it is rendered as
+    /// the one model mesh with a warm accent emissive tint, never as
+    /// a translucent overlay — an overlay copy of the whole part sat
+    /// exactly on the model's surfaces and z-fought into jagged
+    /// shards (device report, 2026-10-26). While a preview is active
+    /// it also takes precedence over the section view (the caller
+    /// passes the preview instead of the sectioned mesh; the old
+    /// ghost ignored section too).
+    var isPreview: Bool = false
+    /// The open document's id. The camera pose is persisted per
+    /// document (see the pose store below) so leaving and returning
+    /// — or anything recreating this view — restores his viewpoint
+    /// instead of reframing.
+    var documentID: String = ""
+    /// The user's accent color (Home ▸ Settings), used for the
+    /// selection highlight, the selected-sketch glow, the measure
+    /// markers and the preview tint.
+    var accentUIColor: UIColor = MCAccent.uiColor(hex: MCAccent.defaultHex)
     /// Sketches to draw as 3D overlays (tap one to select it).
     var sketches: [Sketch] = []
     /// The currently selected sketch (amber glow outline).
@@ -57,17 +73,18 @@ struct SceneKitView: UIViewRepresentable {
 
     final class Coordinator: NSObject {
         var geometryKey: String = ""
-        var ghostKey: String = ""
         var overlayKey: String = ""
         var selectionKey: String = ""
         var measureKey: String = ""
         var modelNode: SCNNode?
-        var ghostNode: SCNNode?
         var overlayNode: SCNNode?
         var selectionNode: SCNNode?
         var measureNode: SCNNode?
         var cameraNode: SCNNode?
         var framed: Bool = false
+        /// The document the live camera currently belongs to; a
+        /// change triggers a pose restore (or a first-time frame).
+        var currentDocumentID: String = ""
         var onFacePicked: ((Int) -> Void)?
         var onSketchPicked: ((String?) -> Void)?
         var onModelHit: ((Int, Vec3) -> Void)?
@@ -88,18 +105,17 @@ struct SceneKitView: UIViewRepresentable {
             ]
             if isPickingFace {
                 let hits = view.hitTest(point, options: options)
-                // Only the committed model node counts — the ghost and
-                // the sketch overlays also carry geometry but must
-                // never answer a face pick.
+                // Only the model node counts — the sketch overlays
+                // also carry geometry but must never answer a face pick.
                 guard let hit = hits.first(where: { $0.node === modelNode }) else { return }
                 onFacePicked?(hit.faceIndex)
                 return
             }
             // Normal mode: a tap ON the model resolves a picked
             // selection first (edge → face → shaft/hole, in the
-            // model). The filter to the model node keeps the ghost,
-            // the sketch overlays and the selection highlight itself
-            // from ever answering the tap. Only a tap that misses the
+            // model). The filter to the model node keeps the sketch
+            // overlays and the selection highlight itself from ever
+            // answering the tap. Only a tap that misses the
             // model entirely falls through to sketch selection.
             let hits = view.hitTest(point, options: options)
             if let hit = hits.first(where: { $0.node === modelNode }) {
@@ -115,8 +131,8 @@ struct SceneKitView: UIViewRepresentable {
         /// picking is a deliberate single-tap flow, so this stays out
         /// of its way: in pick mode a double-tap is just two picks,
         /// already handled by handleTap. Otherwise it hit-tests for
-        /// itself and reports only committed-model hits — empty
-        /// space, the ghost, overlays and the selection highlight
+        /// itself and reports only model hits — empty
+        /// space, overlays and the selection highlight
         /// never raise it.
         @objc func handleDoubleTap(_ gesture: UITapGestureRecognizer) {
             guard !isPickingFace, let view = gesture.view as? SCNView else { return }
@@ -184,6 +200,41 @@ struct SceneKitView: UIViewRepresentable {
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
+
+    // MARK: Camera pose persistence
+
+    /// A saved viewpoint: the camera node's position + orientation.
+    private struct CameraPose {
+        var position: SCNVector3
+        var orientation: SCNQuaternion
+    }
+
+    /// Session-level pose store, keyed by document id. The camera
+    /// used to reset to the default framing after every commit
+    /// (device report, 2026-10-26): anything that recreated this
+    /// view — the mesh-based `.id` the editor used, panel columns
+    /// appearing, document switches — made a fresh Coordinator whose
+    /// `framed` flag framed the part all over again. Now the pose is
+    /// saved on every update and on dismantle, and restored whenever
+    /// a view (re)appears for a document that has one; framing to
+    /// bounds happens ONLY for a document's first-ever view.
+    private static var poseStore: [String: CameraPose] = [:]
+
+    /// Fingerprint of the accent color, folded into the node rebuild
+    /// keys so highlights/tints recolor the moment the setting moves.
+    private var accentKey: String {
+        (accentUIColor.cgColor.components ?? [])
+            .map { String(format: "%.3f", $0) }
+            .joined(separator: ",")
+    }
+
+    static func dismantleUIView(_ view: SCNView, coordinator: Coordinator) {
+        // Last chance to remember the viewpoint before teardown.
+        guard coordinator.framed, !coordinator.currentDocumentID.isEmpty,
+              let camNode = coordinator.cameraNode else { return }
+        poseStore[coordinator.currentDocumentID] = CameraPose(
+            position: camNode.position, orientation: camNode.orientation)
+    }
 
     func makeUIView(context: Context) -> SCNView {
         let view = SCNView()
@@ -287,72 +338,68 @@ struct SceneKitView: UIViewRepresentable {
             view.backgroundColor = UIColor(red: 0.07, green: 0.08, blue: 0.11, alpha: 1)
         }
 
-        // Draft ghost + sketch overlays + selection highlight refresh
-        // independently of the committed-model geometry guard below.
-        updateGhost(view, context: context)
+        // Camera pose: when the document changes under this view
+        // (a fresh view for another document, or a recreation),
+        // restore the saved pose for it if one exists — framing to
+        // bounds is ONLY for a document's first-ever view.
+        if context.coordinator.currentDocumentID != documentID {
+            context.coordinator.currentDocumentID = documentID
+            if !documentID.isEmpty, let pose = Self.poseStore[documentID],
+               let camNode = context.coordinator.cameraNode {
+                camNode.position = pose.position
+                camNode.orientation = pose.orientation
+                context.coordinator.framed = true
+            } else {
+                context.coordinator.framed = false
+            }
+        }
+
+        // Sketch overlays + selection highlight + measure markers
+        // refresh independently of the model geometry guard below.
         updateOverlays(view, context: context)
         updateSelection(view, context: context)
         updateMeasure(view, context: context)
 
-        // Identity for "geometry must be rebuilt": mesh shape + material.
+        // Identity for "geometry must be rebuilt": mesh shape +
+        // material + preview state + accent (the preview tint reads
+        // the accent, so a settings change re-tints a live preview).
         let mat = material ?? MaterialLibrary.defaultMaterial
-        let key = "\(mesh.triangleCount)|\(mesh.volume)|\(mat.id)"
-        guard context.coordinator.geometryKey != key else { return }
-        context.coordinator.geometryKey = key
+        let key = "\(mesh.triangleCount)|\(mesh.volume)|\(mat.id)|\(isPreview ? "preview" : "live")|\(accentKey)"
+        if context.coordinator.geometryKey != key {
+            context.coordinator.geometryKey = key
 
-        context.coordinator.modelNode?.removeFromParentNode()
-        let node = SCNNode(geometry: Self.makeGeometry(mesh, material: mat))
-        view.scene?.rootNode.addChildNode(node)
-        context.coordinator.modelNode = node
+            context.coordinator.modelNode?.removeFromParentNode()
+            let node = SCNNode(geometry: Self.makeGeometry(
+                mesh, material: mat,
+                previewAccent: isPreview ? accentUIColor : nil))
+            view.scene?.rootNode.addChildNode(node)
+            context.coordinator.modelNode = node
 
-        if !context.coordinator.framed, mesh.triangleCount > 0,
-           let cameraNode = context.coordinator.cameraNode {
-            let b = mesh.bounds
-            let c = b.center
-            let r = max(b.size.length / 2, 12)
-            cameraNode.position = SCNVector3(
-                Float(c.x + r * 1.7), Float(c.y + r * 1.15), Float(c.z + r * 2.0))
-            cameraNode.look(at: SCNVector3(Float(c.x), Float(c.y), Float(c.z)))
-            context.coordinator.framed = true
+            // First-ever view of this document (no saved pose):
+            // frame the part once.
+            if !context.coordinator.framed, mesh.triangleCount > 0,
+               let cameraNode = context.coordinator.cameraNode {
+                let b = mesh.bounds
+                let c = b.center
+                let r = max(b.size.length / 2, 12)
+                cameraNode.position = SCNVector3(
+                    Float(c.x + r * 1.7), Float(c.y + r * 1.15), Float(c.z + r * 2.0))
+                cameraNode.look(at: SCNVector3(Float(c.x), Float(c.y), Float(c.z)))
+                context.coordinator.framed = true
+            }
         }
-    }
 
-    // MARK: Draft ghost
-
-    /// Keep the translucent amber ghost node in sync with `ghostMesh`.
-    private func updateGhost(_ view: SCNView, context: Context) {
-        let coord = context.coordinator
-        let key: String
-        if let g = ghostMesh, g.triangleCount > 0 {
-            key = "\(g.triangleCount)|\(g.volume)"
-        } else {
-            key = ""
+        // Remember the camera exactly as it stands (restored,
+        // framed, or orbited since) so the next recreation — or the
+        // next visit to this document — restores it. Only deliberate
+        // poses are saved: `framed` stays false until a restore or a
+        // framing has placed the camera, so the makeUIView default
+        // never lands in the store.
+        if !documentID.isEmpty, context.coordinator.framed,
+           let camNode = context.coordinator.cameraNode {
+            Self.poseStore[documentID] = CameraPose(
+                position: camNode.position, orientation: camNode.orientation)
         }
-        guard coord.ghostKey != key else { return }
-        coord.ghostKey = key
-        coord.ghostNode?.removeFromParentNode()
-        coord.ghostNode = nil
-        guard let g = ghostMesh, g.triangleCount > 0 else { return }
-        let node = SCNNode(geometry: Self.makeGhostGeometry(g))
-        node.name = "ghost"
-        node.renderingOrder = 10
-        view.scene?.rootNode.addChildNode(node)
-        coord.ghostNode = node
-    }
-
-    /// Smooth geometry like the model's, but one translucent amber
-    /// material that never writes depth (so the ghost reads as a
-    /// preview layered over the committed solid).
-    static func makeGhostGeometry(_ mesh: Mesh) -> SCNGeometry {
-        let geometry = makeGeometry(mesh, material: MaterialLibrary.defaultMaterial)
-        let ghost = SCNMaterial()
-        ghost.lightingModel = .physicallyBased
-        ghost.diffuse.contents = UIColor(red: 1.0, green: 0.62, blue: 0.10, alpha: 1)
-        ghost.transparency = 0.55  // ≈ 0.45 opacity
-        ghost.isDoubleSided = true
-        ghost.writesToDepthBuffer = false
-        geometry.materials = [ghost]
-        return geometry
     }
 
     // MARK: Selection highlight
@@ -381,12 +428,12 @@ struct SceneKitView: UIViewRepresentable {
     }
 
     /// Keep the selection highlight node in sync with `picked`:
-    /// an amber overlay for face/edge/shaft, blue for a hole wall.
+    /// an accent overlay for face/edge/shaft, blue for a hole wall.
     /// Highlight nodes are named "selection" and are excluded from
     /// picking because every hit test filters to the model node.
     private func updateSelection(_ view: SCNView, context: Context) {
         let coord = context.coordinator
-        let key = Self.selectionKey(picked: picked, mesh: pickedMesh)
+        let key = Self.selectionKey(picked: picked, mesh: pickedMesh) + "|acc:\(accentKey)"
         guard coord.selectionKey != key else { return }
         coord.selectionKey = key
         coord.selectionNode?.removeFromParentNode()
@@ -399,15 +446,17 @@ struct SceneKitView: UIViewRepresentable {
         case .face(let index, let face, _):
             if let geo = Self.makeFaceHighlightGeometry(mesh: pickedMesh,
                                                         faceIndex: index,
-                                                        normal: face.plane.normal) {
+                                                        normal: face.plane.normal,
+                                                        color: accentUIColor) {
                 root.addChildNode(SCNNode(geometry: geo))
             }
         case .edge(_, let start, let end, let length):
-            Self.addEdgeHighlight(to: root, start: start, end: end, length: length)
+            Self.addEdgeHighlight(to: root, start: start, end: end,
+                                  length: length, color: accentUIColor)
         case .shaft(let fit):
             if let sleeve = Self.sleeveMesh(fit: fit, radius: fit.radius + 0.15) {
                 let node = SCNNode(geometry: Self.makeSleeveGeometry(
-                    sleeve, color: Self.amberColor, opacity: 0.30))
+                    sleeve, color: accentUIColor, opacity: 0.30))
                 node.renderingOrder = 9
                 root.addChildNode(node)
             }
@@ -437,15 +486,15 @@ struct SceneKitView: UIViewRepresentable {
     }
 
     /// Keep the measure marker node in sync with `measurePoints`:
-    /// an amber sphere at each tapped point and, once two points
-    /// exist, a slim amber cylinder for the A–B span (a cylinder,
+    /// an accent sphere at each tapped point and, once two points
+    /// exist, a slim accent cylinder for the A–B span (a cylinder,
     /// not a 1 px line, so it reads at any zoom — same trick as the
     /// edge highlight). Named "measure", renderingOrder 9 like the
     /// selection highlight, and never hit-tested: every pick in the
     /// coordinator filters to the model node only.
     private func updateMeasure(_ view: SCNView, context: Context) {
         let coord = context.coordinator
-        let key = Self.measureKey(points: measurePoints)
+        let key = Self.measureKey(points: measurePoints) + "|acc:\(accentKey)"
         guard coord.measureKey != key else { return }
         coord.measureKey = key
         coord.measureNode?.removeFromParentNode()
@@ -456,7 +505,7 @@ struct SceneKitView: UIViewRepresentable {
         root.renderingOrder = 9
         let mat = SCNMaterial()
         mat.lightingModel = .constant
-        mat.diffuse.contents = Self.amberColor
+        mat.diffuse.contents = accentUIColor
         mat.isDoubleSided = true
         for p in measurePoints {
             let sphere = SCNSphere(radius: 1.4)
@@ -501,7 +550,7 @@ struct SceneKitView: UIViewRepresentable {
     /// (coplanar = the orange/grey clipping shimmer reported
     /// on-device, 2026-10-26).
     static func makeFaceHighlightGeometry(mesh: Mesh, faceIndex: Int,
-                                          normal: Vec3) -> SCNGeometry? {
+                                          normal: Vec3, color: UIColor) -> SCNGeometry? {
         guard mesh.triangleCount > 0 else { return nil }
         let grouped = FaceExtractor.groupedFaces(of: mesh)
         guard faceIndex >= 0, faceIndex < grouped.triangles.count else { return nil }
@@ -536,7 +585,7 @@ struct SceneKitView: UIViewRepresentable {
         let geometry = SCNGeometry(sources: [vertexSource, normalSource], elements: [element])
         let mat = SCNMaterial()
         mat.lightingModel = .constant
-        mat.diffuse.contents = amberColor
+        mat.diffuse.contents = color
         mat.transparency = 0.65  // 0.35 opacity
         mat.isDoubleSided = true
         mat.writesToDepthBuffer = false
@@ -544,13 +593,14 @@ struct SceneKitView: UIViewRepresentable {
         return geometry
     }
 
-    /// A slim amber cylinder along the edge segment plus a sphere at
+    /// A slim accent cylinder along the edge segment plus a sphere at
     /// each end — reads clearly at any zoom, unlike a 1px line.
-    static func addEdgeHighlight(to root: SCNNode, start: Vec3, end: Vec3, length: Double) {
+    static func addEdgeHighlight(to root: SCNNode, start: Vec3, end: Vec3,
+                                 length: Double, color: UIColor) {
         guard length > 1e-6 else { return }
         let mat = SCNMaterial()
         mat.lightingModel = .constant
-        mat.diffuse.contents = amberColor
+        mat.diffuse.contents = color
         mat.isDoubleSided = true
         let radius = max(0.6, length * 0.01)
         let cylinder = SCNCylinder(radius: CGFloat(radius), height: CGFloat(length))
@@ -608,6 +658,7 @@ struct SceneKitView: UIViewRepresentable {
         let coord = context.coordinator
         let key = Self.overlayKey(sketches: sketches, selectedID: selectedSketchID,
                                   hidden: hiddenSketchIDs, show: showSketches)
+            + "|acc:\(accentKey)"
         guard coord.overlayKey != key else { return }
         coord.overlayKey = key
         coord.overlayNode?.removeFromParentNode()
@@ -616,7 +667,9 @@ struct SceneKitView: UIViewRepresentable {
         let root = SCNNode()
         root.name = "sketchOverlays"
         for sketch in sketches where !hiddenSketchIDs.contains(sketch.id) {
-            root.addChildNode(Self.makeSketchNode(sketch, selected: sketch.id == selectedSketchID))
+            root.addChildNode(Self.makeSketchNode(sketch,
+                                                  selected: sketch.id == selectedSketchID,
+                                                  accent: accentUIColor))
         }
         view.scene?.rootNode.addChildNode(root)
         coord.overlayNode = root
@@ -647,14 +700,14 @@ struct SceneKitView: UIViewRepresentable {
 
     /// One sketch's overlay node: entity polylines as line strips on
     /// the sketch plane (cyan; construction entities dim gray). The
-    /// SELECTED sketch's outline itself glows amber: every segment
-    /// is drawn as a halo tube + a bright core tube, with spheres at
+    /// SELECTED sketch's outline itself glows in the accent color:
+    /// every segment is drawn as a halo tube + a bright core tube, with spheres at
     /// the vertices — no bounding-box fill (device request,
     /// 2026-10-26). Datum planes draw only a dashed-look 40×40 mm
     /// outline. The whole node is lifted +0.05 mm along the plane
     /// normal so the overlay never sits coplanar with a model face
     /// it lies on (z-fighting).
-    static func makeSketchNode(_ sketch: Sketch, selected: Bool) -> SCNNode {
+    static func makeSketchNode(_ sketch: Sketch, selected: Bool, accent: UIColor) -> SCNNode {
         let node = SCNNode()
         node.name = "sketch-\(sketch.id)"
         node.renderingOrder = 6
@@ -711,8 +764,8 @@ struct SceneKitView: UIViewRepresentable {
             // thin bright core tube per segment, plus a sphere at
             // every polyline vertex. (SceneKit lines are 1 px and
             // can't glow; the tube pair reads as a glow at any zoom.)
-            let haloMat = lineMaterial(amberColor, opacity: 0.30)
-            let coreMat = lineMaterial(amberColor, opacity: 1.0)
+            let haloMat = lineMaterial(accent, opacity: 0.30)
+            let coreMat = lineMaterial(accent, opacity: 1.0)
             for (a, b) in solid {
                 if let halo = tubeNode(from: a, to: b, radius: 0.9, material: haloMat) {
                     node.addChildNode(halo)
@@ -767,7 +820,6 @@ struct SceneKitView: UIViewRepresentable {
     }
 
     static let cyanColor = UIColor(red: 0.20, green: 0.85, blue: 1.0, alpha: 1)
-    static let amberColor = UIColor(red: 1.0, green: 0.62, blue: 0.10, alpha: 1)
     static let grayColor = UIColor(red: 0.65, green: 0.68, blue: 0.72, alpha: 1)
     static let tealColor = UIColor(red: 0.30, green: 0.85, blue: 0.80, alpha: 1)
 
@@ -810,7 +862,12 @@ struct SceneKitView: UIViewRepresentable {
 
     /// Smooth geometry: positions + crease-averaged normals straight from
     /// `displaySoup()`. One vertex per corner, sequential indices.
-    static func makeGeometry(_ mesh: Mesh, material: Material) -> SCNGeometry {
+    /// When `previewAccent` is set the mesh is an uncommitted draft:
+    /// the part's own material gets a warm accent emissive wash
+    /// (~0.35) so it still shades like the real part but is
+    /// unmistakably "preview, not committed".
+    static func makeGeometry(_ mesh: Mesh, material: Material,
+                             previewAccent: UIColor? = nil) -> SCNGeometry {
         let triCount = mesh.triangleCount
         guard triCount > 0 else { return SCNGeometry() }
         let soup = mesh.displaySoup()
@@ -856,6 +913,10 @@ struct SceneKitView: UIViewRepresentable {
         scnMaterial.metalness.contents = NSNumber(value: material.metalness)
         scnMaterial.roughness.contents = NSNumber(value: material.roughness)
         scnMaterial.isDoubleSided = true
+        if let previewAccent {
+            scnMaterial.emission.contents = previewAccent
+            scnMaterial.emission.intensity = 0.35
+        }
         geometry.materials = [scnMaterial]
         return geometry
     }

@@ -483,6 +483,26 @@ public enum CylinderFitter {
             let radial = (d - ax * d.dot(ax)).length
             if abs(radial - radius) > max(0.06, 0.03 * radius) { return nil }
         }
+        // Angular coverage: a fillet is a true cylinder section too,
+        // but it wraps only ~90 degrees, while a shaft or hole wall
+        // wraps the full turn. Bin the patch vertices' angles around
+        // the axis (10-degree bins, around the axis point nearest the
+        // patch centroid — the fit's axis line passes through the
+        // centroid) and reject partial wraps so a fillet never
+        // masquerades as a shaft.
+        let helper = abs(ax.z) < 0.9 ? Vec3(0, 0, 1) : Vec3(1, 0, 0)
+        let u = helper.cross(ax).normalized
+        let w = ax.cross(u)
+        var bins = Set<Int>()
+        for vi in verts {
+            let d = m.vertices[vi] - centroid
+            let radialVec = d - ax * d.dot(ax)
+            guard radialVec.length > radius * 0.5 else { continue }
+            var angle = atan2(radialVec.dot(w), radialVec.dot(u))
+            if angle < 0 { angle += 2 * Double.pi }
+            bins.insert(Int(angle / (10 * Double.pi / 180)))
+        }
+        guard Double(bins.count) * 10 >= 150 else { return nil }
         let origin = centroid + ax * hMin
         // Internal if a patch normal points TOWARD the axis.
         let t0 = patch.first!

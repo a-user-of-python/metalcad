@@ -20,7 +20,7 @@ struct SceneKitView: UIViewRepresentable {
     var ghostMesh: Mesh? = nil
     /// Sketches to draw as 3D overlays (tap one to select it).
     var sketches: [Sketch] = []
-    /// The currently selected sketch (amber overlay + fill).
+    /// The currently selected sketch (amber glow outline).
     var selectedSketchID: String? = nil
     /// Sketches whose overlays are hidden (browser eye toggles).
     var hiddenSketchIDs: Set<String> = []
@@ -190,7 +190,13 @@ struct SceneKitView: UIViewRepresentable {
         view.backgroundColor = UIColor(red: 0.07, green: 0.08, blue: 0.11, alpha: 1)
         view.allowsCameraControl = true
         view.autoenablesDefaultLighting = false
-        view.antialiasingMode = .multisampling4X
+        view.antialiasingMode = .multisampling2X
+        // Power/thermal budget (device report, 2026-10-26: the iPad
+        // ran hot): render ON DEMAND instead of continuously — the
+        // built-in camera controller still invalidates the view
+        // while orbiting — cap at 60 fps, and use 2x MSAA.
+        view.rendersContinuously = false
+        view.preferredFramesPerSecond = 60
 
         let scene = SCNScene()
         view.scene = scene
@@ -230,8 +236,11 @@ struct SceneKitView: UIViewRepresentable {
         // away: orbiting moved surfaces across the far plane and the
         // model "clipped in and out of existence" (device report,
         // 2026-10-26). Use a range fitted to mm-scale parts instead.
+        // zFar is 6_000, not 20_000: depth-buffer precision is
+        // zFar/zNear, and the huge far plane made the orange
+        // selection z-fight with the grey model (same day's report).
         cam.zNear = 0.5
-        cam.zFar = 20_000
+        cam.zFar = 6_000
         cam.automaticallyAdjustsZRange = false
         cameraNode.camera = cam
         cameraNode.position = SCNVector3(70, 55, 95)
@@ -486,19 +495,24 @@ struct SceneKitView: UIViewRepresentable {
     }
 
     /// Flat triangle soup for one grouped face of the mesh, in the
-    /// welded vertex space groupedFaces reports.
+    /// welded vertex space groupedFaces reports. Every vertex is
+    /// pushed +0.05 mm along the face normal so the highlight sits
+    /// PROUD of the model surface instead of coplanar with it
+    /// (coplanar = the orange/grey clipping shimmer reported
+    /// on-device, 2026-10-26).
     static func makeFaceHighlightGeometry(mesh: Mesh, faceIndex: Int,
                                           normal: Vec3) -> SCNGeometry? {
         guard mesh.triangleCount > 0 else { return nil }
         let grouped = FaceExtractor.groupedFaces(of: mesh)
         guard faceIndex >= 0, faceIndex < grouped.triangles.count else { return nil }
         let welded = grouped.mesh
+        let lift = normal * 0.05
         var positions: [Float] = []
         var normals: [Float] = []
         var indices: [UInt32] = []
         for t in grouped.triangles[faceIndex] {
             for k in 0..<3 {
-                let v = welded.vertices[Int(welded.indices[t * 3 + k])]
+                let v = welded.vertices[Int(welded.indices[t * 3 + k])] + lift
                 positions.append(Float(v.x)); positions.append(Float(v.y)); positions.append(Float(v.z))
                 normals.append(Float(normal.x)); normals.append(Float(normal.y)); normals.append(Float(normal.z))
                 indices.append(UInt32(indices.count))
@@ -632,15 +646,22 @@ struct SceneKitView: UIViewRepresentable {
     }
 
     /// One sketch's overlay node: entity polylines as line strips on
-    /// the sketch plane (cyan, or amber when selected; construction
-    /// entities dim gray). The selected sketch also gets a
-    /// translucent fill over its extents. Datum planes draw only a
-    /// dashed-look 40×40 mm outline.
+    /// the sketch plane (cyan; construction entities dim gray). The
+    /// SELECTED sketch's outline itself glows amber: every segment
+    /// is drawn as a halo tube + a bright core tube, with spheres at
+    /// the vertices — no bounding-box fill (device request,
+    /// 2026-10-26). Datum planes draw only a dashed-look 40×40 mm
+    /// outline. The whole node is lifted +0.05 mm along the plane
+    /// normal so the overlay never sits coplanar with a model face
+    /// it lies on (z-fighting).
     static func makeSketchNode(_ sketch: Sketch, selected: Bool) -> SCNNode {
         let node = SCNNode()
         node.name = "sketch-\(sketch.id)"
         node.renderingOrder = 6
         let plane = sketch.plane
+        node.position = SCNVector3(Float(plane.normal.x * 0.05),
+                                   Float(plane.normal.y * 0.05),
+                                   Float(plane.normal.z * 0.05))
 
         if sketch.isDatumPlane {
             // 40×40 mm square, four dashes per edge ("dashed look").
@@ -663,15 +684,11 @@ struct SceneKitView: UIViewRepresentable {
 
         var solid: [(Vec3, Vec3)] = []
         var construction: [(Vec3, Vec3)] = []
-        var lo = Vec2(Double.greatestFiniteMagnitude, Double.greatestFiniteMagnitude)
-        var hi = Vec2(-Double.greatestFiniteMagnitude, -Double.greatestFiniteMagnitude)
-        var hasPoints = false
+        var solidVertices: [Vec3] = []
         for entity in sketch.entities {
             let pts = entity.polyline()
-            for p in pts {
-                lo = Vec2(min(lo.x, p.x), min(lo.y, p.y))
-                hi = Vec2(max(hi.x, p.x), max(hi.y, p.y))
-                hasPoints = true
+            if !entity.isConstruction {
+                solidVertices += pts.map { plane.toWorld($0) }
             }
             if pts.count == 1 {
                 // A point entity: draw a small cross so it is visible.
@@ -689,40 +706,62 @@ struct SceneKitView: UIViewRepresentable {
                 }
             }
         }
-        let mainColor = selected ? amberColor : cyanColor
-        if let geo = lineGeometry(segments: solid,
-                                  material: lineMaterial(mainColor, opacity: selected ? 1.0 : 0.9)) {
+        if selected {
+            // The outline ITSELF glows: a wide faint halo tube and a
+            // thin bright core tube per segment, plus a sphere at
+            // every polyline vertex. (SceneKit lines are 1 px and
+            // can't glow; the tube pair reads as a glow at any zoom.)
+            let haloMat = lineMaterial(amberColor, opacity: 0.30)
+            let coreMat = lineMaterial(amberColor, opacity: 1.0)
+            for (a, b) in solid {
+                if let halo = tubeNode(from: a, to: b, radius: 0.9, material: haloMat) {
+                    node.addChildNode(halo)
+                }
+                if let core = tubeNode(from: a, to: b, radius: 0.35, material: coreMat) {
+                    node.addChildNode(core)
+                }
+            }
+            for p in solidVertices {
+                let sphere = SCNSphere(radius: 0.55)
+                sphere.materials = [coreMat]
+                let sNode = SCNNode(geometry: sphere)
+                sNode.position = SCNVector3(Float(p.x), Float(p.y), Float(p.z))
+                node.addChildNode(sNode)
+            }
+        } else if let geo = lineGeometry(segments: solid,
+                                         material: lineMaterial(cyanColor, opacity: 0.9)) {
             node.addChildNode(SCNNode(geometry: geo))
         }
         if let geo = lineGeometry(segments: construction,
                                   material: lineMaterial(grayColor, opacity: 0.45)) {
             node.addChildNode(SCNNode(geometry: geo))
         }
-        if selected, hasPoints {
-            // Translucent fill over the sketch's extents (padded,
-            // at least 12 mm across) so the selection is unmistakable.
-            let w = max(hi.x - lo.x + 6, 12)
-            let h = max(hi.y - lo.y + 6, 12)
-            let center2 = Vec2((lo.x + hi.x) / 2, (lo.y + hi.y) / 2)
-            let fill = SCNPlane(width: CGFloat(w), height: CGFloat(h))
-            let fillMat = SCNMaterial()
-            fillMat.lightingModel = .constant
-            fillMat.diffuse.contents = amberColor
-            fillMat.transparency = 0.90  // 0.10 opacity
-            fillMat.isDoubleSided = true
-            fillMat.writesToDepthBuffer = false
-            fill.materials = [fillMat]
-            let fillNode = SCNNode(geometry: fill)
-            fillNode.renderingOrder = 5
-            let x = plane.xAxis, y = plane.yAxis, n = plane.normal
-            let o = plane.toWorld(center2)
-            var m = SCNMatrix4()
-            m.m11 = Float(x.x); m.m12 = Float(x.y); m.m13 = Float(x.z); m.m14 = 0
-            m.m21 = Float(y.x); m.m22 = Float(y.y); m.m23 = Float(y.z); m.m24 = 0
-            m.m31 = Float(n.x); m.m32 = Float(n.y); m.m33 = Float(n.z); m.m34 = 0
-            m.m41 = Float(o.x); m.m42 = Float(o.y); m.m43 = Float(o.z); m.m44 = 1
-            fillNode.transform = m
-            node.addChildNode(fillNode)
+        return node
+    }
+
+    /// A cylinder node spanning a→b (SCNCylinder runs along +Y;
+    /// rotate +Y onto the segment direction). Nil for a degenerate
+    /// (zero-length) segment.
+    static func tubeNode(from a: Vec3, to b: Vec3, radius: Double,
+                         material: SCNMaterial) -> SCNNode? {
+        let length = a.distance(to: b)
+        guard length > 1e-6 else { return nil }
+        let cylinder = SCNCylinder(radius: CGFloat(radius), height: CGFloat(length))
+        cylinder.materials = [material]
+        let node = SCNNode(geometry: cylinder)
+        let mid = (a + b) * 0.5
+        node.position = SCNVector3(Float(mid.x), Float(mid.y), Float(mid.z))
+        let up = Vec3(0, 1, 0)
+        let dir = (b - a).normalized
+        let cross = up.cross(dir)
+        if cross.length > 1e-6 {
+            let axis = cross.normalized
+            let angle = acos(max(-1, min(1, up.dot(dir))))
+            node.rotation = SCNVector4(Float(axis.x), Float(axis.y),
+                                       Float(axis.z), Float(angle))
+        } else if dir.y < 0 {
+            // Segment runs straight down: flip the cylinder.
+            node.rotation = SCNVector4(1, 0, 0, Float(Double.pi))
         }
         return node
     }

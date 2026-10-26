@@ -248,7 +248,8 @@ struct PanelNote: View {
 /// Live draft feedback: while a panel is drafting, the pending
 /// feature is rebuilt in the background and ghosted in the 3D view.
 /// If that rebuild fails, the reason shows HERE, before the user
-/// commits — no surprise error after OK.
+/// commits — no surprise error after OK. When the preview is
+/// skipped instead (very large part), a neutral note says so.
 struct PanelDraftError: View {
     @ObservedObject var model: EditorModel
 
@@ -269,6 +270,19 @@ struct PanelDraftError: View {
             }
             .padding(9)
             .background(RoundedRectangle(cornerRadius: 9).fill(Color.orange.opacity(0.14)))
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } else if model.draftFeatures != nil, let note = model.previewNote {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "info.circle.fill")
+                    .mcFont(18)
+                    .foregroundStyle(.secondary)
+                Text(note)
+                    .mcFont(16)
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+            .padding(9)
+            .background(RoundedRectangle(cornerRadius: 9).fill(Color.white.opacity(0.08)))
             .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
@@ -1232,6 +1246,14 @@ struct RevolvePanel: View {
 
 // MARK: - Hole panel
 
+/// One drill site of a hole sketch: a point entity or a circle
+/// center — exactly the set the kit's Hole feature drills at.
+struct DrillSite {
+    let entityID: Int
+    let label: String
+    let at: Vec2
+}
+
 struct HolePanel: View {
     @ObservedObject var model: EditorModel
     let close: () -> Void
@@ -1249,6 +1271,15 @@ struct HolePanel: View {
     @State private var cbDiameterText = "10"
     @State private var cbDepthText = "3"
     @State private var csAngleText = "90"
+    /// Drill sites the user has left ON for the chosen sketch (all
+    /// on by default; reset whenever the sketch changes). Turning
+    /// some off routes the hole through a filtered generated sketch
+    /// holding only the enabled sites — a big profile sketch no
+    /// longer drills at every point it happens to contain.
+    @State private var enabledSiteIDs: Set<Int> = []
+    /// Stable id for this panel's filtered sketch, so drafts and the
+    /// committed feature reference the same sketch.
+    @State private var filteredSketchID = UUID().uuidString
 
     init(model: EditorModel, initialSketchID: String? = nil,
          generatedSketch: Sketch? = nil, close: @escaping () -> Void) {
@@ -1276,7 +1307,63 @@ struct HolePanel: View {
         return sketchID == gen.id
     }
 
-    private var candidateKind: FeatureKind {
+    private var chosenSketch: Sketch? { sketches.first { $0.id == sketchID } }
+
+    /// The chosen sketch's drill sites, in entity order: every
+    /// non-construction point and circle center (the same set the
+    /// kit drills at).
+    private var drillSites: [DrillSite] {
+        guard let s = chosenSketch else { return [] }
+        var out: [DrillSite] = []
+        for e in s.entities where !e.isConstruction {
+            switch e {
+            case .point(let id, let at, _):
+                out.append(DrillSite(entityID: id,
+                                     label: "Point #\(id) · (\(mcFmt(at.x)), \(mcFmt(at.y)))",
+                                     at: at))
+            case .circle(let id, let c, _, _):
+                out.append(DrillSite(entityID: id,
+                                     label: "Circle #\(id) center · (\(mcFmt(c.x)), \(mcFmt(c.y)))",
+                                     at: c))
+            default:
+                break
+            }
+        }
+        return out
+    }
+
+    private var enabledCount: Int {
+        drillSites.filter { enabledSiteIDs.contains($0.entityID) }.count
+    }
+
+    private var allSitesOn: Bool {
+        !drillSites.isEmpty && enabledCount == drillSites.count
+    }
+
+    /// The filtered drill sketch (only the enabled sites, as plain
+    /// points on the source sketch's plane), or nil when every site
+    /// is on and the chosen sketch can be used directly.
+    private func filteredSketch() -> Sketch? {
+        guard !drillSites.isEmpty, !allSitesOn, let src = chosenSketch else { return nil }
+        var s = Sketch(id: filteredSketchID, name: "Hole sites (auto)", plane: src.plane)
+        for site in drillSites where enabledSiteIDs.contains(site.entityID) {
+            s.addPoint(site.at)
+        }
+        return s
+    }
+
+    private func resetSites() {
+        enabledSiteIDs = Set(drillSites.map(\.entityID))
+    }
+
+    private func siteBinding(_ id: Int) -> Binding<Bool> {
+        Binding(get: { enabledSiteIDs.contains(id) },
+                set: { on in
+                    if on { enabledSiteIDs.insert(id) } else { enabledSiteIDs.remove(id) }
+                })
+    }
+
+    private func holeKind(sketchID: String) -> FeatureKind {
         let hk: HoleKind
         switch kindChoice {
         case "counterbore":
@@ -1293,13 +1380,19 @@ struct HolePanel: View {
                      kind: hk)
     }
 
+    private var candidateKind: FeatureKind { holeKind(sketchID: sketchID) }
+
     private var draftSignature: String {
-        "\(sketchID)|\(diameterText)|\(through)|\(depthText)|\(kindChoice)|\(cbDiameterText)|\(cbDepthText)|\(csAngleText)"
+        let sites = enabledSiteIDs.sorted().map(String.init).joined(separator: ",")
+        return "\(sketchID)|\(diameterText)|\(through)|\(depthText)|\(kindChoice)|\(cbDiameterText)|\(cbDepthText)|\(csAngleText)|\(sites)"
     }
 
     private func refreshDraft() {
-        if sketches.isEmpty {
+        if sketches.isEmpty || (!drillSites.isEmpty && enabledCount == 0) {
             model.setDraft(nil)
+        } else if let filtered = filteredSketch() {
+            model.draftAppendWithSketches((model.part?.sketches ?? []) + [filtered],
+                                          Feature(name: "Hole", kind: holeKind(sketchID: filtered.id)))
         } else if usesGenerated, let gen = generatedSketch {
             model.draftAppendWithSketches((model.part?.sketches ?? []) + [gen],
                                           Feature(name: "Hole", kind: candidateKind))
@@ -1317,6 +1410,20 @@ struct HolePanel: View {
             }
             if usesGenerated {
                 PanelNote(text: "The drill-point sketch “Hole point (auto)” is created with the hole.")
+            }
+            if !drillSites.isEmpty {
+                Text("Drill sites")
+                    .mcFont(17, weight: .semibold)
+                    .foregroundStyle(.secondary)
+                ForEach(drillSites, id: \.entityID) { site in
+                    Toggle(site.label, isOn: siteBinding(site.entityID))
+                        .mcFont(18)
+                }
+                if enabledCount == 0 {
+                    PanelNote(text: "No drill sites are on — switch at least one on to drill.", warning: true)
+                } else {
+                    PanelNote(text: "Will drill at \(enabledCount) site\(enabledCount == 1 ? "" : "s")")
+                }
             }
             PanelNumberRow(label: "Diameter (mm)", text: $diameterText)
             Toggle("Through (all the way)", isOn: $through)
@@ -1341,17 +1448,24 @@ struct HolePanel: View {
                 PanelNumberRow(label: "Sink angle (degrees)", text: $csAngleText)
             }
             PanelDraftError(model: model)
-            PanelOKBar(okEnabled: !sketches.isEmpty, onOK: apply, onCancel: close)
+            PanelOKBar(okEnabled: !sketches.isEmpty && (drillSites.isEmpty || enabledCount > 0),
+                       onOK: apply, onCancel: close)
         }
-        .onAppear { refreshDraft() }
+        .onAppear { resetSites(); refreshDraft() }
+        .onChange(of: sketchID) { _, _ in resetSites() }
         .onChange(of: draftSignature) { _, _ in refreshDraft() }
     }
 
     private func apply() {
-        if usesGenerated, let gen = generatedSketch {
-            model.addGeneratedSketch(gen)
+        if let filtered = filteredSketch() {
+            model.addGeneratedSketch(filtered)
+            model.appendFeature(name: "Hole", kind: holeKind(sketchID: filtered.id))
+        } else {
+            if usesGenerated, let gen = generatedSketch {
+                model.addGeneratedSketch(gen)
+            }
+            model.appendFeature(name: "Hole", kind: candidateKind)
         }
-        model.appendFeature(name: "Hole", kind: candidateKind)
         model.setDraft(nil)
         close()
     }

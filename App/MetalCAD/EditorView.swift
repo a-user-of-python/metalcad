@@ -113,6 +113,10 @@ final class EditorModel: ObservableObject {
     @Published var previewMesh: Mesh?
     /// First error of the latest draft rebuild, if it failed.
     @Published var previewError: CADError?
+    /// Neutral note shown in the panels' draft slot when the live
+    /// preview is intentionally skipped (very large part) — the
+    /// draft itself still applies on OK.
+    @Published var previewNote: String?
     private var draftWorkItem: DispatchWorkItem?
     private var draftBusy = false
     /// One pending draft rebuild: the candidate feature list, plus —
@@ -156,7 +160,7 @@ final class EditorModel: ObservableObject {
     // MARK: Draft previews
 
     /// Schedule a live preview rebuild of `features` (nil clears the
-    /// preview). Debounced ~120 ms so dragging a slider or typing in
+    /// preview). Debounced ~250 ms so dragging a slider or typing in
     /// a field doesn't rebuild per keystroke; if a rebuild is already
     /// running, only the newest request is kept (coalesced). The
     /// rebuild itself is the same synchronous kit call the committed
@@ -172,7 +176,7 @@ final class EditorModel: ObservableObject {
             self?.requestDraftRun(request)
         }
         draftWorkItem = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: item)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: item)
     }
 
     private func requestDraftRun(_ request: DraftRequest) {
@@ -187,14 +191,26 @@ final class EditorModel: ObservableObject {
         guard let features = request.features, var p = part else {
             previewMesh = nil
             previewError = nil
+            previewNote = nil
             return
         }
         draftBusy = true
-        p.features = features
-        if let sketches = request.sketches { p.sketches = sketches }
-        let result = DocumentEngine.rebuild(part: p)
-        previewMesh = result.mesh
-        previewError = result.firstError
+        // Very large parts make every draft rebuild expensive (the
+        // iPad ran hot, 2026-10-26): past ~150k triangles in the
+        // current result, skip the ghost entirely and say so — the
+        // feature still applies, exactly, on OK.
+        if (rebuild?.mesh.triangleCount ?? 0) > 150_000 {
+            previewMesh = nil
+            previewError = nil
+            previewNote = "Preview paused — the part is large; the result applies on OK"
+        } else {
+            previewNote = nil
+            p.features = features
+            if let sketches = request.sketches { p.sketches = sketches }
+            let result = DocumentEngine.rebuild(part: p)
+            previewMesh = result.mesh
+            previewError = result.firstError
+        }
         draftBusy = false
         if let queued = draftQueued {
             draftQueued = nil
@@ -503,9 +519,13 @@ final class EditorModel: ObservableObject {
 
     /// Resolve a normal-mode tap on the model into `picked`, in
     /// priority order: (a) a sharp edge within 2.5 mm of the hit
-    /// point, (b) the grouped planar face owning the tapped triangle,
-    /// (c) a fitted cylinder — external = shaft, internal = hole
-    /// wall, (d) nothing → selection cleared. Silent by design:
+    /// point, (b) a fitted cylinder — external = shaft, internal =
+    /// hole wall, (c) the grouped planar face owning the tapped
+    /// triangle, (d) nothing → selection cleared. The cylinder fit
+    /// runs BEFORE the face match on purpose: a tessellated cylinder
+    /// side is many small planar quads, and matching the face first
+    /// selected one flat facet (a visible rectangle) instead of the
+    /// whole cylinder (device report, 2026-10-26). Silent by design:
     /// picking never raises the error banner.
     func resolveModelTap(triangleIndex: Int, point: Vec3) {
         guard let mesh = rebuild?.mesh, mesh.triangleCount > 0 else {
@@ -530,7 +550,14 @@ final class EditorModel: ObservableObject {
             clearPicked()
             return
         }
-        // (b) FACE — same plane matcher as the face-pick flow, but
+        // (b) SHAFT / HOLE WALL — fit a cylinder to the tapped patch
+        // FIRST (see the doc comment: a cylinder side must not lose
+        // to one of its own flat facets).
+        if let fit = CylinderFitter.fit(mesh: welded, seedTriangle: triangleIndex) {
+            picked = fit.isInternal ? .holeWall(fit) : .shaft(fit)
+            return
+        }
+        // (c) FACE — same plane matcher as the face-pick flow, but
         // over groupedFaces so the stored index addresses the
         // per-face triangle lists (the highlight + label use them).
         let a = welded.vertices[Int(welded.indices[triangleIndex * 3])]
@@ -543,11 +570,6 @@ final class EditorModel: ObservableObject {
             $0.plane.normal.dot(n) > 0.999 && abs(n.dot($0.centroid) - w) < 1e-3
         }) {
             picked = .face(index: idx, face: grouped.faces[idx], point: point)
-            return
-        }
-        // (c) SHAFT / HOLE WALL — fit a cylinder to the tapped patch.
-        if let fit = CylinderFitter.fit(mesh: welded, seedTriangle: triangleIndex) {
-            picked = fit.isInternal ? .holeWall(fit) : .shaft(fit)
             return
         }
         // (d) Nothing matched.
@@ -1632,6 +1654,8 @@ struct EditorView: View {
             Slider(value: $quickDistance, in: 0.5...100, step: 0.5)
             if model.draftFeatures != nil, let err = model.previewError {
                 PanelNote(text: "Preview: \(err.userMessage) (\(err.code))", warning: true)
+            } else if model.draftFeatures != nil, let note = model.previewNote {
+                PanelNote(text: note)
             }
             HStack(spacing: 14) {
                 Button("Cancel") { cancelQuick() }

@@ -12,7 +12,7 @@
   <img src="https://img.shields.io/badge/Swift-6.0-orange" alt="Swift 6">
   <img src="https://img.shields.io/badge/iPadOS-17%2B-blue" alt="iPadOS 17+">
   <img src="https://img.shields.io/badge/platform-iPad-lightgrey" alt="iPad">
-  <img src="https://img.shields.io/badge/version-1.11-green" alt="Version 1.10">
+  <img src="https://img.shields.io/badge/version-1.12-green" alt="Version 1.10">
 </p>
 
 ---
@@ -62,6 +62,12 @@ MetalCAD ships as an unsigned IPA (GitHub Actions artifact, and attached to Rele
 - `MetalCADKit/` — the platform-pure Swift kernel (geometry, CSG, solver, features, IO). Fully unit-tested: `cd MetalCADKit && swift test`
 - `App/` — the SwiftUI + SceneKit app. The Xcode project is generated: `cd App && python3 gen_project.py`
 - CI (GitHub Actions, `macos-26`) runs the kit tests and packages the unsigned IPA on every push
+
+## Version 1.12
+
+- UI overhaul: sketch directly in the 3D viewport (drag tools, Pencil Pro hover, color-tinted grid) — no separate 2D sketch window; new documents open straight into a sketch
+- Left tool rail replaces the top ribbon; constraints + measurement inspector live in the rail while sketching
+- Smooth CAD look: area-weighted shading (crease 60°) + sharp-edge line overlay (Settings toggle)
 
 ## Version 1.11
 

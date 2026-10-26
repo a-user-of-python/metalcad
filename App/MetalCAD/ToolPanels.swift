@@ -104,6 +104,12 @@ enum ActiveTool: Identifiable, Equatable {
     case filletEdge
     case chamferEdge
     case threadShaft
+    // Selection-first panels (v4.4): the picked-face bar's wider
+    // Fusion-style menu — revolve the face's own outline, or finish
+    // every edge bounding the face.
+    case revolveFace
+    case filletFaceEdges
+    case chamferFaceEdges
 
     var id: String {
         switch self {
@@ -136,6 +142,9 @@ enum ActiveTool: Identifiable, Equatable {
         case .filletEdge: return "filletEdge"
         case .chamferEdge: return "chamferEdge"
         case .threadShaft: return "threadShaft"
+        case .revolveFace: return "revolveFace"
+        case .filletFaceEdges: return "filletFaceEdges"
+        case .chamferFaceEdges: return "chamferFaceEdges"
         }
     }
 
@@ -170,6 +179,9 @@ enum ActiveTool: Identifiable, Equatable {
         case .filletEdge: return "Fillet Edge"
         case .chamferEdge: return "Chamfer Edge"
         case .threadShaft: return "Thread Shaft"
+        case .revolveFace: return "Revolve Face"
+        case .filletFaceEdges: return "Fillet Face Edges"
+        case .chamferFaceEdges: return "Chamfer Face Edges"
         }
     }
 }
@@ -353,9 +365,9 @@ struct ToolPanelView: View {
             HolePanel(model: model, initialSketchID: panelSketchID,
                       generatedSketch: model.pendingHoleSketch, close: close)
         case .loft:
-            LoftPanel(model: model, close: close)
+            LoftPanel(model: model, initialSketchID: panelSketchID, close: close)
         case .sweep:
-            SweepPanel(model: model, close: close)
+            SweepPanel(model: model, initialSketchID: panelSketchID, close: close)
         case .coil:
             CoilPanel(model: model, close: close)
         case .pipe:
@@ -389,11 +401,18 @@ struct ToolPanelView: View {
         case .pullFace:
             PullFacePanel(model: model, close: close)
         case .filletEdge:
-            FilletEdgePanel(model: model, close: close)
+            EdgeFinishPanel(model: model, isFillet: true, source: .pickedEdge, close: close)
         case .chamferEdge:
-            ChamferEdgePanel(model: model, close: close)
+            EdgeFinishPanel(model: model, isFillet: false, source: .pickedEdge, close: close)
         case .threadShaft:
             ThreadShaftPanel(model: model, close: close)
+        case .revolveFace:
+            RevolvePanel(model: model, initialSketchID: panelSketchID,
+                         generatedSketch: model.pendingRevolveSketch, close: close)
+        case .filletFaceEdges:
+            EdgeFinishPanel(model: model, isFillet: true, source: .pickedFaceEdges, close: close)
+        case .chamferFaceEdges:
+            EdgeFinishPanel(model: model, isFillet: false, source: .pickedFaceEdges, close: close)
         }
     }
 }
@@ -1104,18 +1123,41 @@ struct ExtrudePanel: View {
 struct RevolvePanel: View {
     @ObservedObject var model: EditorModel
     let close: () -> Void
+    /// The generated face-outline sketch from the picked-face bar
+    /// ("Revolve Face…"), if this panel was opened that way. Same
+    /// pattern as HolePanel's: drafts inject it into the preview
+    /// part; Apply commits it with the revolve feature.
+    let generatedSketch: Sketch?
 
     @State private var sketchID: String
     @State private var axisEntityID: Int = 0
     @State private var angleText = "360"
 
-    init(model: EditorModel, initialSketchID: String? = nil, close: @escaping () -> Void) {
+    init(model: EditorModel, initialSketchID: String? = nil,
+         generatedSketch: Sketch? = nil, close: @escaping () -> Void) {
         _model = ObservedObject(wrappedValue: model)
         self.close = close
-        _sketchID = State(initialValue: initialSketchID ?? model.featureSketches.first?.id ?? "")
+        self.generatedSketch = generatedSketch
+        _sketchID = State(initialValue: generatedSketch?.id
+                          ?? initialSketchID
+                          ?? model.featureSketches.first?.id ?? "")
     }
 
-    private var sketches: [Sketch] { model.featureSketches }
+    private var sketches: [Sketch] {
+        var list = model.featureSketches
+        if let gen = generatedSketch, !list.contains(where: { $0.id == gen.id }) {
+            list.append(gen)
+        }
+        return list
+    }
+
+    /// True while the generated outline is the chosen profile:
+    /// drafts must inject it into the preview part, and Apply
+    /// commits it (once) before the revolve feature.
+    private var usesGenerated: Bool {
+        guard let gen = generatedSketch else { return false }
+        return sketchID == gen.id
+    }
     private var axisLines: [SketchEntity] {
         (sketches.first { $0.id == sketchID }?.entities ?? []).filter { e in
             if case .line = e { return true }
@@ -1131,7 +1173,12 @@ struct RevolvePanel: View {
     private var draftSignature: String { "\(sketchID)|\(axisEntityID)|\(angleText)" }
 
     private func refreshDraft() {
-        if sketches.isEmpty || axisLines.isEmpty { model.setDraft(nil) } else {
+        if sketches.isEmpty || axisLines.isEmpty {
+            model.setDraft(nil)
+        } else if usesGenerated, let gen = generatedSketch {
+            model.draftAppendWithSketches((model.part?.sketches ?? []) + [gen],
+                                          Feature(name: "Revolve", kind: candidateKind))
+        } else {
             model.draftAppend(Feature(name: "Revolve", kind: candidateKind))
         }
     }
@@ -1158,6 +1205,9 @@ struct RevolvePanel: View {
                 if axisLines.isEmpty {
                     PanelNote(text: "The chosen sketch has no line to revolve around yet.", warning: true)
                 }
+                if usesGenerated {
+                    PanelNote(text: "The outline sketch “Face revolve (auto)” is created with the revolve. Pick one of its lines as the axis.")
+                }
             }
             PanelNumberRow(label: "Angle (degrees)", text: $angleText)
             PanelDraftError(model: model)
@@ -1171,6 +1221,9 @@ struct RevolvePanel: View {
     }
 
     private func apply() {
+        if usesGenerated, let gen = generatedSketch {
+            model.addGeneratedSketch(gen)
+        }
         model.appendFeature(name: "Revolve", kind: candidateKind)
         model.setDraft(nil)
         close()
@@ -1313,11 +1366,11 @@ struct LoftPanel: View {
     @State private var sketchA: String
     @State private var sketchB: String
 
-    init(model: EditorModel, close: @escaping () -> Void) {
+    init(model: EditorModel, initialSketchID: String? = nil, close: @escaping () -> Void) {
         _model = ObservedObject(wrappedValue: model)
         self.close = close
         let all = model.featureSketches
-        _sketchA = State(initialValue: all.first?.id ?? "")
+        _sketchA = State(initialValue: initialSketchID ?? all.first?.id ?? "")
         _sketchB = State(initialValue: (all.count > 1 ? all[1] : all.first)?.id ?? "")
     }
 
@@ -1364,11 +1417,11 @@ struct SweepPanel: View {
     @State private var profileID: String
     @State private var pathID: String
 
-    init(model: EditorModel, close: @escaping () -> Void) {
+    init(model: EditorModel, initialSketchID: String? = nil, close: @escaping () -> Void) {
         _model = ObservedObject(wrappedValue: model)
         self.close = close
         let all = model.featureSketches
-        _profileID = State(initialValue: all.first?.id ?? "")
+        _profileID = State(initialValue: initialSketchID ?? all.first?.id ?? "")
         _pathID = State(initialValue: (all.count > 1 ? all[1] : all.first)?.id ?? "")
     }
 
@@ -2325,126 +2378,167 @@ struct PullFacePanel: View {
     }
 }
 
-/// Fillet exactly the one picked edge (ribbon Fillet rounds all
-/// sharp edges; this panel rounds just this one).
-struct FilletEdgePanel: View {
-    @ObservedObject var model: EditorModel
-    let close: () -> Void
+// MARK: - Edge finish panels (one edge / a face's edges)
 
-    private let midpoint: Vec3?
-    private let edgeLength: Double
-
-    @State private var radiusText: String = "2"
-
-    init(model: EditorModel, close: @escaping () -> Void) {
-        _model = ObservedObject(wrappedValue: model)
-        self.close = close
-        if case .edge(let mid, _, _, let len) = model.picked {
-            midpoint = mid
-            edgeLength = len
-        } else {
-            midpoint = nil
-            edgeLength = 0
-        }
-    }
-
-    private var candidateKind: FeatureKind? {
-        guard let mid = midpoint else { return nil }
-        return .filletEdges(radius: panelNum(radiusText, fallback: 2), midpoints: [mid])
-    }
-
-    private var draftSignature: String { radiusText }
-
-    private func refreshDraft() {
-        guard let kind = candidateKind else { model.setDraft(nil); return }
-        model.draftAppend(Feature(name: "Fillet edge", kind: kind))
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            if midpoint == nil {
-                PanelNote(text: "No edge is selected. Tap an edge of the model, then choose Fillet This Edge.", warning: true)
-            } else {
-                PanelNote(text: "Edge length \(mcFmt(edgeLength)) mm — only this edge is filleted.")
-                PanelNumberRow(label: "Radius (mm)", text: $radiusText)
-                Slider(value: Binding(
-                    get: { min(max(panelNum(radiusText, fallback: 2), 0.5), 20) },
-                    set: { radiusText = mcFmt($0) }
-                ), in: 0.5...20, step: 0.25)
-                PanelDraftError(model: model)
-            }
-            PanelOKBar(okEnabled: candidateKind != nil && panelNum(radiusText, fallback: 0) > 0,
-                       onOK: apply, onCancel: close)
-        }
-        .onAppear { refreshDraft() }
-        .onChange(of: draftSignature) { _, _ in refreshDraft() }
-    }
-
-    private func apply() {
-        guard let kind = candidateKind else { return }
-        model.appendFeature(name: "Fillet edge", kind: kind)
-        model.setDraft(nil)
-        close()
-    }
+/// Which edges an EdgeFinishPanel acts on: just the single tapped
+/// edge, or every sharp edge bounding the tapped face.
+enum EdgeFinishSource {
+    case pickedEdge
+    case pickedFaceEdges
 }
 
-/// Chamfer exactly the one picked edge.
-struct ChamferEdgePanel: View {
+/// Closest point on triangle abc to point p (Ericson's
+/// closest-point-on-triangle region tests).
+func mcClosestPointOnTriangle(_ p: Vec3, _ a: Vec3, _ b: Vec3, _ c: Vec3) -> Vec3 {
+    let ab = b - a
+    let ac = c - a
+    let ap = p - a
+    let d1 = ab.dot(ap)
+    let d2 = ac.dot(ap)
+    if d1 <= 0 && d2 <= 0 { return a }
+    let bp = p - b
+    let d3 = ab.dot(bp)
+    let d4 = ac.dot(bp)
+    if d3 >= 0 && d4 <= d3 { return b }
+    let vc = d1 * d4 - d3 * d2
+    if vc <= 0 && d1 >= 0 && d3 <= 0 {
+        return a + ab * (d1 / (d1 - d3))
+    }
+    let cp = p - c
+    let d5 = ab.dot(cp)
+    let d6 = ac.dot(cp)
+    if d6 >= 0 && d5 <= d6 { return c }
+    let vb = d5 * d2 - d1 * d6
+    if vb <= 0 && d2 >= 0 && d6 <= 0 {
+        return a + ac * (d2 / (d2 - d6))
+    }
+    let va = d3 * d6 - d5 * d4
+    if va <= 0 && (d4 - d3) >= 0 && (d5 - d6) >= 0 {
+        let w = (d4 - d3) / ((d4 - d3) + (d5 - d6))
+        return b + (c - b) * w
+    }
+    let denom = 1.0 / (va + vb + vc)
+    return a + ab * (vb * denom) + ac * (vc * denom)
+}
+
+/// Distance from a point to the nearest point of a triangle.
+func mcPointTriangleDistance(_ p: Vec3, _ a: Vec3, _ b: Vec3, _ c: Vec3) -> Double {
+    p.distance(to: mcClosestPointOnTriangle(p, a, b, c))
+}
+
+/// Midpoints of the sharp edges that bound one face of the result
+/// mesh. The face's triangles come from FaceExtractor.groupedFaces —
+/// the same call the tap resolver used, so the stored face index
+/// addresses the same list — and a SolidEdge belongs to the face
+/// when its midpoint lies within 1.0 mm of any of those triangles
+/// (a bounding edge's midpoint sits ON the face, so this also
+/// catches edges whose triangles were re-split by CSG).
+func mcFaceEdgeMidpoints(faceIndex: Int, mesh: Mesh) -> [Vec3] {
+    let grouped = FaceExtractor.groupedFaces(of: mesh)
+    guard grouped.triangles.indices.contains(faceIndex) else { return [] }
+    let welded = grouped.mesh
+    var tris: [(Vec3, Vec3, Vec3)] = []
+    for t in grouped.triangles[faceIndex] {
+        tris.append((welded.vertices[Int(welded.indices[t * 3])],
+                     welded.vertices[Int(welded.indices[t * 3 + 1])],
+                     welded.vertices[Int(welded.indices[t * 3 + 2])]))
+    }
+    guard !tris.isEmpty else { return [] }
+    var mids: [Vec3] = []
+    for edge in SolidEdgeExtractor.edges(of: mesh) {
+        if tris.contains(where: { mcPointTriangleDistance(edge.mid, $0.0, $0.1, $0.2) <= 1.0 }) {
+            mids.append(edge.mid)
+        }
+    }
+    return mids
+}
+
+/// Fillet or chamfer a FIXED set of edges, chosen by midpoint —
+/// one view for all four selection-first finishes: the single
+/// tapped edge ("Fillet/Chamfer This Edge") and every edge
+/// bounding the tapped face ("Fillet/Chamfer Face Edges"). The
+/// ribbon Fillet/Chamfer panels stay all-edges; this one never
+/// touches an edge outside its midpoint list.
+struct EdgeFinishPanel: View {
     @ObservedObject var model: EditorModel
     let close: () -> Void
+    let isFillet: Bool
 
-    private let midpoint: Vec3?
-    private let edgeLength: Double
+    private let midpoints: [Vec3]
+    private let note: String?
+    private let emptyText: String
+    private let featureName: String
 
-    @State private var distanceText: String = "2"
+    @State private var valueText: String = "2"
 
-    init(model: EditorModel, close: @escaping () -> Void) {
+    init(model: EditorModel, isFillet: Bool, source: EdgeFinishSource,
+         close: @escaping () -> Void) {
         _model = ObservedObject(wrappedValue: model)
         self.close = close
-        if case .edge(let mid, _, _, let len) = model.picked {
-            midpoint = mid
-            edgeLength = len
-        } else {
-            midpoint = nil
-            edgeLength = 0
+        self.isFillet = isFillet
+        switch source {
+        case .pickedEdge:
+            featureName = isFillet ? "Fillet edge" : "Chamfer edge"
+            emptyText = "No edge is selected. Tap an edge of the model, then choose \(isFillet ? "Fillet" : "Chamfer") This Edge."
+            if case .edge(let mid, _, _, let len) = model.picked {
+                midpoints = [mid]
+                note = "Edge length \(mcFmt(len)) mm — only this edge is \(isFillet ? "filleted" : "chamfered")."
+            } else {
+                midpoints = []
+                note = nil
+            }
+        case .pickedFaceEdges:
+            featureName = isFillet ? "Fillet face edges" : "Chamfer face edges"
+            emptyText = "No face edges were found. Tap a flat face of the model, then choose \(isFillet ? "Fillet" : "Chamfer") Face Edges."
+            if case .face(let idx, _, _) = model.picked, let mesh = model.rebuild?.mesh {
+                let mids = mcFaceEdgeMidpoints(faceIndex: idx, mesh: mesh)
+                midpoints = mids
+                note = mids.isEmpty ? nil
+                    : "\(mids.count) edge\(mids.count == 1 ? "" : "s") around the selected face will be \(isFillet ? "filleted" : "chamfered") — no other edge is touched."
+            } else {
+                midpoints = []
+                note = nil
+            }
         }
     }
 
     private var candidateKind: FeatureKind? {
-        guard let mid = midpoint else { return nil }
-        return .chamferEdges(distance: panelNum(distanceText, fallback: 2), midpoints: [mid])
+        guard !midpoints.isEmpty else { return nil }
+        let v = panelNum(valueText, fallback: 2)
+        return isFillet ? .filletEdges(radius: v, midpoints: midpoints)
+                        : .chamferEdges(distance: v, midpoints: midpoints)
     }
-
-    private var draftSignature: String { distanceText }
 
     private func refreshDraft() {
         guard let kind = candidateKind else { model.setDraft(nil); return }
-        model.draftAppend(Feature(name: "Chamfer edge", kind: kind))
+        model.draftAppend(Feature(name: featureName, kind: kind))
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            if midpoint == nil {
-                PanelNote(text: "No edge is selected. Tap an edge of the model, then choose Chamfer This Edge.", warning: true)
+            if midpoints.isEmpty {
+                PanelNote(text: emptyText, warning: true)
             } else {
-                PanelNote(text: "Edge length \(mcFmt(edgeLength)) mm — only this edge is chamfered.")
-                PanelNumberRow(label: "Distance (mm)", text: $distanceText)
+                if let note {
+                    PanelNote(text: note)
+                }
+                PanelNumberRow(label: isFillet ? "Radius (mm)" : "Distance (mm)", text: $valueText)
                 Slider(value: Binding(
-                    get: { min(max(panelNum(distanceText, fallback: 2), 0.5), 20) },
-                    set: { distanceText = mcFmt($0) }
+                    get: { min(max(panelNum(valueText, fallback: 2), 0.5), 20) },
+                    set: { valueText = mcFmt($0) }
                 ), in: 0.5...20, step: 0.25)
                 PanelDraftError(model: model)
             }
-            PanelOKBar(okEnabled: candidateKind != nil && panelNum(distanceText, fallback: 0) > 0,
+            PanelOKBar(okEnabled: candidateKind != nil && panelNum(valueText, fallback: 0) > 0,
                        onOK: apply, onCancel: close)
         }
         .onAppear { refreshDraft() }
-        .onChange(of: draftSignature) { _, _ in refreshDraft() }
+        .onChange(of: valueText) { _, _ in refreshDraft() }
     }
 
     private func apply() {
         guard let kind = candidateKind else { return }
-        model.appendFeature(name: "Chamfer edge", kind: kind)
+        model.appendFeature(name: featureName, kind: kind)
         model.setDraft(nil)
         close()
     }

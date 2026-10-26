@@ -83,6 +83,12 @@ final class EditorModel: ObservableObject {
     /// and commits it alongside the hole feature; cleared when the
     /// panel closes.
     @Published var pendingHoleSketch: Sketch?
+    /// Generated face-outline sketch waiting for the Revolve panel
+    /// (set by the picked-face bar's "Revolve Face…"). The panel
+    /// drafts with it injected and commits it alongside the revolve
+    /// feature; cleared when the panel closes. Same pattern as
+    /// pendingHoleSketch.
+    @Published var pendingRevolveSketch: Sketch?
     /// Face the Measure panel should preselect as Face A when it next
     /// opens (set by the picked-face bar's "Measure").
     @Published var measureFace: PlanarFace?
@@ -651,6 +657,7 @@ struct EditorView: View {
                 model.pendingPanelSketchID = nil
                 model.pendingPanelOperation = nil
                 model.pendingHoleSketch = nil
+                model.pendingRevolveSketch = nil
                 model.setDraft(nil)
             }
         }
@@ -1283,31 +1290,42 @@ struct EditorView: View {
                     .foregroundStyle(.secondary)
             }
             .frame(maxWidth: 170, alignment: .leading)
-            Spacer()
-            actionBarButton("Extrude", icon: "rectangle.expand.vertical") {
-                model.pendingPanelSketchID = sketch.id
-                model.pendingPanelOperation = "join"
-                activeTool = .extrude
-            }
-            actionBarButton("Pocket", icon: "arrow.down.square") {
-                model.pendingPanelSketchID = sketch.id
-                model.pendingPanelOperation = "cut"
-                activeTool = .extrude
-            }
-            actionBarButton("Revolve", icon: "rotate.3d") {
-                model.pendingPanelSketchID = sketch.id
-                activeTool = .revolve
-            }
-            actionBarButton("Hole", icon: "circle.circle") {
-                model.pendingPanelSketchID = sketch.id
-                activeTool = .hole
-            }
-            actionBarButton("Edit Sketch", icon: "pencil") {
-                sketchNav = SketchNav(id: sketch.id)
-            }
-            actionBarButton("Hide", icon: "eye.slash") {
-                model.hiddenSketchIDs.insert(sketch.id)
-                model.selectedSketchID = nil
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 10) {
+                    actionBarButton("Extrude", icon: "rectangle.expand.vertical") {
+                        model.pendingPanelSketchID = sketch.id
+                        model.pendingPanelOperation = "join"
+                        activeTool = .extrude
+                    }
+                    actionBarButton("Pocket", icon: "arrow.down.square") {
+                        model.pendingPanelSketchID = sketch.id
+                        model.pendingPanelOperation = "cut"
+                        activeTool = .extrude
+                    }
+                    actionBarButton("Revolve", icon: "rotate.3d") {
+                        model.pendingPanelSketchID = sketch.id
+                        activeTool = .revolve
+                    }
+                    actionBarButton("Hole", icon: "circle.circle") {
+                        model.pendingPanelSketchID = sketch.id
+                        activeTool = .hole
+                    }
+                    actionBarButton("Loft", icon: "square.stack.3d.up") {
+                        model.pendingPanelSketchID = sketch.id
+                        activeTool = .loft
+                    }
+                    actionBarButton("Sweep", icon: "arrow.triangle.2.circlepath") {
+                        model.pendingPanelSketchID = sketch.id
+                        activeTool = .sweep
+                    }
+                    actionBarButton("Edit Sketch", icon: "pencil") {
+                        sketchNav = SketchNav(id: sketch.id)
+                    }
+                    actionBarButton("Hide", icon: "eye.slash") {
+                        model.hiddenSketchIDs.insert(sketch.id)
+                        model.selectedSketchID = nil
+                    }
+                }
             }
         }
         .padding(12)
@@ -1334,47 +1352,65 @@ struct EditorView: View {
                     .lineLimit(1)
             }
             .frame(maxWidth: 210, alignment: .leading)
-            Spacer()
-            switch picked {
-            case .face(_, let face, let point):
-                actionBarButton("Sketch Here", icon: "square.and.pencil") {
-                    sketchNav = SketchNav(id: model.addSketchOnFace(face))
-                }
-                actionBarButton("Pull", icon: "arrow.up.circle.fill") {
-                    startQuick(cut: false, face: face)
-                }
-                actionBarButton("Press", icon: "arrow.down.circle.fill") {
-                    startQuick(cut: true, face: face)
-                }
-                actionBarButton("Pull Face…", icon: "arrow.up.square") {
-                    activeTool = .pullFace
-                }
-                actionBarButton("Hole Here…", icon: "circle.circle") {
-                    model.pendingHoleSketch = mcHolePointSketch(face: face, point: point)
-                    activeTool = .hole
-                }
-                actionBarButton("Offset Plane", icon: "square.on.square") {
-                    model.constructFace = face
-                    activeTool = .offsetPlane
-                }
-                actionBarButton("Measure", icon: "ruler") {
-                    model.measureFace = face
-                    activeTool = .measure
-                }
-            case .edge:
-                actionBarButton("Fillet This Edge…", icon: "capsule") {
-                    activeTool = .filletEdge
-                }
-                actionBarButton("Chamfer This Edge…", icon: "octagon") {
-                    activeTool = .chamferEdge
-                }
-            case .shaft:
-                actionBarButton("Thread This Shaft…", icon: "lines.measurement.horizontal") {
-                    activeTool = .threadShaft
-                }
-            case .holeWall:
-                actionBarButton("Clear", icon: "xmark") {
-                    model.clearPicked()
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 10) {
+                    switch picked {
+                    case .face(_, let face, let point):
+                        actionBarButton("Sketch Here", icon: "square.and.pencil") {
+                            sketchNav = SketchNav(id: model.addSketchOnFace(face))
+                        }
+                        actionBarButton("Pull", icon: "arrow.up.circle.fill") {
+                            startQuick(cut: false, face: face)
+                        }
+                        actionBarButton("Press", icon: "arrow.down.circle.fill") {
+                            startQuick(cut: true, face: face)
+                        }
+                        actionBarButton("Pull Face…", icon: "arrow.up.square") {
+                            activeTool = .pullFace
+                        }
+                        actionBarButton("Revolve Face…", icon: "rotate.3d.fill") {
+                            model.pendingRevolveSketch = mcFacePullSketch(
+                                id: UUID().uuidString, face: face, cut: false,
+                                name: "Face revolve (auto)")
+                            activeTool = .revolveFace
+                        }
+                        actionBarButton("Hole Here…", icon: "circle.circle") {
+                            model.pendingHoleSketch = mcHolePointSketch(face: face, point: point)
+                            activeTool = .hole
+                        }
+                        actionBarButton("Fillet Face Edges…", icon: "capsule") {
+                            activeTool = .filletFaceEdges
+                        }
+                        actionBarButton("Chamfer Face Edges…", icon: "octagon") {
+                            activeTool = .chamferFaceEdges
+                        }
+                        actionBarButton("Offset Plane", icon: "square.on.square") {
+                            model.constructFace = face
+                            activeTool = .offsetPlane
+                        }
+                        actionBarButton("Measure", icon: "ruler") {
+                            model.measureFace = face
+                            activeTool = .measure
+                        }
+                    case .edge:
+                        actionBarButton("Fillet This Edge…", icon: "capsule") {
+                            activeTool = .filletEdge
+                        }
+                        actionBarButton("Chamfer This Edge…", icon: "octagon") {
+                            activeTool = .chamferEdge
+                        }
+                    case .shaft:
+                        actionBarButton("Thread This Shaft…", icon: "lines.measurement.horizontal") {
+                            activeTool = .threadShaft
+                        }
+                        actionBarButton("Measure", icon: "ruler") {
+                            activeTool = .measure
+                        }
+                    case .holeWall:
+                        actionBarButton("Clear", icon: "xmark") {
+                            model.clearPicked()
+                        }
+                    }
                 }
             }
             if case .holeWall = picked {

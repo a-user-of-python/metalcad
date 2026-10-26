@@ -181,13 +181,17 @@ struct FeatureEditorSheet: View {
     init(feature: Feature, sketches: [Sketch], currentFaces: [PlanarFace] = [],
          filletMaxFeasible: Double? = nil,
          onSave: @escaping (String, FeatureKind) -> Void,
-         onCancel: @escaping () -> Void) {
+         onCancel: @escaping () -> Void,
+         onDraft: ((FeatureKind) -> Void)? = nil,
+         onDraftEnd: (() -> Void)? = nil) {
         self.feature = feature
         self.sketches = sketches
         self.currentFaces = currentFaces
         self.filletMaxFeasible = filletMaxFeasible
         self.onSave = onSave
         self.onCancel = onCancel
+        self.onDraft = onDraft
+        self.onDraftEnd = onDraftEnd
         _nameText = State(initialValue: feature.name)
         var initialSketch = sketches.first?.id ?? ""
         switch feature.kind {

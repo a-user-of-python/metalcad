@@ -78,11 +78,9 @@ final class DocumentLibrary: ObservableObject {
         var doc = CADDocument(name: name)
         // Part's default materialID is the library default material.
         doc.parts.append(Part(name: "Part"))
-        CrashTrace.mark("create: blank doc constructed")
         do {
             try IOService.saveJSON(doc, to: url)
             refresh()
-            CrashTrace.mark("create: saved")
             return (doc, url)
         } catch let e as CADError {
             MCLog.shared.log(error: e, category: .io)
@@ -215,7 +213,6 @@ struct DocumentsView: View {
                 }
                 ToolbarItem(placement: .primaryAction) {
                     Button {
-                        CrashTrace.begin()
                         if let made = library.createBlankDocument() {
                             session.open(document: made.doc, url: made.url)
                         }
@@ -225,17 +222,7 @@ struct DocumentsView: View {
                     }
                 }
             }
-            .onAppear {
-                library.refresh()
-                // A creation attempt that never reached the healthy
-                // mark left its breadcrumb trail pending: show where
-                // the last session died.
-                if let trail = CrashTrace.pendingTrail() {
-                    alertInfo = DocAlert(title: "Last session crashed",
-                                         message: trail.joined(separator: "\n"),
-                                         code: nil)
-                }
-            }
+            .onAppear { library.refresh() }
             .sheet(isPresented: $showSettings) {
                 HomeSettingsView()
             }
@@ -243,9 +230,7 @@ struct DocumentsView: View {
                 Alert(
                     title: Text(info.title),
                     message: Text(info.code == nil ? info.message : "\(info.message)\n\(info.code!)"),
-                    dismissButton: .default(Text("OK"), action: {
-                        CrashTrace.clearPending()
-                    })
+                    dismissButton: .default(Text("OK"))
                 )
             }
         }

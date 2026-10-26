@@ -160,11 +160,9 @@ final class EditorModel: ObservableObject {
     let fileURL: URL
 
     init(document: CADDocument, url: URL) {
-        CrashTrace.mark("model: init begin")
         self.document = document
         self.fileURL = url
         rebuildNow()
-        CrashTrace.mark("model: init done")
     }
 
     var part: Part? {
@@ -834,12 +832,10 @@ struct EditorView: View {
                     if browserPanelWidth > 0 {
                         browserPanel
                             .frame(width: browserPanelWidth)
-                            .onAppear { CrashTrace.mark("ui: browser") }
                     }
                     panelDragHandle
                     centerColumn
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .onAppear { CrashTrace.mark("ui: center") }
                     if let tool = activeTool {
                         Divider()
                         ScrollView {
@@ -892,7 +888,6 @@ struct EditorView: View {
         NavigationStack {
             VStack(spacing: 0) {
                 headerStrip
-                    .onAppear { CrashTrace.mark("ui: header") }
                 Divider()
                 ribbon
                 Divider()
@@ -940,8 +935,7 @@ struct EditorView: View {
     }
 
     var body: some View {
-        CrashTrace.mark("body: begin")
-        let built = withMaterialSheet
+        withMaterialSheet
             .sheet(item: $featureToEdit) { feature in
                 FeatureEditorSheet(
                     feature: feature,
@@ -969,24 +963,22 @@ struct EditorView: View {
             .sheet(isPresented: $showSaveAsSheet) {
                 saveAsSheet
             }
-            .alert("Rename", isPresented: renamePresented,
-                   presenting: renameTarget) { target in
+            .alert("Rename", isPresented: renamePresented) {
                 TextField("Name", text: $renameText)
                     .mcFont(20)
                 Button("Rename") {
-                    switch target.kind {
-                    case .sketch: model.renameSketch(id: target.targetID, name: renameText)
-                    case .feature: model.renameFeature(id: target.targetID, name: renameText)
+                    if let target = renameTarget {
+                        switch target.kind {
+                        case .sketch: model.renameSketch(id: target.targetID, name: renameText)
+                        case .feature: model.renameFeature(id: target.targetID, name: renameText)
+                        }
                     }
                     renameTarget = nil
                 }
                 Button("Cancel", role: .cancel) { renameTarget = nil }
-            } message: { target in
-                Text("Rename “\(target.currentName)”")
+            } message: {
+                Text("Rename “\(renameTarget?.currentName ?? "")”")
             }
-            .onAppear { CrashTrace.mark("editor: appeared") }
-        CrashTrace.mark("body: built")
-        return built
     }
 
     private var renamePresented: Binding<Bool> {
@@ -1460,7 +1452,13 @@ struct EditorView: View {
             if let err = model.rebuild?.firstError {
                 errorBanner(err, dismissible: false)
             }
-            ZStack(alignment: .bottom) {
+            // AnyView boundary (v4.9): centerColumn's opaque type used
+            // to embed this whole subtree, and instantiating it on
+            // first body update recursed the Swift runtime's type
+            // demangler into a stack-overflow crash on editor open
+            // (device .ips, 2026-10-26). Erasing the ZStack keeps
+            // centerColumn's own type shallow; content is unchanged.
+            AnyView(ZStack(alignment: .bottom) {
                 SceneKitView(
                     // A live draft PREVIEW REPLACES the model while a
                     // panel drafts (isPreview tints it) — no overlay
@@ -1546,12 +1544,12 @@ struct EditorView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .padding(10)
-            }
+            })
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             if sectionOn {
-                sectionControls
+                AnyView(sectionControls)
             }
-            statsBar
+            AnyView(statsBar)
             if !model.stlWarnings.isEmpty {
                 ForEach(Array(model.stlWarnings.enumerated()), id: \.offset) { _, w in
                     Text("\(w.userMessage) (\(w.code))")

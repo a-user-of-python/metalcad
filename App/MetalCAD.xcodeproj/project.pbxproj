@@ -7,7 +7,6 @@
 	objects = {
 		D84CF79B91A95DD5DF8C982F = {isa = PBXBuildFile; fileRef = 5A8DE70ADA90EC0AC4815469; };
 		F3EB1DD40F7AFFCF4C5B2777 = {isa = PBXBuildFile; fileRef = 0A8C13525269D9F9FAC9D986; };
-		6B8568373BC2ADC71ED025A4 = {isa = PBXBuildFile; fileRef = E1902F31B354FA4AB11438B7; };
 		E73F8391350E770E58919C5C = {isa = PBXBuildFile; fileRef = 26E010B5315191442FAC2218; };
 		2494647FC5C06D2C0A047E7E = {isa = PBXBuildFile; fileRef = 40A5B1E2E10E2E70C2F51D42; };
 		F569ABDEBBC53A99E905454A = {isa = PBXBuildFile; fileRef = 471A6EEF5C8FDD6150C40363; };
@@ -35,7 +34,6 @@
 		6D6349DFE15845D2B8AB7C66 = {isa = PBXBuildFile; fileRef = 7162F3FE7FC59D05CD4BC1B7; };
 		5A8DE70ADA90EC0AC4815469 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Accent.swift; sourceTree = "<group>"; };
 		0A8C13525269D9F9FAC9D986 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
-		E1902F31B354FA4AB11438B7 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CrashTrace.swift; sourceTree = "<group>"; };
 		26E010B5315191442FAC2218 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticsView.swift; sourceTree = "<group>"; };
 		40A5B1E2E10E2E70C2F51D42 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DocumentsView.swift; sourceTree = "<group>"; };
 		471A6EEF5C8FDD6150C40363 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorView.swift; sourceTree = "<group>"; };
@@ -77,7 +75,6 @@
 			children = (
 				5A8DE70ADA90EC0AC4815469,
 				0A8C13525269D9F9FAC9D986,
-				E1902F31B354FA4AB11438B7,
 				26E010B5315191442FAC2218,
 				40A5B1E2E10E2E70C2F51D42,
 				471A6EEF5C8FDD6150C40363,
@@ -165,7 +162,6 @@
 			files = (
 				D84CF79B91A95DD5DF8C982F,
 				F3EB1DD40F7AFFCF4C5B2777,
-				6B8568373BC2ADC71ED025A4,
 				E73F8391350E770E58919C5C,
 				2494647FC5C06D2C0A047E7E,
 				F569ABDEBBC53A99E905454A,

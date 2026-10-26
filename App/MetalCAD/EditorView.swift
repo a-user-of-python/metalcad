@@ -3817,7 +3817,7 @@ private struct RailConstraintRow: View {
 
     private var detail: String {
         switch constraint {
-        case .coincident(let a, let b): return "#\(a) = #\(b)"
+        case .coincident(let a, _, let b, _): return "#\(a) = #\(b)"
         case .distancePoints(let a, _, let b, _, _): return "#\(a) – #\(b)"
         case .radius(let e, _): return "entity #\(e)"
         case .diameter(let e, _): return "entity #\(e)"
@@ -3825,13 +3825,13 @@ private struct RailConstraintRow: View {
         case .vertical(let e): return "entity #\(e)"
         case .parallel(let a, let b): return "#\(a) ∥ #\(b)"
         case .perpendicular(let a, let b): return "#\(a) ⟂ #\(b)"
-        case .tangent(let a, let b): return "#\(a) ~ #\(b)"
-        case .concentric(let a, let b): return "#\(a) ◎ #\(b)"
-        case .equal(let a, let b): return "#\(a) ≡ #\(b)"
-        case .symmetric(let a, let b, let axis): return "#\(a) ↔ #\(b) / #\(axis)"
-        case .pointOnEntity(let p, let e): return "#\(p) on #\(e)"
-        case .midpoint(let p, let e): return "#\(p) mid #\(e)"
-        case .collinear(let a, let b): return "#\(a) — #\(b)"
+        case .tangentLineCircle(let l, let c): return "#\(l) ~ #\(c)"
+        case .equalRadius(let a, let b): return "#\(a) ≡ #\(b)"
+        case .equalLength(let a, let b): return "#\(a) ≡ #\(b)"
+        case .symmetric(let a, _, let b, _, let axis): return "#\(a) ↔ #\(b) / #\(axis)"
+        case .pointOnLine(let p, _, let l): return "#\(p) on #\(l)"
+        case .pointOnCircle(let p, _, let c): return "#\(p) on #\(c)"
+        case .fixedPoint(let e, _, _): return "entity #\(e) fixed"
         case .angleBetween(let a, let b, _): return "#\(a) ∠ #\(b)"
         }
     }

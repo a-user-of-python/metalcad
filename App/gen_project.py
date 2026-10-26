@@ -292,6 +292,20 @@ with open(os.path.join(proj_dir, "project.pbxproj"), "w") as f:
 print(f"Wrote {APP}.xcodeproj/project.pbxproj "
       f"({len(APP_FILES)} app + {len(KIT_FILES)} kit sources)")
 
+# Sanity: the project wires Assets.xcassets + AppIcon into the app
+# target, but actool can only compile an icon if the .appiconset on
+# disk actually contains image payloads. A catalog whose images never
+# made it into the tree (e.g. filtered out of a push) builds green
+# yet ships an app with no icon — shout in the log instead.
+_icon_dir = os.path.join(BASE, "Assets.xcassets", "AppIcon.appiconset")
+_icon_imgs = ([f for f in os.listdir(_icon_dir)
+               if f.lower().endswith((".png", ".jpg", ".jpeg", ".pdf"))]
+              if os.path.isdir(_icon_dir) else [])
+if not _icon_imgs:
+    print("WARNING: AppIcon.appiconset has NO image files on disk — "
+          "actool will produce no app icon. Check that the icon "
+          "payload is present in the tree being built.")
+
 # ---- Shared scheme ----
 buildable_ref = f'''<BuildableReference
                BuildableIdentifier = "primary"

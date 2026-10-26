@@ -54,7 +54,13 @@ for base in [ROOT]:
     for dirpath, dirnames, filenames in os.walk(base):
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and d != ".git"]
         for fn in filenames:
-            if fn.endswith(SKIP_SUFFIX) or fn == ".DS_Store":
+            # Asset-catalog payloads (e.g. the AppIcon PNG) must ship:
+            # without the image, CI builds an icon set with no content
+            # and the app silently gets no icon. Stray .png/.pdf/.webp
+            # files elsewhere are still skipped.
+            if fn.endswith(SKIP_SUFFIX) and ".xcassets" not in dirpath:
+                continue
+            if fn == ".DS_Store":
                 continue
             full = os.path.join(dirpath, fn)
             rel = os.path.relpath(full, ROOT)

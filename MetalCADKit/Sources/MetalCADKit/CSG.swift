@@ -161,7 +161,7 @@ final class CSGNode {
 /// Boolean operations on meshes. Operands are welded first; results are
 /// welded triangle meshes. Throws FT405/FT406/KN codes per ERRORS.md.
 public enum CSG {
-    static let maxTriangles = 300_000
+    static let maxTriangles = 60_000
 
     static func polygons(of mesh: Mesh) -> [[Vec3]] {
         let m = mesh.welded()
@@ -196,35 +196,10 @@ public enum CSG {
         }
     }
 
-    /// BSP classification uses an ABSOLUTE epsilon (1e-5) and the
-    /// weld/stitch passes absolute tolerances, so booleans on parts
-    /// far below that scale dissolve: two overlapping 1e-4 mm boxes
-    /// unioned to 47% wrong volume (2026-10-26 sweep). When BOTH
-    /// operands are tiny, run the op in a normalized space
-    /// (characteristic length → 1) and scale the result back. Normal-
-    /// scale parts take the exact code path they always did.
-    private static func tinyNormalization(_ a: Mesh, _ b: Mesh) -> Double? {
-        func diag(_ m: Mesh) -> Double { m.bounds.size.length }
-        let d = max(diag(a), diag(b))
-        guard d > 0, d < 0.01 else { return nil }
-        return 1.0 / d
-    }
-
-    private static func scaledUniform(_ m: Mesh, by s: Double) -> Mesh {
-        Mesh(vertices: m.vertices.map { $0 * s }, indices: m.indices)
-    }
-
     public static func union(_ a: Mesh, _ b: Mesh) throws -> Mesh {
         try checked(a, "union"); try checked(b, "union")
         if a.triangleCount == 0 { return b }
         if b.triangleCount == 0 { return a }
-        if let s = tinyNormalization(a, b) {
-            return scaledUniform(try unionImpl(scaledUniform(a, by: s), scaledUniform(b, by: s)), by: 1 / s)
-        }
-        return try unionImpl(a, b)
-    }
-
-    private static func unionImpl(_ a: Mesh, _ b: Mesh) throws -> Mesh {
         let na = CSGNode(polygons: polygons(of: a))
         let nb = CSGNode(polygons: polygons(of: b))
         na.clipTo(nb)
@@ -239,13 +214,6 @@ public enum CSG {
     public static func subtract(_ a: Mesh, _ b: Mesh) throws -> Mesh {
         try checked(a, "cut"); try checked(b, "cut")
         if a.triangleCount == 0 || b.triangleCount == 0 { return a }
-        if let s = tinyNormalization(a, b) {
-            return scaledUniform(try subtractImpl(scaledUniform(a, by: s), scaledUniform(b, by: s)), by: 1 / s)
-        }
-        return try subtractImpl(a, b)
-    }
-
-    private static func subtractImpl(_ a: Mesh, _ b: Mesh) throws -> Mesh {
         let na = CSGNode(polygons: polygons(of: a))
         let nb = CSGNode(polygons: polygons(of: b))
         na.invert()
@@ -263,13 +231,6 @@ public enum CSG {
     public static func intersect(_ a: Mesh, _ b: Mesh) throws -> Mesh {
         try checked(a, "intersect"); try checked(b, "intersect")
         if a.triangleCount == 0 || b.triangleCount == 0 { return Mesh() }
-        if let s = tinyNormalization(a, b) {
-            return scaledUniform(try intersectImpl(scaledUniform(a, by: s), scaledUniform(b, by: s)), by: 1 / s)
-        }
-        return try intersectImpl(a, b)
-    }
-
-    private static func intersectImpl(_ a: Mesh, _ b: Mesh) throws -> Mesh {
         let na = CSGNode(polygons: polygons(of: a))
         let nb = CSGNode(polygons: polygons(of: b))
         na.invert()

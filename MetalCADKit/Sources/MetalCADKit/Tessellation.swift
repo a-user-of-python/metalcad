@@ -32,9 +32,6 @@ public enum Tessellation {
         guard radius > 0, height > 0 else {
             throw CADError.primitiveParamInvalid("cylinder radius/height must be > 0")
         }
-        guard segments >= 3 else {
-            throw CADError.primitiveParamInvalid("cylinder needs at least 3 segments")
-        }
         let topR = radius - tan(taperDegrees * .pi / 180) * height
         guard topR > 0 else { throw CADError.primitiveParamInvalid("taper consumes the cylinder") }
         var b = MeshBuilder()
@@ -57,9 +54,6 @@ public enum Tessellation {
 
     public static func sphere(radius: Double, segments: Int = 64, rings: Int = 40) throws -> Mesh {
         guard radius > 0 else { throw CADError.primitiveParamInvalid("sphere radius must be > 0") }
-        guard segments >= 3, rings >= 2 else {
-            throw CADError.primitiveParamInvalid("sphere needs at least 3 segments and 2 rings")
-        }
         var b = MeshBuilder()
         // Single pole vertices (a grid of coincident pole vertices would
         // weld into degenerate triangles with zero normals).
@@ -100,9 +94,6 @@ public enum Tessellation {
         guard radius > 0, height > 0 else {
             throw CADError.primitiveParamInvalid("cone radius/height must be > 0")
         }
-        guard segments >= 3 else {
-            throw CADError.primitiveParamInvalid("cone needs at least 3 segments")
-        }
         var b = MeshBuilder()
         let apex = b.vertex(Vec3(0, 0, height))
         let center = b.vertex(Vec3(0, 0, 0))
@@ -126,9 +117,6 @@ public enum Tessellation {
         }
         guard tubeRadius < ringRadius else {
             throw CADError.primitiveParamInvalid("torus tube radius must be < ring radius")
-        }
-        guard segments >= 3, sides >= 3 else {
-            throw CADError.primitiveParamInvalid("torus needs at least 3 segments and 3 sides")
         }
         var b = MeshBuilder()
         var grid: [[UInt32]] = []
@@ -392,22 +380,12 @@ extension Tessellation {
     public static func extrudeTapered(profile: Profile, plane: Plane3, length: Double, taperDegrees: Double) throws -> Mesh {
         guard length > 0 else { throw CADError.padLengthInvalid(length) }
         if abs(taperDegrees) < 1e-9 { return try extrude(profile: profile, plane: plane, length: length) }
-        // offsetPolygon drops collinear points, so the top loops can
-        // have FEWER vertices than the profile loops as given — and
-        // the walls below pair base/top vertices by index. Run the
-        // same drop on the base loops first so both sides of every
-        // wall share one vertex count. (A profile edge drawn in two
-        // segments carries a collinear midpoint: tapered extrude of
-        // such a profile indexed the top loop out of bounds and
-        // crashed, 2026-10-26 sweep.)
-        let outerBase = dropCollinear(profile.outer)
-        let holesBase = profile.holes.map { dropCollinear($0) }
         let shrink = tan(taperDegrees * .pi / 180) * length
-        guard let outerTop = offsetPolygon(outerBase, by: -shrink) else {
+        guard let outerTop = offsetPolygon(profile.outer, by: -shrink) else {
             throw CADError.booleanFailed("taper \(taperDegrees) degrees is too steep for this profile")
         }
         var holesTop: [[Vec2]] = []
-        for h in holesBase {
+        for h in profile.holes {
             guard let ht = offsetPolygon(h, by: shrink) else {
                 throw CADError.booleanFailed("taper \(taperDegrees) degrees collapses a hole in this profile")
             }
@@ -415,7 +393,7 @@ extension Tessellation {
         }
         var b = MeshBuilder()
         func w(_ p: Vec2, _ z: Double) -> Vec3 { plane.toWorld(p) + plane.normal * z }
-        let bottomTris = try triangulate(try bridgedPolygon(outer: outerBase, holes: holesBase))
+        let bottomTris = try triangulate(try bridgedPolygon(outer: profile.outer, holes: profile.holes))
         let topTris = try triangulate(try bridgedPolygon(outer: outerTop, holes: holesTop))
         for t in bottomTris {
             let i0 = b.vertex(w(t[0], 0)), i1 = b.vertex(w(t[1], 0)), i2 = b.vertex(w(t[2], 0))
@@ -440,8 +418,8 @@ extension Tessellation {
                 if hole { b.quad(p0, p3, p2, p1) } else { b.quad(p0, p1, p2, p3) }
             }
         }
-        walls(outerBase, outerTop, hole: false)
-        for (h0, h1) in zip(holesBase, holesTop) { walls(h0, h1, hole: true) }
+        walls(profile.outer, outerTop, hole: false)
+        for (h0, h1) in zip(profile.holes, holesTop) { walls(h0, h1, hole: true) }
         return b.mesh
     }
 }

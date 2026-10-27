@@ -261,10 +261,6 @@ struct DocumentsView: View {
 struct HomeSettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @AppStorage(MCAccent.key) private var accentHex: String = MCAccent.defaultHex
-    /// Shared with the editor: draws the model's sharp edges as
-    /// thin dark lines (the CAD look). Same AppStorage key the
-    /// editor reads ("showModelEdges").
-    @AppStorage("showModelEdges") private var showModelEdges: Bool = true
     @State private var showDiagnostics = false
 
     private var accentBinding: Binding<Color> {
@@ -308,16 +304,6 @@ struct HomeSettingsView: View {
                     Text("Accent color")
                 } footer: {
                     Text("Colors the buttons, selection highlights, sketch glow and previews across the app. Your parts' materials are not affected.")
-                        .mcFont(15)
-                }
-
-                Section {
-                    Toggle("Show model edges", isOn: $showModelEdges)
-                        .mcFont(20, weight: .semibold)
-                } header: {
-                    Text("3D view")
-                } footer: {
-                    Text("Draws the model's sharp edges as thin dark lines over the smooth shading, like desktop CAD. Very large models (80,000+ triangles) skip the lines automatically.")
                         .mcFont(15)
                 }
 

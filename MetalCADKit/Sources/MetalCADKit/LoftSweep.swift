@@ -52,11 +52,6 @@ public enum LoftTessellator {
         guard loopA.count >= 3, loopB.count >= 3 else { throw CADError.loftProfileMismatch }
         var a = ProfileLoop.resampleClosed(loopA, count: samples)
         var b = ProfileLoop.resampleClosed(loopB, count: samples)
-        // resampleClosed returns its input unchanged for a degenerate
-        // loop (zero total length — every point coincident), leaving
-        // count != samples; the alignment loops below index up to
-        // samples and trapped out of range (2026-10-26 sweep).
-        guard a.count == samples, b.count == samples else { throw CADError.loftProfileMismatch }
         // Consistent winding: both loops should wind the same way around
         // their average normal direction.
         let nA = ProfileLoop.loopNormal(a), nB = ProfileLoop.loopNormal(b)

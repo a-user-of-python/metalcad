@@ -68,7 +68,7 @@ func mcRotatedPlane(_ p: Plane3, aroundXAxis: Bool, degrees: Double) -> Plane3 {
     }
 }
 
-/// The Fusion-style context tools. Tapping a rail tool opens one of
+/// The Fusion-style context tools. Tapping a ribbon tool opens one of
 /// these panels beside the preview; OK builds the feature with exactly
 /// the numbers shown — nothing is hidden or prefixed.
 enum ActiveTool: Identifiable, Equatable {
@@ -298,34 +298,18 @@ struct PanelOKBar: View {
 
     var body: some View {
         HStack(spacing: 14) {
-            // ONE background per button (Sean's rule: "if a button
-            // is colored, remove the grey background"): the fill
-            // lives on the label itself and the style is .plain, so
-            // neither a system capsule behind the text nor a second
-            // box around it can render. Cancel is a single
-            // accent-tinted fill with accent text; OK is the accent
-            // fill (muted grey when disabled), text directly on it.
-            Button { onCancel() } label: {
-                Text("Cancel")
-                    .mcFont(20, weight: .semibold)
-                    .foregroundStyle(accent)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 12)
-                    .background(RoundedRectangle(cornerRadius: 10)
-                        .fill(accent.opacity(0.22)))
-            }
-            .buttonStyle(.plain)
-            Button { onOK() } label: {
-                Text(okTitle)
-                    .mcFont(20, weight: .bold)
-                    .foregroundStyle(okEnabled ? .black : .white.opacity(0.8))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 12)
-                    .background(RoundedRectangle(cornerRadius: 10)
-                        .fill(okEnabled ? accent : Color.gray.opacity(0.5)))
-            }
-            .buttonStyle(.plain)
-            .disabled(!okEnabled)
+            Button("Cancel") { onCancel() }
+                .mcFont(20, weight: .semibold)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+                .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.12)))
+            Button(okTitle) { onOK() }
+                .mcFont(20, weight: .bold)
+                .foregroundStyle(.black)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+                .background(RoundedRectangle(cornerRadius: 10).fill(okEnabled ? accent : Color.gray))
+                .disabled(!okEnabled)
         }
         .padding(.top, 8)
     }
@@ -469,20 +453,14 @@ struct PlaneChoiceView: View {
                 .mcFont(17, weight: .semibold)
                 .foregroundStyle(.secondary)
             HStack(spacing: 8) {
-                planeCard("XY", sub: "facing +Z", color: Self.basePlaneColor("XY"),
-                          selected: choice == .base("XY")) {
+                planeCard("XY", sub: "facing +Z", selected: choice == .base("XY")) {
                     choice = .base("XY")
-                    model.requestCameraSnap(to: .xy)
                 }
-                planeCard("XZ", sub: "facing −Y", color: Self.basePlaneColor("XZ"),
-                          selected: choice == .base("XZ")) {
+                planeCard("XZ", sub: "facing −Y", selected: choice == .base("XZ")) {
                     choice = .base("XZ")
-                    model.requestCameraSnap(to: .xz)
                 }
-                planeCard("YZ", sub: "facing +X", color: Self.basePlaneColor("YZ"),
-                          selected: choice == .base("YZ")) {
+                planeCard("YZ", sub: "facing +X", selected: choice == .base("YZ")) {
                     choice = .base("YZ")
-                    model.requestCameraSnap(to: .yz)
                 }
             }
             if !model.datumSketches.isEmpty {
@@ -492,7 +470,6 @@ struct PlaneChoiceView: View {
                 ForEach(model.datumSketches) { datum in
                     Button {
                         choice = .datum(datum.id)
-                        model.requestCameraSnap(to: datum.plane)
                     } label: {
                         HStack(spacing: 10) {
                             Image(systemName: "square.on.square")
@@ -545,44 +522,23 @@ struct PlaneChoiceView: View {
         }
     }
 
-    /// Axis colors for the base planes (RGB = XYZ, keyed by the
-    /// plane's NORMAL axis): YZ faces +X → red, XZ faces −Y →
-    /// green, XY faces +Z → blue. The 3D view glows the same
-    /// planes in the same colors while a plane is being chosen,
-    /// so the card and the plane are recognizably a pair.
-    static func basePlaneColor(_ name: String) -> Color {
-        switch name {
-        case "YZ": return Color(red: 1.0, green: 0.30, blue: 0.30)
-        case "XZ": return Color(red: 0.30, green: 0.92, blue: 0.40)
-        default: return Color(red: 0.35, green: 0.58, blue: 1.0) // XY
-        }
-    }
-
-    private func planeCard(_ name: String, sub: String, color: Color,
-                           selected: Bool,
+    private func planeCard(_ name: String, sub: String, selected: Bool,
                            action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            VStack(spacing: 3) {
-                // Filled swatch dot in the plane's axis color; the
-                // name/sub stay primary/secondary for readability —
-                // the swatch and (when selected) the ring carry the
-                // color, never the text.
-                Circle()
-                    .fill(color)
-                    .frame(width: 14, height: 14)
+            VStack(spacing: 2) {
+                Image(systemName: "square.dashed")
+                    .mcFont(22)
                 Text(name)
                     .mcFont(20, weight: .bold)
                 Text(sub)
                     .mcFont(14)
                     .foregroundStyle(.secondary)
             }
-            .foregroundStyle(.primary)
+            .foregroundStyle(selected ? .black : .primary)
             .frame(maxWidth: .infinity)
             .padding(.vertical, 10)
             .background(RoundedRectangle(cornerRadius: 10)
-                .fill(selected ? color.opacity(0.22) : Color.white.opacity(0.08)))
-            .overlay(RoundedRectangle(cornerRadius: 10)
-                .stroke(selected ? color : Color.clear, lineWidth: 2.5))
+                .fill(selected ? accent : Color.white.opacity(0.08)))
         }
         .buttonStyle(.plain)
     }
@@ -643,13 +599,6 @@ struct NewSketchPanel: View {
             PanelOKBar(okTitle: "Create Sketch", okEnabled: resolvedPlane != nil,
                        onOK: create, onCancel: close)
         }
-        // This panel IS the plane-choosing step (its whole lifetime
-        // is picking the plane), so the 3D base planes glow in
-        // their axis colors exactly while it is up. EditorView
-        // also force-clears the flag when the tool closes, so it
-        // can never stick.
-        .onAppear { model.setDraft(nil); model.choosingSketchPlane = true }
-        .onDisappear { model.choosingSketchPlane = false }
     }
 
     private func create() {
@@ -703,9 +652,6 @@ struct RedefinePlanePanel: View {
             PanelOKBar(okTitle: "Redefine", okEnabled: resolvedPlane != nil,
                        onOK: apply, onCancel: close)
         }
-        // This panel never drafts; clear any draft a previously
-        // open tool left behind so its ghost doesn't sit under us.
-        .onAppear { model.setDraft(nil) }
     }
 
     private func apply() {
@@ -851,7 +797,6 @@ struct OffsetPlanePanel: View {
                        onOK: create, onCancel: close)
         }
         .onAppear {
-            model.setDraft(nil)
             if datumID.isEmpty { datumID = model.datumSketches.first?.id ?? "" }
         }
     }
@@ -923,7 +868,6 @@ struct AnglePlanePanel: View {
             PanelOKBar(okTitle: "Create Datum", onOK: create, onCancel: close)
         }
         .onAppear {
-            model.setDraft(nil)
             if datumID.isEmpty { datumID = model.datumSketches.first?.id ?? "" }
         }
     }
@@ -993,9 +937,6 @@ struct MidplanePanel: View {
             }
             PanelOKBar(okTitle: "Create Datum", okEnabled: ready, onOK: create, onCancel: close)
         }
-        // This panel never drafts; clear any draft a previously
-        // open tool left behind so its ghost doesn't sit under us.
-        .onAppear { model.setDraft(nil) }
     }
 
     private func faceRow(_ label: String, face: PlanarFace?,
@@ -1195,10 +1136,6 @@ struct ExtrudePanel: View {
     }
 
     private func apply() {
-        // v1.13 sweep: never commit a candidate the live draft
-        // already proved fails (the failed-fillet crash class) —
-        // the document stays unchanged, the panel stays open.
-        guard model.previewError == nil else { return }
         model.appendFeature(name: "Extrude", kind: candidateKind)
         model.setDraft(nil)
         close()
@@ -1308,10 +1245,6 @@ struct RevolvePanel: View {
     }
 
     private func apply() {
-        // v1.13 sweep: never commit a candidate the live draft
-        // already proved fails (the failed-fillet crash class) —
-        // the document stays unchanged, the panel stays open.
-        guard model.previewError == nil else { return }
         if usesGenerated, let gen = generatedSketch {
             model.addGeneratedSketch(gen)
         }
@@ -1546,10 +1479,6 @@ struct HolePanel: View {
     }
 
     private func apply() {
-        // v1.13 sweep: never commit a candidate the live draft
-        // already proved fails (the failed-fillet crash class) —
-        // the document stays unchanged, the panel stays open.
-        guard model.previewError == nil else { return }
         if let filtered = filteredSketch() {
             model.addGeneratedSketch(filtered)
             model.appendFeature(name: "Hole", kind: holeKind(sketchID: filtered.id))
@@ -1611,10 +1540,6 @@ struct LoftPanel: View {
     }
 
     private func apply() {
-        // v1.13 sweep: never commit a candidate the live draft
-        // already proved fails (the failed-fillet crash class) —
-        // the document stays unchanged, the panel stays open.
-        guard model.previewError == nil else { return }
         model.appendFeature(name: "Loft", kind: candidateKind)
         model.setDraft(nil)
         close()
@@ -1668,10 +1593,6 @@ struct SweepPanel: View {
     }
 
     private func apply() {
-        // v1.13 sweep: never commit a candidate the live draft
-        // already proved fails (the failed-fillet crash class) —
-        // the document stays unchanged, the panel stays open.
-        guard model.previewError == nil else { return }
         model.appendFeature(name: "Sweep", kind: candidateKind)
         model.setDraft(nil)
         close()
@@ -1772,10 +1693,6 @@ struct PrimitivePanel: View {
     }
 
     private func apply() {
-        // v1.13 sweep: never commit a candidate the live draft
-        // already proved fails (the failed-fillet crash class) —
-        // the document stays unchanged, the panel stays open.
-        guard model.previewError == nil else { return }
         model.appendFeature(name: candidateName, kind: candidateKind)
         model.setDraft(nil)
         close()
@@ -1792,24 +1709,9 @@ struct FilletPanel: View {
     @State private var createdFeatureID: String?
     @State private var tooLargeMax: Double?
     @State private var sharpEdgeCount: Int?
-    /// The largest radius whose section regions fit every edge of
-    /// the current body, measured on the REAL geometry when the
-    /// panel opens (kit region checks, no CSG). The slider and the
-    /// candidate clamp to it, and the panel shows it — the value
-    /// comes from the part's actual measurements, never a guess
-    /// the kernel then rejects as "too big" (v1.13).
-    @State private var measuredMax: Double?
-
-    /// The radius both the draft and the commit use — the typed
-    /// value clamped to the measured feasible maximum.
-    private var clampedRadius: Double {
-        var r = panelNum(radiusText, fallback: 2)
-        if let m = measuredMax { r = min(r, m) }
-        return r
-    }
 
     private var candidateKind: FeatureKind {
-        .fillet(radius: clampedRadius)
+        .fillet(radius: panelNum(radiusText, fallback: 2))
     }
 
     /// Before OK the draft is an appended fillet; once the panel has
@@ -1834,15 +1736,12 @@ struct FilletPanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             PanelNumberRow(label: "Radius (mm)", text: $radiusText)
-            Slider(value: radiusValue, in: 0.5...max(0.5, min(20, measuredMax ?? 20)), step: 0.5)
+            Slider(value: radiusValue, in: 0.5...20, step: 0.5)
                 .accessibilityLabel("Fillet radius")
             if let n = sharpEdgeCount {
                 PanelNote(text: "The body built so far has \(n) sharp edge\(n == 1 ? "" : "s") — a fillet rounds all of them.")
             } else {
                 PanelNote(text: "No solid yet — a fillet needs a body to round.")
-            }
-            if let m = measuredMax, sharpEdgeCount != nil {
-                PanelNote(text: "Largest radius that fits this body: ≈ \(mcFmt(m)) mm (measured from its edges).")
             }
             if let maxF = tooLargeMax {
                 PanelNote(text: "That radius is too big here — the largest that fits is ≈ \(mcFmt(maxF)) mm. (MCAD-FT408)", warning: true)
@@ -1856,14 +1755,11 @@ struct FilletPanel: View {
                 .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.10)))
             }
             PanelDraftError(model: model)
-            PanelOKBar(okTitle: createdFeatureID == nil ? "OK" : "Apply",
-                       okEnabled: sharpEdgeCount != nil,
-                       onOK: apply, onCancel: close)
+            PanelOKBar(okTitle: createdFeatureID == nil ? "OK" : "Apply", onOK: apply, onCancel: close)
         }
         .onAppear {
             if let mesh = model.rebuild?.mesh, mesh.triangleCount > 0 {
                 sharpEdgeCount = SolidEdgeExtractor.edges(of: mesh).count
-                measuredMax = EdgeFinisher.maxFeasibleValue(body: mesh, isFillet: true)
             }
             refreshDraft()
         }
@@ -1871,9 +1767,8 @@ struct FilletPanel: View {
     }
 
     private func apply() {
-        let radius = clampedRadius
+        let radius = panelNum(radiusText, fallback: 2)
         let id: String
-        let wasNew = createdFeatureID == nil
         if let existing = createdFeatureID {
             model.updateFeature(id: existing, name: "Fillet", kind: .fillet(radius: radius))
             id = existing
@@ -1888,23 +1783,6 @@ struct FilletPanel: View {
            let err = model.rebuild?.firstError,
            case .filletRadiusTooLarge(_, let maxFeasible) = err {
             tooLargeMax = maxFeasible
-            // v1.13: a just-created fillet that failed is REMOVED
-            // again — the document must be left unchanged by a
-            // failed apply (v1.12 left the broken feature in the
-            // tree, so every later rebuild re-ran the failing CSG
-            // and the app died behind the error banner).
-            if wasNew {
-                model.deleteFeature(id)
-                createdFeatureID = nil
-            }
-            refreshDraft()
-            return
-        }
-        // Any OTHER failure of a just-created fillet rolls back the
-        // same way; the coded error stays on the rebuild banner.
-        if wasNew, let st = model.status(for: id), !st.ok {
-            model.deleteFeature(id)
-            createdFeatureID = nil
             refreshDraft()
             return
         }
@@ -1922,13 +1800,6 @@ struct ChamferPanel: View {
     @State private var distanceText = "2"
     @State private var distanceBText = "1"
     @State private var angleText = "45"
-    /// Largest equal distance whose section regions fit every edge
-    /// of the current body (measured on the real geometry when the
-    /// panel opens — v1.13, same treatment as the Fillet panel).
-    /// The Equal mode clamps to it and shows it; the two-distance
-    /// and angle modes keep their typed values (their feasible
-    /// region is two-dimensional), still guarded by the draft.
-    @State private var measuredMax: Double?
 
     private var candidateKind: FeatureKind {
         let mode: ChamferMode
@@ -1940,9 +1811,7 @@ struct ChamferPanel: View {
             mode = .distanceAngle(panelNum(distanceText, fallback: 2),
                                   panelNum(angleText, fallback: 45))
         default:
-            var d = panelNum(distanceText, fallback: 2)
-            if let m = measuredMax { d = min(d, m) }
-            mode = .equal(d)
+            mode = .equal(panelNum(distanceText, fallback: 2))
         }
         return .chamfer2(mode: mode)
     }
@@ -1968,9 +1837,6 @@ struct ChamferPanel: View {
             if modeChoice == "equal" {
                 PanelNumberRow(label: "Distance (mm)", text: $distanceText)
                 PanelNote(text: "Cuts a flat 45° bevel across every sharp edge of the body built so far, this far back along both faces.")
-                if let m = measuredMax {
-                    PanelNote(text: "Largest distance that fits this body: ≈ \(mcFmt(m)) mm (measured from its edges).")
-                }
             } else if modeChoice == "two" {
                 PanelNumberRow(label: "Distance A (mm)", text: $distanceText)
                 PanelNumberRow(label: "Distance B (mm)", text: $distanceBText)
@@ -1983,20 +1849,11 @@ struct ChamferPanel: View {
             PanelDraftError(model: model)
             PanelOKBar(onOK: apply, onCancel: close)
         }
-        .onAppear {
-            if let mesh = model.rebuild?.mesh, mesh.triangleCount > 0 {
-                measuredMax = EdgeFinisher.maxFeasibleValue(body: mesh, isFillet: false)
-            }
-            refreshDraft()
-        }
+        .onAppear { refreshDraft() }
         .onChange(of: draftSignature) { _, _ in refreshDraft() }
     }
 
     private func apply() {
-        // v1.13 sweep: never commit a candidate the live draft
-        // already proved fails (the failed-fillet crash class) —
-        // the document stays unchanged, the panel stays open.
-        guard model.previewError == nil else { return }
         model.appendFeature(name: "Chamfer", kind: candidateKind)
         model.setDraft(nil)
         close()
@@ -2028,10 +1885,6 @@ struct ShellPanel: View {
     }
 
     private func apply() {
-        // v1.13 sweep: never commit a candidate the live draft
-        // already proved fails (the failed-fillet crash class) —
-        // the document stays unchanged, the panel stays open.
-        guard model.previewError == nil else { return }
         model.appendFeature(name: "Shell", kind: candidateKind)
         model.setDraft(nil)
         close()
@@ -2069,10 +1922,6 @@ struct MirrorPanel: View {
     }
 
     private func apply() {
-        // v1.13 sweep: never commit a candidate the live draft
-        // already proved fails (the failed-fillet crash class) —
-        // the document stays unchanged, the panel stays open.
-        guard model.previewError == nil else { return }
         model.appendFeature(name: "Mirror", kind: candidateKind)
         model.setDraft(nil)
         close()
@@ -2116,10 +1965,6 @@ struct PatternPanel: View {
     }
 
     private func apply() {
-        // v1.13 sweep: never commit a candidate the live draft
-        // already proved fails (the failed-fillet crash class) —
-        // the document stays unchanged, the panel stays open.
-        guard model.previewError == nil else { return }
         model.appendFeature(name: "Linear Pattern", kind: candidateKind)
         model.setDraft(nil)
         close()
@@ -2164,10 +2009,6 @@ struct CoilPanel: View {
     }
 
     private func apply() {
-        // v1.13 sweep: never commit a candidate the live draft
-        // already proved fails (the failed-fillet crash class) —
-        // the document stays unchanged, the panel stays open.
-        guard model.previewError == nil else { return }
         model.appendFeature(name: "Coil", kind: candidateKind)
         model.setDraft(nil)
         close()
@@ -2218,10 +2059,6 @@ struct PipePanel: View {
     }
 
     private func apply() {
-        // v1.13 sweep: never commit a candidate the live draft
-        // already proved fails (the failed-fillet crash class) —
-        // the document stays unchanged, the panel stays open.
-        guard model.previewError == nil else { return }
         model.appendFeature(name: "Pipe", kind: candidateKind)
         model.setDraft(nil)
         close()
@@ -2276,10 +2113,6 @@ struct RibPanel: View {
     }
 
     private func apply() {
-        // v1.13 sweep: never commit a candidate the live draft
-        // already proved fails (the failed-fillet crash class) —
-        // the document stays unchanged, the panel stays open.
-        guard model.previewError == nil else { return }
         model.appendFeature(name: "Rib", kind: candidateKind)
         model.setDraft(nil)
         close()
@@ -2330,10 +2163,6 @@ struct CircularPatternPanel: View {
     }
 
     private func apply() {
-        // v1.13 sweep: never commit a candidate the live draft
-        // already proved fails (the failed-fillet crash class) —
-        // the document stays unchanged, the panel stays open.
-        guard model.previewError == nil else { return }
         model.appendFeature(name: "Circular Pattern", kind: candidateKind)
         model.setDraft(nil)
         close()
@@ -2378,10 +2207,6 @@ struct DraftPanel: View {
     }
 
     private func apply() {
-        // v1.13 sweep: never commit a candidate the live draft
-        // already proved fails (the failed-fillet crash class) —
-        // the document stays unchanged, the panel stays open.
-        guard model.previewError == nil else { return }
         model.appendFeature(name: "Draft", kind: candidateKind)
         model.setDraft(nil)
         close()
@@ -2429,10 +2254,6 @@ struct ScalePanel: View {
     }
 
     private func apply() {
-        // v1.13 sweep: never commit a candidate the live draft
-        // already proved fails (the failed-fillet crash class) —
-        // the document stays unchanged, the panel stays open.
-        guard model.previewError == nil else { return }
         model.appendFeature(name: "Scale", kind: candidateKind)
         model.setDraft(nil)
         close()
@@ -2487,10 +2308,6 @@ struct MoveBodyPanel: View {
     }
 
     private func apply() {
-        // v1.13 sweep: never commit a candidate the live draft
-        // already proved fails (the failed-fillet crash class) —
-        // the document stays unchanged, the panel stays open.
-        guard model.previewError == nil else { return }
         model.appendFeature(name: "Move Body", kind: candidateKind)
         model.setDraft(nil)
         close()
@@ -2516,22 +2333,6 @@ struct SplitBodyPanel: View {
         }
     }
 
-    /// The candidate this panel commits — drafted live like every
-    /// other modify panel. (This panel originally never drafted:
-    /// switching to it directly from another tool left the PREVIOUS
-    /// panel's ghost mesh and preview error in charge — the ghost
-    /// stayed on screen and the stale error silently dead-buttoned
-    /// this panel's OK.)
-    private var candidateKind: FeatureKind {
-        .splitBody(axis: axis, offset: panelNum(offsetText, fallback: 0))
-    }
-
-    private var draftSignature: String { "\(axis)|\(offsetText)" }
-
-    private func refreshDraft() {
-        model.draftAppend(Feature(name: "Split Body", kind: candidateKind))
-    }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Split across axis")
@@ -2555,11 +2356,8 @@ struct SplitBodyPanel: View {
             }
             PanelNumberRow(label: "Offset (mm, world)", text: $offsetText)
             PanelNote(text: "Cuts the body built so far into two bodies at a plane perpendicular to the axis. Both halves stay in the part.")
-            PanelDraftError(model: model)
             PanelOKBar(okEnabled: bounds != nil, onOK: apply, onCancel: close)
         }
-        .onAppear { refreshDraft() }
-        .onChange(of: draftSignature) { _, _ in refreshDraft() }
     }
 
     private func offsetBinding(_ e: (lo: Double, hi: Double)) -> Binding<Double> {
@@ -2570,12 +2368,9 @@ struct SplitBodyPanel: View {
     }
 
     private func apply() {
-        // v1.13 sweep: never commit a candidate the live draft
-        // already proved fails (the failed-fillet crash class) —
-        // the document stays unchanged, the panel stays open.
-        guard model.previewError == nil else { return }
-        model.appendFeature(name: "Split Body", kind: candidateKind)
-        model.setDraft(nil)
+        model.appendFeature(name: "Split Body",
+                            kind: .splitBody(axis: axis,
+                                             offset: panelNum(offsetText, fallback: 0)))
         close()
     }
 }
@@ -2711,10 +2506,6 @@ struct PullFacePanel: View {
     }
 
     private func apply() {
-        // v1.13 sweep: never commit a candidate the live draft
-        // already proved fails (the failed-fillet crash class) —
-        // the document stays unchanged, the panel stays open.
-        guard model.previewError == nil else { return }
         guard let kind = candidateKind, let sketch = candidateSketch else { return }
         model.addGeneratedSketch(sketch)
         model.appendFeature(name: "Face pull", kind: kind)
@@ -2802,7 +2593,7 @@ func mcFaceEdgeMidpoints(faceIndex: Int, mesh: Mesh) -> [Vec3] {
 /// one view for all four selection-first finishes: the single
 /// tapped edge ("Fillet/Chamfer This Edge") and every edge
 /// bounding the tapped face ("Fillet/Chamfer Face Edges"). The
-/// rail Fillet/Chamfer panels stay all-edges; this one never
+/// ribbon Fillet/Chamfer panels stay all-edges; this one never
 /// touches an edge outside its midpoint list.
 struct EdgeFinishPanel: View {
     @ObservedObject var model: EditorModel
@@ -2813,13 +2604,6 @@ struct EdgeFinishPanel: View {
     private let note: String?
     private let emptyText: String
     private let featureName: String
-    /// Largest radius/distance whose section regions fit the
-    /// SELECTED edges, measured on the real body in init (kit
-    /// region checks). The field PREFILLS inside this range and
-    /// the candidate clamps to it — the selection's actual
-    /// measurements, never an invented default the kernel then
-    /// rejects (v1.13).
-    private let measuredMax: Double?
 
     @State private var valueText: String = "2"
     /// One-shot guard for the FT408/FT409 auto-snap: snap once per
@@ -2855,23 +2639,11 @@ struct EdgeFinishPanel: View {
                 note = nil
             }
         }
-        if !midpoints.isEmpty, let mesh = model.rebuild?.mesh, mesh.triangleCount > 0 {
-            measuredMax = EdgeFinisher.maxFeasibleValue(
-                body: mesh, isFillet: isFillet, onlyMidpoints: midpoints)
-        } else {
-            measuredMax = nil
-        }
-        // Prefill: the usual 2 mm, or the measured maximum when
-        // even that does not fit these edges.
-        if let m = measuredMax {
-            _valueText = State(initialValue: mcFmt(min(2, m)))
-        }
     }
 
     private var candidateKind: FeatureKind? {
         guard !midpoints.isEmpty else { return nil }
-        var v = panelNum(valueText, fallback: 2)
-        if let m = measuredMax { v = min(v, m) }
+        let v = panelNum(valueText, fallback: 2)
         return isFillet ? .filletEdges(radius: v, midpoints: midpoints)
                         : .chamferEdges(distance: v, midpoints: midpoints)
     }
@@ -2889,14 +2661,11 @@ struct EdgeFinishPanel: View {
                 if let note {
                     PanelNote(text: note)
                 }
-                if let m = measuredMax {
-                    PanelNote(text: "Largest that fits the selected edge\(midpoints.count == 1 ? "" : "s"): ≈ \(mcFmt(m)) mm (measured).")
-                }
                 PanelNumberRow(label: isFillet ? "Radius (mm)" : "Distance (mm)", text: $valueText)
                 Slider(value: Binding(
-                    get: { min(max(panelNum(valueText, fallback: 2), 0.5), max(0.5, min(20, measuredMax ?? 20))) },
+                    get: { min(max(panelNum(valueText, fallback: 2), 0.5), 20) },
                     set: { valueText = mcFmt($0) }
-                ), in: 0.5...max(0.5, min(20, measuredMax ?? 20)), step: 0.25)
+                ), in: 0.5...20, step: 0.25)
                 PanelDraftError(model: model)
             }
             PanelOKBar(okEnabled: candidateKind != nil && panelNum(valueText, fallback: 0) > 0,
@@ -2928,11 +2697,6 @@ struct EdgeFinishPanel: View {
 
     private func apply() {
         guard let kind = candidateKind else { return }
-        // v1.13: if the live draft of THIS candidate already
-        // failed, do not commit it — the document stays unchanged
-        // and the panel stays open on the coded error (shown by
-        // PanelDraftError above).
-        guard model.previewError == nil else { return }
         model.appendFeature(name: featureName, kind: kind)
         model.setDraft(nil)
         close()
@@ -3105,10 +2869,6 @@ struct ThreadShaftPanel: View {
     }
 
     private func apply() {
-        // v1.13 sweep: never commit a candidate the live draft
-        // already proved fails (the failed-fillet crash class) —
-        // the document stays unchanged, the panel stays open.
-        guard model.previewError == nil else { return }
         guard let kind = candidateKind else { return }
         model.appendFeature(name: "Thread", kind: kind)
         model.setDraft(nil)

@@ -49,7 +49,6 @@ public enum FaceExtractor {
             if ra != rb { parent[rb] = ra }
         }
         var edgeTri: [UInt64: Int] = [:]
-        edgeTri.reserveCapacity(n * 3)
         func key(_ a: UInt32, _ b: UInt32) -> UInt64 {
             (UInt64(max(a, b)) << 32) | UInt64(min(a, b))
         }
@@ -72,7 +71,6 @@ public enum FaceExtractor {
             }
         }
         var groups: [Int: [Int]] = [:]
-        groups.reserveCapacity(n)
         for t in 0..<n { groups[find(t), default: []].append(t) }
         var faces: [PlanarFace] = []
         var faceTris: [[Int]] = []

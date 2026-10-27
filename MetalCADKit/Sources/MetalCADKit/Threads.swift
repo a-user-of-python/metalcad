@@ -55,7 +55,6 @@ public struct ThreadSpec: Codable, Equatable {
         var s = self
         var warnings: [CADError] = []
         guard pitch > 0, pitch < majorDiameter else { throw CADError.threadPitchInvalid(pitch) }
-        guard length > 0 else { throw CADError.threadProfileInvalid("thread length must be > 0") }
         guard majorDiameter > 0, minorDiameter > 0 else {
             throw CADError.threadDiameterInvalid(major: majorDiameter, minor: minorDiameter)
         }
@@ -107,13 +106,6 @@ public enum ThreadTessellator {
         ]
         let totalTurns = spec.length / spec.lead
         let steps = max(4, Int(ceil(totalTurns * Double(segmentsPerTurn))))
-        // Nothing capped the step count: length 300 m at pitch 1.5
-        // asked for ~10M rings / 40M vertices and the tessellation
-        // ran until the process died (2026-10-26 sweep). A million
-        // steps is ~20k turns — metres of thread on any real pitch.
-        guard steps <= 1_000_000 else {
-            throw CADError.threadSweepFailed("thread is too long or too fine to tessellate (\(steps) steps)")
-        }
         let handSign = spec.hand == .right ? 1.0 : -1.0
         var builder = MeshBuilder()
         // For each start, sweep the profile along the helix.

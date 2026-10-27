@@ -43,7 +43,7 @@ struct MeasurePanel: View {
             faceMeasure
             PanelNote(text: "To change a size, edit the feature or the sketch dimension — in the sketch editor, the Measure tool and the length / radius fields drive the model.")
         }
-        .onAppear { model.setDraft(nil); preselectPickedFace() }
+        .onAppear { preselectPickedFace() }
     }
 
     /// If the picked-face bar sent a face ("Measure"), preselect it

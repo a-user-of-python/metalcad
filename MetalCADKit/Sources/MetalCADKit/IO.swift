@@ -55,13 +55,10 @@ public enum IOService {
             warnings.append(.exportNotWatertight(openEdges: mesh.openEdgeCount))
         }
         if mesh.hasNaN { throw CADError.kernelShapeInvalid("mesh contains NaN vertices") }
-        // One pre-sized buffer, floats appended as raw bytes — no
-        // per-float Data allocations (12+ per triangle at 1M tris).
         var data = Data()
-        data.reserveCapacity(84 + mesh.triangleCount * 50)
         data.append(Data(count: 80))  // header
         var count = UInt32(mesh.triangleCount).littleEndian
-        withUnsafeBytes(of: &count) { data.append(contentsOf: $0) }
+        data.append(Data(bytes: &count, count: 4))
         let normals = mesh.faceNormals()
         for t in 0..<mesh.triangleCount {
             let n = normals[t]
@@ -71,7 +68,7 @@ public enum IOService {
                 appendFloat(v.x, &data); appendFloat(v.y, &data); appendFloat(v.z, &data)
             }
             var attr = UInt16(0).littleEndian
-            withUnsafeBytes(of: &attr) { data.append(contentsOf: $0) }
+            data.append(Data(bytes: &attr, count: 2))
         }
         do {
             try data.write(to: url, options: .atomic)
@@ -92,9 +89,6 @@ public enum IOService {
         if mesh.hasNaN { throw CADError.kernelShapeInvalid("mesh contains NaN vertices") }
         func num(_ v: Double) -> String { String(format: "%.6f", v == 0 ? 0 : v) }
         var text = "# MetalCAD OBJ export\n"
-        // Pre-size from line-count estimates (~28 chars per vertex line,
-        // ~24 per face line) so the string doesn't grow by reallocation.
-        text.reserveCapacity(22 + mesh.vertices.count * 28 + mesh.triangleCount * 24)
         for v in mesh.vertices {
             text += "v \(num(v.x)) \(num(v.y)) \(num(v.z))\n"
         }
@@ -118,48 +112,30 @@ public enum IOService {
         guard data.count >= expected else {
             throw CADError.importFileUnreadable("STL truncated: declares \(count) triangles")
         }
-        // Vertex dedupe by exact bit pattern for watertight
-        // reconstruction. The key is the three raw Float bit patterns
-        // in a Hashable struct — the old string key formatted three
-        // integers per corner (3M strings on a 1M-triangle file).
-        var verts: [Vec3] = []
-        var idx: [UInt32] = []
-        idx.reserveCapacity(Int(count) * 3)
-        var seen: [VertKey: UInt32] = [:]
-        seen.reserveCapacity(Int(count) * 2)
+        var mesh = Mesh()
+        // Vertex dedupe by exact bit pattern for watertight reconstruction.
+        var seen: [String: UInt32] = [:]
         func vertex(_ off: Int) -> UInt32 {
             let x = readFloat(data, off), y = readFloat(data, off + 4), z = readFloat(data, off + 8)
-            let key = VertKey(x: x.bitPattern, y: y.bitPattern, z: z.bitPattern)
+            let key = "\(x.bitPattern),\(y.bitPattern),\(z.bitPattern)"
             if let i = seen[key] { return i }
-            verts.append(Vec3(Double(x), Double(y), Double(z)))
-            let i = UInt32(verts.count - 1)
+            mesh.vertices.append(Vec3(Double(x), Double(y), Double(z)))
+            let i = UInt32(mesh.vertices.count - 1)
             seen[key] = i
             return i
         }
         for t in 0..<Int(count) {
             let base = 84 + t * 50 + 12
-            idx.append(vertex(base))
-            idx.append(vertex(base + 12))
-            idx.append(vertex(base + 24))
+            mesh.indices.append(vertex(base))
+            mesh.indices.append(vertex(base + 12))
+            mesh.indices.append(vertex(base + 24))
         }
-        // STL floats are untrusted bytes: a NaN/Inf coordinate used
-        // to sail through into the mesh, where the next weld/display
-        // pass trapped on Int(floor(NaN)) (2026-10-26 sweep). Reject
-        // the file instead.
-        if verts.contains(where: { !$0.isFinite() }) {
-            throw CADError.importGeometryInvalid("STL contains non-finite vertex coordinates")
-        }
-        return Mesh(vertices: verts, indices: idx)
-    }
-
-    /// Exact Float bit-pattern triple used as the STL import dedupe key.
-    private struct VertKey: Hashable {
-        var x: UInt32, y: UInt32, z: UInt32
+        return mesh
     }
 
     private static func appendFloat(_ v: Double, _ data: inout Data) {
         var bits = Float(v).bitPattern.littleEndian
-        withUnsafeBytes(of: &bits) { data.append(contentsOf: $0) }
+        data.append(Data(bytes: &bits, count: 4))
     }
     private static func readFloat(_ data: Data, _ off: Int) -> Float {
         let bits = data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: off, as: UInt32.self).littleEndian }

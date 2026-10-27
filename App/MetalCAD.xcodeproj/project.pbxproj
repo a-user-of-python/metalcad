@@ -1,0 +1,313 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+		D84CF79B91A95DD5DF8C982F = {isa = PBXBuildFile; fileRef = 5A8DE70ADA90EC0AC4815469; };
+		F3EB1DD40F7AFFCF4C5B2777 = {isa = PBXBuildFile; fileRef = 0A8C13525269D9F9FAC9D986; };
+		E73F8391350E770E58919C5C = {isa = PBXBuildFile; fileRef = 26E010B5315191442FAC2218; };
+		2494647FC5C06D2C0A047E7E = {isa = PBXBuildFile; fileRef = 40A5B1E2E10E2E70C2F51D42; };
+		F569ABDEBBC53A99E905454A = {isa = PBXBuildFile; fileRef = 471A6EEF5C8FDD6150C40363; };
+		45C7944EC51DB71456C4C103 = {isa = PBXBuildFile; fileRef = 59738EC4B0D522A0A01F4C23; };
+		CDC63F138D93452BFCDB43F6 = {isa = PBXBuildFile; fileRef = 71701405E4FF765C4535CEA2; };
+		9F9149344B4E15B857DCD6D9 = {isa = PBXBuildFile; fileRef = 20588C5D3E62C37AFB605620; };
+		67E6CFA3292C95B3A246FCAC = {isa = PBXBuildFile; fileRef = 34EAF74D8F9AD22B1A955824; };
+		13CD248F2BE6E99CDD084E15 = {isa = PBXBuildFile; fileRef = E2B081EF4558CF6FC12889C2; };
+		96FD82947535842B87E43ECF = {isa = PBXBuildFile; fileRef = 614601B82B6920FE351BEA65; };
+		4149C4978D7611A9AA14AA67 = {isa = PBXBuildFile; fileRef = 77ADB03B5FF0134FD4110AA5; };
+		B7AB714EF9EC1059D64D51E6 = {isa = PBXBuildFile; fileRef = 777B7FE2AA32D14D9B824E11; };
+		DCE42359E782BB14EDC73016 = {isa = PBXBuildFile; fileRef = BFF3437CE7A2C559CAF5F561; };
+		49B553AD20F900EF2B41CAC2 = {isa = PBXBuildFile; fileRef = 4E23DBFF67033CC8FC7F7045; };
+		56A715C9B03BC6FF104DCD91 = {isa = PBXBuildFile; fileRef = C7B47E517D579EA037EC1A60; };
+		FD1B533D18546977C0A9B356 = {isa = PBXBuildFile; fileRef = 8225AF25A1F9B67B5510998E; };
+		D727CE74F4A4F00448923240 = {isa = PBXBuildFile; fileRef = CC2BD225C2D24CAA4D4313A0; };
+		866E72D9633FA926E0ECB3B8 = {isa = PBXBuildFile; fileRef = 41EDBF6BADD28A698D318FEF; };
+		76FE0310BCC97EB619CB607A = {isa = PBXBuildFile; fileRef = 44296DEB4E99580BE6C215C4; };
+		BC42B3A84FB210AC59D85EFC = {isa = PBXBuildFile; fileRef = F2C7C1D0D829DB22C758341D; };
+		65C83364523C1AA6AED5D7EC = {isa = PBXBuildFile; fileRef = 142EA766A2E061693F16C021; };
+		943DED58E8A7134F7C7FF71B = {isa = PBXBuildFile; fileRef = C767517EF12A2A560AA6E8AE; };
+		C1A82AF6DD94B8B784B4C17F = {isa = PBXBuildFile; fileRef = 615E76BE42963DBE76987314; };
+		0FA70AE043A4A48968897937 = {isa = PBXBuildFile; fileRef = 0C3DEDA3902DF3904E75F868; };
+		FED9FBD61BF46E66FDBC913C = {isa = PBXBuildFile; fileRef = 4715A5D9A2F59456B884A4D7; };
+		6D6349DFE15845D2B8AB7C66 = {isa = PBXBuildFile; fileRef = 7162F3FE7FC59D05CD4BC1B7; };
+		04A7814E4EEC70DE7D6C41B1 = {isa = PBXBuildFile; fileRef = 8D562B3E40B6C9EC53F38F07; };
+		5A8DE70ADA90EC0AC4815469 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Accent.swift; sourceTree = "<group>"; };
+		0A8C13525269D9F9FAC9D986 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		26E010B5315191442FAC2218 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticsView.swift; sourceTree = "<group>"; };
+		40A5B1E2E10E2E70C2F51D42 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DocumentsView.swift; sourceTree = "<group>"; };
+		471A6EEF5C8FDD6150C40363 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorView.swift; sourceTree = "<group>"; };
+		59738EC4B0D522A0A01F4C23 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeatureEditorSheet.swift; sourceTree = "<group>"; };
+		71701405E4FF765C4535CEA2 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Fonts.swift; sourceTree = "<group>"; };
+		20588C5D3E62C37AFB605620 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeasurePanel.swift; sourceTree = "<group>"; };
+		34EAF74D8F9AD22B1A955824 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetalCADApp.swift; sourceTree = "<group>"; };
+		E2B081EF4558CF6FC12889C2 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneKitView.swift; sourceTree = "<group>"; };
+		614601B82B6920FE351BEA65 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SketchEditorView.swift; sourceTree = "<group>"; };
+		77ADB03B5FF0134FD4110AA5 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolPanels.swift; sourceTree = "<group>"; };
+		777B7FE2AA32D14D9B824E11 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CSG.swift; sourceTree = "<group>"; };
+		BFF3437CE7A2C559CAF5F561 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Document.swift; sourceTree = "<group>"; };
+		4E23DBFF67033CC8FC7F7045 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Edges.swift; sourceTree = "<group>"; };
+		C7B47E517D579EA037EC1A60 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Errors.swift; sourceTree = "<group>"; };
+		8225AF25A1F9B67B5510998E = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Faces.swift; sourceTree = "<group>"; };
+		CC2BD225C2D24CAA4D4313A0 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features2.swift; sourceTree = "<group>"; };
+		41EDBF6BADD28A698D318FEF = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IO.swift; sourceTree = "<group>"; };
+		44296DEB4E99580BE6C215C4 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoftSweep.swift; sourceTree = "<group>"; };
+		F2C7C1D0D829DB22C758341D = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCLog.swift; sourceTree = "<group>"; };
+		142EA766A2E061693F16C021 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Math.swift; sourceTree = "<group>"; };
+		C767517EF12A2A560AA6E8AE = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Mesh.swift; sourceTree = "<group>"; };
+		615E76BE42963DBE76987314 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sketch.swift; sourceTree = "<group>"; };
+		0C3DEDA3902DF3904E75F868 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Solver.swift; sourceTree = "<group>"; };
+		4715A5D9A2F59456B884A4D7 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Tessellation.swift; sourceTree = "<group>"; };
+		7162F3FE7FC59D05CD4BC1B7 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Threads.swift; sourceTree = "<group>"; };
+		99006388588CE7D539A04F10 = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MetalCAD.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		BB5944C6515D6D2B678426AB = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		8D562B3E40B6C9EC53F38F07 = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		71D2E56247FE75C3DCE9B609 = {
+			isa = PBXGroup;
+			children = (
+				450B220DE8EEB27904FC3DC4,
+				A4DE87CF6E13886A7566E381,
+				30772F61AC9BDC8631745269,
+				8D562B3E40B6C9EC53F38F07,
+			);
+			sourceTree = "<group>";
+		};
+		450B220DE8EEB27904FC3DC4 = {
+			isa = PBXGroup;
+			children = (
+				5A8DE70ADA90EC0AC4815469,
+				0A8C13525269D9F9FAC9D986,
+				26E010B5315191442FAC2218,
+				40A5B1E2E10E2E70C2F51D42,
+				471A6EEF5C8FDD6150C40363,
+				59738EC4B0D522A0A01F4C23,
+				71701405E4FF765C4535CEA2,
+				20588C5D3E62C37AFB605620,
+				34EAF74D8F9AD22B1A955824,
+				E2B081EF4558CF6FC12889C2,
+				614601B82B6920FE351BEA65,
+				77ADB03B5FF0134FD4110AA5,
+				BB5944C6515D6D2B678426AB,
+			);
+			path = MetalCAD;
+			sourceTree = "<group>";
+		};
+		A4DE87CF6E13886A7566E381 = {
+			isa = PBXGroup;
+			children = (
+				777B7FE2AA32D14D9B824E11,
+				BFF3437CE7A2C559CAF5F561,
+				4E23DBFF67033CC8FC7F7045,
+				C7B47E517D579EA037EC1A60,
+				8225AF25A1F9B67B5510998E,
+				CC2BD225C2D24CAA4D4313A0,
+				41EDBF6BADD28A698D318FEF,
+				44296DEB4E99580BE6C215C4,
+				F2C7C1D0D829DB22C758341D,
+				142EA766A2E061693F16C021,
+				C767517EF12A2A560AA6E8AE,
+				615E76BE42963DBE76987314,
+				0C3DEDA3902DF3904E75F868,
+				4715A5D9A2F59456B884A4D7,
+				7162F3FE7FC59D05CD4BC1B7,
+			);
+			name = MetalCADKit;
+			path = "../MetalCADKit/Sources/MetalCADKit";
+			sourceTree = "<group>";
+		};
+		30772F61AC9BDC8631745269 = {
+			isa = PBXGroup;
+			children = (
+				99006388588CE7D539A04F10,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		42AEFBAE01D2DFD981F7DA7D = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = EF51811E52D1EC590EA0AD6F;
+			buildPhases = (
+				7D5580843CA87C6F134C9C3A,
+				0D0D0EC4F4655E6EC05F4644,
+				B22A3451AEE081E29DEBFBCA,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = MetalCAD;
+			productName = MetalCAD;
+			productReference = 99006388588CE7D539A04F10;
+			productType = "com.apple.product-type.application";
+		};
+		4DC844ABCCFC0D132D087C1C = {
+			isa = PBXProject;
+			buildConfigurationList = CB7CBE0C3B42E7D081FECC31;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 71D2E56247FE75C3DCE9B609;
+			productRefGroup = 30772F61AC9BDC8631745269;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				42AEFBAE01D2DFD981F7DA7D,
+			);
+		};
+		7D5580843CA87C6F134C9C3A = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D84CF79B91A95DD5DF8C982F,
+				F3EB1DD40F7AFFCF4C5B2777,
+				E73F8391350E770E58919C5C,
+				2494647FC5C06D2C0A047E7E,
+				F569ABDEBBC53A99E905454A,
+				45C7944EC51DB71456C4C103,
+				CDC63F138D93452BFCDB43F6,
+				9F9149344B4E15B857DCD6D9,
+				67E6CFA3292C95B3A246FCAC,
+				13CD248F2BE6E99CDD084E15,
+				96FD82947535842B87E43ECF,
+				4149C4978D7611A9AA14AA67,
+				B7AB714EF9EC1059D64D51E6,
+				DCE42359E782BB14EDC73016,
+				49B553AD20F900EF2B41CAC2,
+				56A715C9B03BC6FF104DCD91,
+				FD1B533D18546977C0A9B356,
+				D727CE74F4A4F00448923240,
+				866E72D9633FA926E0ECB3B8,
+				76FE0310BCC97EB619CB607A,
+				BC42B3A84FB210AC59D85EFC,
+				65C83364523C1AA6AED5D7EC,
+				943DED58E8A7134F7C7FF71B,
+				C1A82AF6DD94B8B784B4C17F,
+				0FA70AE043A4A48968897937,
+				FED9FBD61BF46E66FDBC913C,
+				6D6349DFE15845D2B8AB7C66,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		0D0D0EC4F4655E6EC05F4644 = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B22A3451AEE081E29DEBFBCA = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				04A7814E4EEC70DE7D6C41B1,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		EC86DC4F4B4C60C3EC031655 = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		7BF40F069D95C38DE60AA602 = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				COPY_PHASE_STRIP = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = NO;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = NO;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		8CBC338D09B9279147FBD852 = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 10;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "MetalCAD/Info.plist";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
+				MARKETING_VERSION = 1.10;
+				PRODUCT_BUNDLE_IDENTIFIER = com.user.metalcad;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_STRICT_CONCURRENCY = minimal;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "2";
+			};
+			name = Debug;
+		};
+		C286FC8B91125F435CB47F15 = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 10;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "MetalCAD/Info.plist";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
+				MARKETING_VERSION = 1.10;
+				PRODUCT_BUNDLE_IDENTIFIER = com.user.metalcad;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_STRICT_CONCURRENCY = minimal;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "2";
+				COPY_PHASE_STRIP = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+			};
+			name = Release;
+		};
+		CB7CBE0C3B42E7D081FECC31 = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				EC86DC4F4B4C60C3EC031655,
+				7BF40F069D95C38DE60AA602,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		EF51811E52D1EC590EA0AD6F = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				8CBC338D09B9279147FBD852,
+				C286FC8B91125F435CB47F15,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+	};
+	rootObject = 4DC844ABCCFC0D132D087C1C;
+}

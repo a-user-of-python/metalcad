@@ -201,6 +201,9 @@ struct FeatureEditorSheet: View {
         case .cascadePad(let sid, let len):
             initialSketch = sid
             _lengthText = State(initialValue: mcFmt(len))
+        case .cascadePocket(let sid, let depth):
+            initialSketch = sid
+            _depthText = State(initialValue: mcFmt(depth))
         case .pocket(let sid, let depth):
             initialSketch = sid
             _depthText = State(initialValue: mcFmt(depth))
@@ -435,6 +438,14 @@ struct FeatureEditorSheet: View {
                 sketchPicker
                 numberRow("Length (mm)", $lengthText)
                 Text("Built by the Open CASCADE engine — exact B-rep solid; the volume shown in the feature list is the engine's own.")
+                    .mcFont(16)
+                    .foregroundStyle(.secondary)
+            }
+        case .cascadePocket:
+            Section("Cascade Pocket") {
+                sketchPicker
+                numberRow("Depth (mm)", $depthText)
+                Text("Cut by the Open CASCADE engine — an exact boolean cut; the volume shown in the feature list is the engine's own.")
                     .mcFont(16)
                     .foregroundStyle(.secondary)
             }
@@ -952,6 +963,8 @@ struct FeatureEditorSheet: View {
             return .pad(sketchID: sketchID, length: num(lengthText, fallback: old))
         case .cascadePad(_, let old):
             return .cascadePad(sketchID: sketchID, length: num(lengthText, fallback: old))
+        case .cascadePocket(_, let old):
+            return .cascadePocket(sketchID: sketchID, depth: num(depthText, fallback: old))
         case .pocket(_, let old):
             return .pocket(sketchID: sketchID, depth: num(depthText, fallback: old))
         case .revolve(_, _, let old):

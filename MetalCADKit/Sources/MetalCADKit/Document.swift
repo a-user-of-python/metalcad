@@ -83,6 +83,9 @@ public enum FeatureKind: Codable, Equatable {
     case booleanCutPlaceholder
     // Cascade implant (appended — existing cases keep their encoding).
     case cascadePad(sketchID: String, length: Double)
+    // Full-OCCT migration (appended): the pocket counterpart of
+    // cascadePad — a sketch prism cut by the engine.
+    case cascadePocket(sketchID: String, depth: Double)
 }
 
 public struct Feature: Codable, Equatable, Identifiable {
@@ -149,6 +152,18 @@ public enum DocumentEngine {
     /// cascadePad with no hook fails MCAD-KN601, never silently.
     public static var cascadePadEvaluator: ((Sketch, Double) throws -> (mesh: Mesh, volume: Double))?
 
+    /// The generalized Cascade kernel (full-OCCT migration,
+    /// 2026-10-28): when the app registers a provider, every
+    /// migrated feature rebuilds through OCCT and composition is
+    /// exact. Nil in kit-only contexts — unmigrated and migrated
+    /// features alike then use the legacy tessellation path, and a
+    /// Cascade-only kind (`.cascadePocket`) fails MCAD-KN601.
+    public static var cascadeProvider: (any CascadeKernelProvider)?
+
+    /// Linear deflection (mm) used when an engine solid is
+    /// tessellated for display during rebuild.
+    public static var previewDeflection: Double = 0.1
+
     /// Evaluate a part's feature tree into one accumulated mesh (v1: additive
     /// mesh accumulation; exact boolean cut/fillet/shell return their codes).
     /// Stops after the first failing feature, per ERRORS.md DC107.
@@ -161,6 +176,101 @@ public enum DocumentEngine {
         var firstError: CADError? = nil
         logger.debug(.feature, "rebuild start", context: ["part": part.name, "features": "\(part.features.count)"])
 
+        // Full-OCCT migration state. When a kernel provider is
+        // registered, the running body may live in the engine as an
+        // opaque handle (`solid`); `body` then holds its tessellation
+        // only after something mesh-side asks for it. Composition is
+        // exact (engine booleans) while both sides are solids. A
+        // feature kind that has no engine path yet materialises the
+        // body back to a mesh first (releasing the handle), so legacy
+        // behaviour is preserved bit-for-bit in mixed chains.
+        let provider = DocumentEngine.cascadeProvider
+        var solid: Int? = nil
+        var solidMesh: Mesh? = nil     // tessellation cache for `solid`
+        var solidBodies: [Int] = []    // completed engine bodies
+
+        /// The running body as a mesh (tessellating the engine
+        /// solid on first ask).
+        func currentMesh() throws -> Mesh {
+            if let h = solid {
+                if solidMesh == nil {
+                    solidMesh = try provider!.tessellate(h, deflection: DocumentEngine.previewDeflection)
+                }
+                return solidMesh!
+            }
+            return body
+        }
+        /// Degrade the running body to its mesh (legacy features).
+        func materializeBody() throws {
+            if let h = solid {
+                body = try currentMesh()
+                provider?.release(h)
+                solid = nil
+                solidMesh = nil
+            }
+        }
+        /// Boolean-combine the running body with a tool SOLID.
+        /// Empty-body rules mirror the legacy mesh code: join adopts
+        /// the tool, cut/intersect on an empty body throw
+        /// booleanEmptyResult, newBody finishes the current body.
+        func booleanWithSolid(_ tool: Int, _ op: BodyOperation) throws {
+            guard let p = provider else { throw CADError.kernelUnavailable }
+            switch op {
+            case .newBody:
+                if let h = solid { solidBodies.append(h); solid = nil; solidMesh = nil }
+                else if body.triangleCount > 0 { bodies.append(body); body = Mesh() }
+                solid = tool
+                solidMesh = nil
+            case .join:
+                if let h = solid {
+                    let r = try p.unite(h, tool)
+                    p.release(h); p.release(tool)
+                    solid = r; solidMesh = nil
+                } else if body.triangleCount > 0 {
+                    let tm = try p.tessellate(tool, deflection: DocumentEngine.previewDeflection)
+                    p.release(tool)
+                    body = try CSG.union(body, tm)
+                } else {
+                    solid = tool; solidMesh = nil
+                }
+            case .cut:
+                if let h = solid {
+                    let r = try p.subtract(h, tool)
+                    p.release(h); p.release(tool)
+                    solid = r; solidMesh = nil
+                } else if body.triangleCount > 0 {
+                    let tm = try p.tessellate(tool, deflection: DocumentEngine.previewDeflection)
+                    p.release(tool)
+                    body = try CSG.subtract(body, tm)
+                } else {
+                    p.release(tool)
+                    throw CADError.booleanEmptyResult
+                }
+            case .intersect:
+                if let h = solid {
+                    let r = try p.intersect(h, tool)
+                    p.release(h); p.release(tool)
+                    solid = r; solidMesh = nil
+                } else if body.triangleCount > 0 {
+                    let tm = try p.tessellate(tool, deflection: DocumentEngine.previewDeflection)
+                    p.release(tool)
+                    body = try CSG.intersect(body, tm)
+                } else {
+                    p.release(tool)
+                    throw CADError.booleanEmptyResult
+                }
+            }
+        }
+        /// Feature kinds whose rebuild branch is engine-aware at
+        /// this migration stage; everything else materialises the
+        /// body to a mesh before its legacy branch runs.
+        func kindIsSolidAware(_ kind: FeatureKind) -> Bool {
+            switch kind {
+            case .cascadePad, .cascadePocket: return true
+            default: return false
+            }
+        }
+
         for feature in part.features {
             if firstError != nil {
                 statuses.append(FeatureStatus(featureID: feature.id, ok: false, errorCode: nil, message: "paused"))
@@ -171,6 +281,9 @@ public enum DocumentEngine {
                 continue
             }
             do {
+                if solid != nil && !kindIsSolidAware(feature.kind) {
+                    try materializeBody()
+                }
                 if case .linearPattern(let count, let spacing) = feature.kind {
                     body = try DocumentEngine.applyPattern(mesh: body, count: count, spacing: spacing)
                     statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
@@ -419,12 +532,37 @@ public enum DocumentEngine {
                 if case .cascadePad(let sketchID, let length) = feature.kind {
                     guard length > 0 else { throw CADError.padLengthInvalid(length) }
                     guard let sketch = part.sketch(sketchID) else { throw CADError.nameNotFound("sketch") }
+                    if let p = provider {
+                        // Engine path: prism + exact composition.
+                        let tool = try p.prismFromSketch(sketch, offset: 0, along: length)
+                        try booleanWithSolid(tool, .join)
+                        let volume = try p.volume(solid!)
+                        statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil,
+                                                      message: String(format: "Cascade (OCCT) volume %.2f mm³", volume)))
+                        logger.debug(.feature, "cascade pad ok", context: ["feature": feature.name, "volume": "\(volume)"])
+                        continue
+                    }
                     guard let evaluator = DocumentEngine.cascadePadEvaluator else { throw CADError.kernelUnavailable }
                     let (tool, volume) = try evaluator(sketch, length)
                     body = body.triangleCount == 0 ? tool : try CSG.union(body, tool)
                     statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil,
                                                   message: String(format: "Cascade (OCCT) volume %.2f mm³", volume)))
                     logger.debug(.feature, "cascade pad ok", context: ["feature": feature.name, "volume": "\(volume)"])
+                    continue
+                }
+                if case .cascadePocket(let sketchID, let depth) = feature.kind {
+                    guard depth > 0 else { throw CADError.holeSpecInvalid("pocket depth must be > 0") }
+                    guard let sketch = part.sketch(sketchID) else { throw CADError.nameNotFound("sketch") }
+                    guard let p = provider else { throw CADError.kernelUnavailable }
+                    // Tool span mirrors the legacy pocket prism:
+                    // from `depth` below the sketch plane to 1 mm
+                    // above it, cut exactly by the engine.
+                    let tool = try p.prismFromSketch(sketch, offset: -depth, along: depth + 1)
+                    try booleanWithSolid(tool, .cut)
+                    let volume = try p.volume(solid!)
+                    statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil,
+                                                  message: String(format: "Cascade (OCCT) volume %.2f mm³", volume)))
+                    logger.debug(.feature, "cascade pocket ok", context: ["feature": feature.name, "volume": "\(volume)"])
                     continue
                 }
                 let m = try evaluate(feature: feature, part: part, warnings: &warnings)
@@ -451,7 +589,32 @@ public enum DocumentEngine {
             }
         }
         var allBodies = bodies
-        if body.triangleCount > 0 { allBodies.append(body) }
+        // Engine bodies join the output through tessellation; every
+        // handle is released exactly once, here or in materialize.
+        if let p = provider {
+            do {
+                for h in solidBodies {
+                    allBodies.append(try p.tessellate(h, deflection: DocumentEngine.previewDeflection))
+                    p.release(h)
+                }
+                if let h = solid {
+                    allBodies.append(try currentMesh())
+                    p.release(h)
+                } else if body.triangleCount > 0 {
+                    allBodies.append(body)
+                }
+            } catch let e as CADError {
+                for h in solidBodies { p.release(h) }
+                if let h = solid { p.release(h) }
+                if firstError == nil { firstError = e }
+                if body.triangleCount > 0 { allBodies.append(body) }
+            } catch {
+                for h in solidBodies { p.release(h) }
+                if let h = solid { p.release(h) }
+            }
+        } else if body.triangleCount > 0 {
+            allBodies.append(body)
+        }
         var combined = Mesh()
         for b in allBodies { combined.append(b) }
         let mass = combined.volume / 1000.0 * part.material.density  // mm^3 -> cm^3 * g/cm^3
@@ -662,6 +825,8 @@ public enum DocumentEngine {
             throw CADError.booleanFailed("exact boolean arrives with the OCCT kernel bridge")
         case .cascadePad:
             throw CADError.invariantBroken("cascade pad must be handled by rebuild, not evaluate")
+        case .cascadePocket:
+            throw CADError.invariantBroken("cascade pocket must be handled by rebuild, not evaluate")
         }
     }
 

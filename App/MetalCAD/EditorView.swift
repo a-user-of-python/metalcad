@@ -1302,6 +1302,9 @@ struct EditorView: View {
                     ribbonButton("Cascade Pad", icon: "cube", active: activeTool == .cascadePad) {
                         selectTool(.cascadePad)
                     }
+                    ribbonButton("Cascade Pocket", icon: "cube.slash", active: activeTool == .cascadePocket) {
+                        selectTool(.cascadePocket)
+                    }
                     ribbonButton("Revolve", icon: "rotate.3d", active: activeTool == .revolve) {
                         selectTool(.revolve)
                     }
@@ -2401,9 +2404,10 @@ struct EditorView: View {
                         Text("Paused — an earlier feature failed")
                             .mcFont(17)
                             .foregroundStyle(.orange)
-                    } else if st.ok, case .cascadePad = feature.kind, let msg = st.message {
-                        // The kernel's own volume readout for the
-                        // Cascade feature (matches the façade number).
+                    } else if st.ok, let msg = st.message, msg.hasPrefix("Cascade (OCCT) volume") {
+                        // The kernel's own volume readout for an
+                        // engine-built feature (matches the façade
+                        // number).
                         Text(msg)
                             .mcFont(17)
                             .foregroundStyle(.secondary)
@@ -2529,6 +2533,7 @@ struct EditorView: View {
         case .threadOnShaft: return "lines.measurement.horizontal"
         case .booleanCutPlaceholder: return "scissors"
         case .cascadePad: return "cube"
+        case .cascadePocket: return "cube.slash"
         }
     }
 
@@ -2648,6 +2653,8 @@ struct EditorView: View {
             return "Boolean cut"
         case .cascadePad(_, let len):
             return "Cascade Pad · \(mcFmt(len)) mm · OCCT"
+        case .cascadePocket(_, let depth):
+            return "Cascade Pocket · \(mcFmt(depth)) mm deep · OCCT"
         }
     }
 }

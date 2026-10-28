@@ -79,6 +79,7 @@ enum ActiveTool: Identifiable, Equatable {
     case midplane
     case extrude
     case cascadePad
+    case cascadePocket
     case revolve
     case hole
     case loft
@@ -121,6 +122,7 @@ enum ActiveTool: Identifiable, Equatable {
         case .midplane: return "midplane"
         case .extrude: return "extrude"
         case .cascadePad: return "cascadePad"
+        case .cascadePocket: return "cascadePocket"
         case .revolve: return "revolve"
         case .hole: return "hole"
         case .loft: return "loft"
@@ -159,6 +161,7 @@ enum ActiveTool: Identifiable, Equatable {
         case .midplane: return "Midplane"
         case .extrude: return "Extrude"
         case .cascadePad: return "Cascade Pad"
+        case .cascadePocket: return "Cascade Pocket"
         case .revolve: return "Revolve"
         case .hole: return "Hole"
         case .loft: return "Loft"
@@ -380,6 +383,8 @@ struct ToolPanelView: View {
                          initialOperation: panelOperation, close: close)
         case .cascadePad:
             CascadePadPanel(model: model, initialSketchID: panelSketchID, close: close)
+        case .cascadePocket:
+            CascadePocketPanel(model: model, initialSketchID: panelSketchID, close: close)
         case .revolve:
             RevolvePanel(model: model, initialSketchID: panelSketchID, close: close)
         case .hole:
@@ -2175,6 +2180,62 @@ struct CascadePadPanel: View {
 
     private func apply() {
         model.appendFeature(name: "Cascade Pad", kind: candidateKind)
+        model.setDraft(nil)
+        close()
+    }
+}
+
+/// Cascade Pocket (full-OCCT migration, stage 1, 2026-10-28): the
+/// cut counterpart of Cascade Pad — the sketch's closed profiles
+/// are prism'd by the Open CASCADE engine and subtracted exactly,
+/// so a Cascade Pad + Cascade Pocket body is exact B-rep end to
+/// end. The volume in the feature list is the engine's own number.
+struct CascadePocketPanel: View {
+    @ObservedObject var model: EditorModel
+    let close: () -> Void
+
+    @State private var sketchID: String
+    @State private var depthText = "5"
+
+    init(model: EditorModel, initialSketchID: String? = nil, close: @escaping () -> Void) {
+        _model = ObservedObject(wrappedValue: model)
+        self.close = close
+        _sketchID = State(initialValue: initialSketchID ?? model.featureSketches.first?.id ?? "")
+    }
+
+    private var sketches: [Sketch] { model.featureSketches }
+
+    private var candidateKind: FeatureKind {
+        .cascadePocket(sketchID: sketchID,
+                       depth: panelNum(depthText, fallback: 5))
+    }
+
+    private var draftSignature: String { "\(sketchID)|\(depthText)" }
+
+    private func refreshDraft() {
+        if sketches.isEmpty { model.setDraft(nil) } else {
+            model.draftAppend(Feature(name: "Cascade Pocket", kind: candidateKind))
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if sketches.isEmpty {
+                PanelNote(text: "There is no sketch to pocket yet. Create one first — Sketch ▸ New Sketch — then pocket it here.", warning: true)
+            } else {
+                PanelSketchPicker(label: "Profile sketch", sketches: sketches, selection: $sketchID)
+            }
+            PanelNumberRow(label: "Depth (mm)", text: $depthText)
+            PanelNote(text: "Cut by the Open CASCADE engine (OCCT 8.0.1, LGPL 2.1 + exception) — an exact boolean cut, not a mesh approximation. Put the sketch on the face you want to pocket into; the cut runs from that face down by the depth.")
+            PanelDraftError(model: model)
+            PanelOKBar(okEnabled: !sketches.isEmpty, onOK: apply, onCancel: close)
+        }
+        .onAppear { refreshDraft() }
+        .onChange(of: draftSignature) { _, _ in refreshDraft() }
+    }
+
+    private func apply() {
+        model.appendFeature(name: "Cascade Pocket", kind: candidateKind)
         model.setDraft(nil)
         close()
     }

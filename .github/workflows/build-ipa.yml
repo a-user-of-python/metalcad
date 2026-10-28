@@ -29,7 +29,7 @@ jobs:
           git init cascade-engine
           cd cascade-engine
           git remote add origin https://github.com/a-user-of-python/cascade-ios.git
-          git fetch --depth 1 origin f5167a93f976ecd748015fced0b2272a14cee8bc
+          git fetch --depth 1 origin 6c8bce86338e4bb29c554d963720a57730c3642b
           git checkout FETCH_HEAD
           ls OCCT/src | head -3
           test -f Facade/occt_facade.cpp

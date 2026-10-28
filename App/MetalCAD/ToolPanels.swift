@@ -78,6 +78,7 @@ enum ActiveTool: Identifiable, Equatable {
     case anglePlane
     case midplane
     case extrude
+    case cascadePad
     case revolve
     case hole
     case loft
@@ -119,6 +120,7 @@ enum ActiveTool: Identifiable, Equatable {
         case .anglePlane: return "anglePlane"
         case .midplane: return "midplane"
         case .extrude: return "extrude"
+        case .cascadePad: return "cascadePad"
         case .revolve: return "revolve"
         case .hole: return "hole"
         case .loft: return "loft"
@@ -156,6 +158,7 @@ enum ActiveTool: Identifiable, Equatable {
         case .anglePlane: return "Plane at Angle"
         case .midplane: return "Midplane"
         case .extrude: return "Extrude"
+        case .cascadePad: return "Cascade Pad"
         case .revolve: return "Revolve"
         case .hole: return "Hole"
         case .loft: return "Loft"
@@ -375,6 +378,8 @@ struct ToolPanelView: View {
         case .extrude:
             ExtrudePanel(model: model, initialSketchID: extrudeSketchID ?? panelSketchID,
                          initialOperation: panelOperation, close: close)
+        case .cascadePad:
+            CascadePadPanel(model: model, initialSketchID: panelSketchID, close: close)
         case .revolve:
             RevolvePanel(model: model, initialSketchID: panelSketchID, close: close)
         case .hole:
@@ -2114,6 +2119,62 @@ struct RibPanel: View {
 
     private func apply() {
         model.appendFeature(name: "Rib", kind: candidateKind)
+        model.setDraft(nil)
+        close()
+    }
+}
+
+/// Cascade Pad (implant, 2026-10-28): the sketch's closed profiles
+/// extruded by the Open CASCADE engine (CascadeKit) instead of the
+/// kit's tessellation kernel — exact B-rep geometry, OCCT's own
+/// volume in the feature row. First modeling feature on the engine;
+/// the rest of the modeling set follows on the same bridge.
+struct CascadePadPanel: View {
+    @ObservedObject var model: EditorModel
+    let close: () -> Void
+
+    @State private var sketchID: String
+    @State private var lengthText = "10"
+
+    init(model: EditorModel, initialSketchID: String? = nil, close: @escaping () -> Void) {
+        _model = ObservedObject(wrappedValue: model)
+        self.close = close
+        _sketchID = State(initialValue: initialSketchID ?? model.featureSketches.first?.id ?? "")
+    }
+
+    private var sketches: [Sketch] { model.featureSketches }
+
+    private var candidateKind: FeatureKind {
+        .cascadePad(sketchID: sketchID,
+                    length: panelNum(lengthText, fallback: 10))
+    }
+
+    private var draftSignature: String { "\(sketchID)|\(lengthText)" }
+
+    private func refreshDraft() {
+        if sketches.isEmpty { model.setDraft(nil) } else {
+            model.draftAppend(Feature(name: "Cascade Pad", kind: candidateKind))
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if sketches.isEmpty {
+                PanelNote(text: "There is no sketch to pad yet. Create one first — Sketch ▸ New Sketch — then pad it here.", warning: true)
+            } else {
+                PanelSketchPicker(label: "Profile sketch", sketches: sketches, selection: $sketchID)
+            }
+            PanelNumberRow(label: "Length (mm)", text: $lengthText)
+            PanelNote(text: "Built by the Open CASCADE engine (OCCT 8.0.1, LGPL 2.1 + exception) — an exact solid, not a mesh approximation. Its volume in the feature list is the engine's own number.")
+            PanelDraftError(model: model)
+            PanelOKBar(okEnabled: !sketches.isEmpty, onOK: apply, onCancel: close)
+        }
+        .onAppear { refreshDraft() }
+        .onChange(of: draftSignature) { _, _ in refreshDraft() }
+    }
+
+    private func apply() {
+        model.appendFeature(name: "Cascade Pad", kind: candidateKind)
         model.setDraft(nil)
         close()
     }

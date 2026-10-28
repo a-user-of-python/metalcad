@@ -1,0 +1,7 @@
+# Local checkout of the Cascade engine (cascade-ios) used by
+# App/gen_project.py. CI fetches it pinned; it is never committed
+# here — cascade-ios is its source of truth.
+cascade-engine/
+build/
+Payload/
+*.ipa

@@ -8,6 +8,9 @@ struct MetalCADApp: App {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let logDir = docs.appendingPathComponent("Logs", isDirectory: true)
         MCLog.shared.attachFileSink(directory: logDir)
+        // Implant the Cascade (Open CASCADE) engine: registers the
+        // evaluator the kit's .cascadePad features rebuild through.
+        CascadeBridge.register()
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
         MCLog.shared.info(.lifecycle, "MetalCAD launched", context: ["version": version])
     }

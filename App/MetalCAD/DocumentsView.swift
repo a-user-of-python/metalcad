@@ -147,6 +147,22 @@ enum DemoFactory {
         part.features.append(Feature(name: "Boss",
                                      kind: .pad(sketchID: bossSketch.id, length: 6)))
 
+        // Cascade boss: a hexagon on the top face, padded 6 mm by
+        // the Open CASCADE engine (the implant) — its feature row
+        // shows OCCT's own volume readout.
+        var hexSketch = Sketch(name: "Cascade Hex", plane: topPlane)
+        let hexCenter = Vec2(-22, 0)
+        let hexR = 4.0
+        var hexPts: [Vec2] = []
+        for i in 0..<6 {
+            let a = Double(i) * Double.pi / 3
+            hexPts.append(hexCenter + Vec2(hexR * cos(a), hexR * sin(a)))
+        }
+        for i in 0..<6 { hexSketch.addLine(hexPts[i], hexPts[(i + 1) % 6]) }
+        part.sketches.append(hexSketch)
+        part.features.append(Feature(name: "Cascade Boss",
+                                     kind: .cascadePad(sketchID: hexSketch.id, length: 6)))
+
         doc.parts.append(part)
         return doc
     }
@@ -323,6 +339,14 @@ struct HomeSettingsView: View {
                         }
                     }
                     .buttonStyle(.plain)
+                }
+
+                Section {
+                    Text("Cascade Pad features are built by Open CASCADE Technology 8.0.1 (© Open Cascade SAS), licensed under LGPL 2.1 with the Open CASCADE exception. The full licence texts are included in the app bundle.")
+                        .mcFont(15)
+                        .foregroundStyle(.secondary)
+                } header: {
+                    Text("Geometry engine")
                 }
             }
             .navigationTitle("Settings")

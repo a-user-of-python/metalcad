@@ -1299,6 +1299,9 @@ struct EditorView: View {
                     ribbonButton("Extrude", icon: "rectangle.expand.vertical", active: activeTool == .extrude) {
                         selectTool(.extrude)
                     }
+                    ribbonButton("Cascade Pad", icon: "cube", active: activeTool == .cascadePad) {
+                        selectTool(.cascadePad)
+                    }
                     ribbonButton("Revolve", icon: "rotate.3d", active: activeTool == .revolve) {
                         selectTool(.revolve)
                     }
@@ -2398,6 +2401,12 @@ struct EditorView: View {
                         Text("Paused — an earlier feature failed")
                             .mcFont(17)
                             .foregroundStyle(.orange)
+                    } else if st.ok, case .cascadePad = feature.kind, let msg = st.message {
+                        // The kernel's own volume readout for the
+                        // Cascade feature (matches the façade number).
+                        Text(msg)
+                            .mcFont(17)
+                            .foregroundStyle(.secondary)
                     }
                 }
             }
@@ -2519,6 +2528,7 @@ struct EditorView: View {
         case .chamferEdges: return "octagon"
         case .threadOnShaft: return "lines.measurement.horizontal"
         case .booleanCutPlaceholder: return "scissors"
+        case .cascadePad: return "cube"
         }
     }
 
@@ -2636,6 +2646,8 @@ struct EditorView: View {
             return "Thread on shaft · Ø\(mcFmt(s.majorDiameter)) × \(mcFmt(s.pitch)) pitch · \(mcFmt(s.length)) mm long"
         case .booleanCutPlaceholder:
             return "Boolean cut"
+        case .cascadePad(_, let len):
+            return "Cascade Pad · \(mcFmt(len)) mm · OCCT"
         }
     }
 }

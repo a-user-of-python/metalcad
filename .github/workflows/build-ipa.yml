@@ -19,6 +19,20 @@ jobs:
     runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
+      # The Cascade engine (OCCT subset + façade) is implanted from
+      # the cascade-ios repo — that repo is the engine's single
+      # source of truth. Pinned to one commit so MetalCAD's build
+      # never drifts; bump the SHA deliberately after cascade-ios
+      # changes prove out in its own demo build.
+      - name: Fetch Cascade engine (pinned cascade-ios)
+        run: |
+          git init cascade-engine
+          cd cascade-engine
+          git remote add origin https://github.com/a-user-of-python/cascade-ios.git
+          git fetch --depth 1 origin f5167a93f976ecd748015fced0b2272a14cee8bc
+          git checkout FETCH_HEAD
+          ls OCCT/src | head -3
+          test -f Facade/occt_facade.cpp
       - name: Generate Xcode project
         working-directory: App
         run: python3 gen_project.py

@@ -81,6 +81,8 @@ public enum FeatureKind: Codable, Equatable {
     case chamferEdges(distance: Double, midpoints: [Vec3])
     case threadOnShaft(spec: ThreadSpec, origin: Vec3, axis: Vec3)
     case booleanCutPlaceholder
+    // Cascade implant (appended — existing cases keep their encoding).
+    case cascadePad(sketchID: String, length: Double)
 }
 
 public struct Feature: Codable, Equatable, Identifiable {
@@ -138,6 +140,14 @@ public struct RebuildResult {
 }
 
 public enum DocumentEngine {
+
+    /// Evaluator for `.cascadePad` features, registered by the app at
+    /// launch (the Open CASCADE implant, 2026-10-28). The kit stays
+    /// pure Swift: it hands the hook the sketch + length and receives
+    /// the tessellated mesh plus the kernel's own volume (mm^3).
+    /// Nil in kit-only contexts (unit tests register a stub) — a
+    /// cascadePad with no hook fails MCAD-KN601, never silently.
+    public static var cascadePadEvaluator: ((Sketch, Double) throws -> (mesh: Mesh, volume: Double))?
 
     /// Evaluate a part's feature tree into one accumulated mesh (v1: additive
     /// mesh accumulation; exact boolean cut/fillet/shell return their codes).
@@ -406,6 +416,17 @@ public enum DocumentEngine {
                     logger.debug(.feature, "thread on shaft ok", context: ["feature": feature.name])
                     continue
                 }
+                if case .cascadePad(let sketchID, let length) = feature.kind {
+                    guard length > 0 else { throw CADError.padLengthInvalid(length) }
+                    guard let sketch = part.sketch(sketchID) else { throw CADError.nameNotFound("sketch") }
+                    guard let evaluator = DocumentEngine.cascadePadEvaluator else { throw CADError.kernelUnavailable }
+                    let (tool, volume) = try evaluator(sketch, length)
+                    body = body.triangleCount == 0 ? tool : try CSG.union(body, tool)
+                    statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil,
+                                                  message: String(format: "Cascade (OCCT) volume %.2f mm³", volume)))
+                    logger.debug(.feature, "cascade pad ok", context: ["feature": feature.name, "volume": "\(volume)"])
+                    continue
+                }
                 let m = try evaluate(feature: feature, part: part, warnings: &warnings)
                 switch feature.kind {
                 case .pocket, .hole:
@@ -639,6 +660,8 @@ public enum DocumentEngine {
             return try SweepTessellator.sweep(profileLoop: loop.points, profilePlane: skP.plane, path: path)
         case .booleanCutPlaceholder:
             throw CADError.booleanFailed("exact boolean arrives with the OCCT kernel bridge")
+        case .cascadePad:
+            throw CADError.invariantBroken("cascade pad must be handled by rebuild, not evaluate")
         }
     }
 

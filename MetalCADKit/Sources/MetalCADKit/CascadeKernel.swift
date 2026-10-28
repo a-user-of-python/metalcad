@@ -34,6 +34,14 @@ public protocol CascadeKernelProvider: AnyObject {
     func revolveFromSketch(_ sketch: Sketch, axisPoint: Vec2, axisDirection: Vec2,
                            angleDegrees: Double) throws -> Int
 
+    /// Revolve ONE closed 2D polygon (a profile loop — outer or a
+    /// hole) on `plane` around an axis given in that plane's 2D
+    /// coordinates. The kit composes holed profiles itself
+    /// (outer minus holes), which `revolveFromSketch` cannot
+    /// express (it takes the sketch's first profile only).
+    func revolveFromProfile(_ points: [Vec2], plane: Plane3, axisPoint: Vec2,
+                            axisDirection: Vec2, angleDegrees: Double) throws -> Int
+
     /// A native primitive, placed exactly where the kit's
     /// tessellation kernel placed it (box: XY-centred, z 0…height;
     /// cylinder/cone: base on z=0, axis +Z; sphere/torus: centred).
@@ -63,6 +71,13 @@ public protocol CascadeKernelProvider: AnyObject {
     /// body's minimum along `pullAxis` (0=X, 1=Y, 2=Z): positive
     /// angle narrows the body toward +axis.
     func draft(_ s: Int, angleDegrees: Double, pullAxis: Int) throws -> Int
+    /// Draft around an explicit neutral plane (the plane through
+    /// `neutralPoint` perpendicular to `pullDirection`): positive
+    /// angle narrows the body on the +pullDirection side. This is
+    /// the form tapered extrudes need (neutral plane = the sketch
+    /// plane, pull = its normal).
+    func draftGeneral(_ s: Int, pullDirection: Vec3, angleDegrees: Double,
+                      neutralPoint: Vec3) throws -> Int
     /// General linear map + translation (12 doubles, row-major
     /// 3x4): rotation, translation, scale, mirror.
     func transform(_ s: Int, matrix: [Double]) throws -> Int

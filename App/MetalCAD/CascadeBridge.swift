@@ -158,23 +158,42 @@ final class CascadeKernelBridge: CascadeKernelProvider {
         try locked {
             let (profiles, _) = try sketch.extractProfiles()
             guard let profile = profiles.first else { throw CADError.padNoProfile }
-            var xy: [Double] = []
-            for p in profile.outer { xy += [p.x, p.y] }
-            let plane = sketch.plane
-            let origin: [Double] = [plane.origin.x, plane.origin.y, plane.origin.z]
-            let xa: [Double] = [plane.xAxis.x, plane.xAxis.y, plane.xAxis.z]
-            let ya: [Double] = [plane.yAxis.x, plane.yAxis.y, plane.yAxis.z]
-            let ap = plane.toWorld(axisPoint)
-            let ad = plane.xAxis * axisDirection.x + plane.yAxis * axisDirection.y
-            let axisPoint3: [Double] = [ap.x, ap.y, ap.z]
-            let axisDir3: [Double] = [ad.x, ad.y, ad.z]
-            var err: Int32 = 0
-            guard let solid = mc_revolve(xy, Int32(profile.outer.count), origin, xa, ya,
-                                         axisPoint3, axisDir3, angleDegrees, &err) else {
-                throw CADError.kernelOperationFailed(Self.lastError())
-            }
-            return try own(solid)
+            return try own(revolveRaw(points: profile.outer, plane: sketch.plane,
+                                      axisPoint: axisPoint, axisDirection: axisDirection,
+                                      angleDegrees: angleDegrees))
         }
+    }
+
+    func revolveFromProfile(_ points: [Vec2], plane: Plane3, axisPoint: Vec2,
+                            axisDirection: Vec2, angleDegrees: Double) throws -> Int {
+        try locked {
+            guard points.count >= 3 else {
+                throw CADError.kernelOperationFailed("A revolve profile needs at least 3 points.")
+            }
+            return try own(revolveRaw(points: points, plane: plane,
+                                      axisPoint: axisPoint, axisDirection: axisDirection,
+                                      angleDegrees: angleDegrees))
+        }
+    }
+
+    /// mc_revolve on raw points (gate held). Caller owns the result.
+    private func revolveRaw(points: [Vec2], plane: Plane3, axisPoint: Vec2,
+                            axisDirection: Vec2, angleDegrees: Double) throws -> UnsafeMutablePointer<MCFacadeShape> {
+        var xy: [Double] = []
+        for p in points { xy += [p.x, p.y] }
+        let origin: [Double] = [plane.origin.x, plane.origin.y, plane.origin.z]
+        let xa: [Double] = [plane.xAxis.x, plane.xAxis.y, plane.xAxis.z]
+        let ya: [Double] = [plane.yAxis.x, plane.yAxis.y, plane.yAxis.z]
+        let ap = plane.toWorld(axisPoint)
+        let ad = plane.xAxis * axisDirection.x + plane.yAxis * axisDirection.y
+        let axisPoint3: [Double] = [ap.x, ap.y, ap.z]
+        let axisDir3: [Double] = [ad.x, ad.y, ad.z]
+        var err: Int32 = 0
+        guard let solid = mc_revolve(xy, Int32(points.count), origin, xa, ya,
+                                     axisPoint3, axisDir3, angleDegrees, &err) else {
+            throw CADError.kernelOperationFailed(Self.lastError())
+        }
+        return solid
     }
 
     // MARK: Primitives
@@ -346,6 +365,16 @@ final class CascadeKernelBridge: CascadeKernelProvider {
             var neutral: [Double] = [bb[0], bb[1], bb[2]]
             neutral[pullAxis] = bb[pullAxis]
             return try own(mc_draft(h, axisVec, angleDegrees, neutral, &err))
+        }
+    }
+
+    func draftGeneral(_ s: Int, pullDirection: Vec3, angleDegrees: Double, neutralPoint: Vec3) throws -> Int {
+        try locked {
+            let h = try shape(s)
+            let dir: [Double] = [pullDirection.x, pullDirection.y, pullDirection.z]
+            let neutral: [Double] = [neutralPoint.x, neutralPoint.y, neutralPoint.z]
+            var err: Int32 = 0
+            return try own(mc_draft(h, dir, angleDegrees, neutral, &err))
         }
     }
 

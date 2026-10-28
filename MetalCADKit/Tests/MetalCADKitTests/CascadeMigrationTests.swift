@@ -12,6 +12,10 @@ final class StubCascadeProvider: CascadeKernelProvider {
     private var registry: [Int: Mesh] = [:]
     private var nextID = 1
     private(set) var calls: [String] = []
+    /// (offset, along) spans seen by prismFromSketch, in call order.
+    private(set) var prismSpans: [(offset: Double, along: Double)] = []
+    /// (angleDegrees, pullDirection) seen by draftGeneral.
+    private(set) var draftGeneralCalls: [(angle: Double, pull: Vec3, neutral: Vec3)] = []
 
     private func store(_ m: Mesh) -> Int {
         let id = nextID; nextID += 1
@@ -25,6 +29,7 @@ final class StubCascadeProvider: CascadeKernelProvider {
 
     func prismFromSketch(_ sketch: Sketch, offset: Double, along: Double) throws -> Int {
         calls.append("prismFromSketch")
+        prismSpans.append((offset, along))
         let (profiles, _) = try sketch.extractProfiles()
         var result = Mesh()
         for p in profiles {
@@ -47,6 +52,14 @@ final class StubCascadeProvider: CascadeKernelProvider {
         let (profiles, _) = try sketch.extractProfiles()
         guard let p = profiles.first else { throw CADError.padNoProfile }
         return store(try Tessellation.revolve(profile: p, plane: sketch.plane,
+                                              axisPoint: axisPoint, axisDirection: axisDirection,
+                                              angleDegrees: angleDegrees))
+    }
+
+    func revolveFromProfile(_ points: [Vec2], plane: Plane3, axisPoint: Vec2,
+                            axisDirection: Vec2, angleDegrees: Double) throws -> Int {
+        calls.append("revolveFromProfile")
+        return store(try Tessellation.revolve(profile: Profile(outer: points, holes: []), plane: plane,
                                               axisPoint: axisPoint, axisDirection: axisDirection,
                                               angleDegrees: angleDegrees))
     }
@@ -110,6 +123,26 @@ final class StubCascadeProvider: CascadeKernelProvider {
     func draft(_ s: Int, angleDegrees: Double, pullAxis: Int) throws -> Int {
         calls.append("draft")
         return store(try DocumentEngine.draftMesh(body: try mesh(s), angleDegrees: angleDegrees, pullAxis: pullAxis))
+    }
+
+    func draftGeneral(_ s: Int, pullDirection: Vec3, angleDegrees: Double, neutralPoint: Vec3) throws -> Int {
+        calls.append("draftGeneral")
+        draftGeneralCalls.append((angleDegrees, pullDirection, neutralPoint))
+        // Mesh-level approximation of the OCCT draft for wiring
+        // tests: morph each vertex away from the neutral plane —
+        // radial component (relative to the neutral point, pull
+        // direction removed) scaled by -tan(angle) x height.
+        let src = try mesh(s)
+        let pull = pullDirection.normalized
+        let t = tan(angleDegrees * Double.pi / 180)
+        let out = src.vertices.map { v -> Vec3 in
+            let rel = v - neutralPoint
+            let h = rel.dot(pull)
+            let radial = rel - pull * h
+            guard radial.length > 1e-9 else { return v }
+            return v - radial.normalized * (t * h)
+        }
+        return store(Mesh(vertices: out, indices: src.indices))
     }
 
     func transform(_ s: Int, matrix m: [Double]) throws -> Int {
@@ -227,6 +260,171 @@ final class CascadeMigrationTests: XCTestCase {
         XCTAssertTrue(result.statuses.allSatisfy { $0.ok })
         XCTAssertLessThan(result.mesh.volume, 800)
         XCTAssertGreaterThan(result.mesh.volume, 700)
+    }
+
+    // MARK: - Stage 2 (1.17): pad / pocket / revolve / primitive /
+    // extrude / extrude2 re-pointed at the engine
+
+    private func pocketSketch(z: Double = 4) -> Sketch {
+        var sketch = Sketch(name: "Pocket", plane: Plane3(origin: Vec3(0, 0, z), xAxis: Vec3(1, 0, 0), yAxis: Vec3(0, 1, 0)))
+        sketch.addRectangle(from: Vec2(-5, -2), to: Vec2(5, 2))
+        return sketch
+    }
+
+    /// Stage 2: .pad builds through the provider (prism + exact
+    /// join) and measures the same as the legacy rebuild.
+    func testPadRoutesThroughProvider() {
+        let stub = StubCascadeProvider()
+        DocumentEngine.cascadeProvider = stub
+        var part = Part(name: "Pad")
+        let s = plateSketch()
+        part.sketches.append(s)
+        part.features.append(Feature(name: "Pad", kind: .pad(sketchID: s.id, length: 4)))
+        let r = DocumentEngine.rebuild(part: part)
+        XCTAssertNil(r.firstError)
+        XCTAssertEqual(r.mesh.volume, 800, accuracy: 1.0)
+        XCTAssertTrue(stub.calls.contains("prismFromSketch"), "pad via engine prism: \(stub.calls)")
+        XCTAssertEqual(stub.prismSpans.first?.offset, 0)
+        XCTAssertEqual(stub.prismSpans.first?.along, 4)
+        // Parity: the legacy rebuild of the same part.
+        DocumentEngine.cascadeProvider = nil
+        let legacy = DocumentEngine.rebuild(part: part)
+        XCTAssertNil(legacy.firstError)
+        XCTAssertEqual(legacy.mesh.volume, r.mesh.volume, accuracy: 0.01)
+    }
+
+    /// Stage 2: .pocket cuts through the provider with the legacy
+    /// tool span (depth below the plane to 1 mm above it).
+    func testPocketRoutesThroughProvider() {
+        let stub = StubCascadeProvider()
+        DocumentEngine.cascadeProvider = stub
+        var part = Part(name: "Pocket")
+        let plate = plateSketch()
+        let pocket = pocketSketch()
+        part.sketches += [plate, pocket]
+        part.features.append(Feature(name: "Pad", kind: .pad(sketchID: plate.id, length: 4)))
+        part.features.append(Feature(name: "Pocket", kind: .pocket(sketchID: pocket.id, depth: 2)))
+        let r = DocumentEngine.rebuild(part: part)
+        XCTAssertNil(r.firstError)
+        XCTAssertEqual(r.mesh.volume, 800 - 80, accuracy: 1.0)
+        XCTAssertTrue(stub.calls.contains("subtract"), "pocket composed via engine subtract: \(stub.calls)")
+        XCTAssertEqual(stub.prismSpans.last?.offset, -2)
+        XCTAssertEqual(stub.prismSpans.last?.along, 3)
+    }
+
+    /// Stage 2: .revolve builds through the provider and measures
+    /// the same cylinder as the legacy path.
+    func testRevolveRoutesThroughProvider() {
+        let stub = StubCascadeProvider()
+        DocumentEngine.cascadeProvider = stub
+        var part = Part(name: "Shaft")
+        var s = Sketch(name: "s")
+        let ids = s.addRectangle(from: Vec2(0, 0), to: Vec2(5, 20))
+        part.sketches.append(s)
+        part.features.append(Feature(name: "Rev", kind: .revolve(sketchID: s.id, axisEntityID: ids[3], angleDegrees: 360)))
+        let r = DocumentEngine.rebuild(part: part)
+        XCTAssertNil(r.firstError)
+        XCTAssertTrue(stub.calls.contains("revolveFromSketch"), "revolve via engine: \(stub.calls)")
+        XCTAssertEqual(r.mesh.volume, Double.pi * 25 * 20, accuracy: 60)
+    }
+
+    /// Stage 2: revolve validation is unchanged on the engine
+    /// path — a profile crossing the axis is still FT404.
+    func testRevolveCrossingAxisStillFT404WithProvider() {
+        DocumentEngine.cascadeProvider = StubCascadeProvider()
+        var part = Part(name: "Bad")
+        var s = Sketch(name: "s")
+        s.addRectangle(from: Vec2(-5, 0), to: Vec2(5, 10))
+        let axis = s.addLine(Vec2(0, -5), Vec2(0, 15), construction: true)
+        part.sketches.append(s)
+        part.features.append(Feature(name: "Rev", kind: .revolve(sketchID: s.id, axisEntityID: axis, angleDegrees: 360)))
+        let r = DocumentEngine.rebuild(part: part)
+        XCTAssertEqual(r.firstError?.code, "MCAD-FT404")
+    }
+
+    /// Stage 2: .primitive builds through the provider.
+    func testPrimitiveRoutesThroughProvider() {
+        let stub = StubCascadeProvider()
+        DocumentEngine.cascadeProvider = stub
+        var part = Part(name: "Prim")
+        part.features.append(Feature(name: "Box", kind: .primitive(kind: .box, params: ["width": 10, "depth": 6, "height": 3])))
+        let r = DocumentEngine.rebuild(part: part)
+        XCTAssertNil(r.firstError)
+        XCTAssertEqual(r.mesh.volume, 180, accuracy: 0.5)
+        XCTAssertTrue(stub.calls.contains("primitive"), "primitive via engine: \(stub.calls)")
+    }
+
+    /// Stage 2: extrude spans mirror the legacy construction —
+    /// symmetric centres on the plane; two-sided untapered is ONE
+    /// prism across the whole span.
+    func testExtrudeSpans() {
+        let stub = StubCascadeProvider()
+        DocumentEngine.cascadeProvider = stub
+        var part = Part(name: "Spans")
+        let s = plateSketch()
+        part.sketches.append(s)
+        part.features.append(Feature(name: "Sym", kind: .extrude(sketchID: s.id, distance: 6, taperDegrees: 0, mode: .symmetric)))
+        var r = DocumentEngine.rebuild(part: part)
+        XCTAssertNil(r.firstError)
+        XCTAssertEqual(stub.prismSpans.count, 1)
+        XCTAssertEqual(stub.prismSpans[0].offset, -3)
+        XCTAssertEqual(stub.prismSpans[0].along, 6)
+
+        let stub2 = StubCascadeProvider()
+        DocumentEngine.cascadeProvider = stub2
+        var part2 = Part(name: "Spans2")
+        part2.sketches.append(s)
+        part2.features.append(Feature(name: "Two", kind: .extrude(sketchID: s.id, distance: 5, taperDegrees: 0, mode: .twoSided(second: 2))))
+        r = DocumentEngine.rebuild(part: part2)
+        XCTAssertNil(r.firstError)
+        XCTAssertEqual(stub2.prismSpans.count, 1)
+        XCTAssertEqual(stub2.prismSpans[0].offset, -2)
+        XCTAssertEqual(stub2.prismSpans[0].along, 7)
+        XCTAssertEqual(r.mesh.volume, 20 * 10 * 7, accuracy: 1.0)
+    }
+
+    /// Stage 2: a tapered two-sided extrude drafts PER SEGMENT
+    /// (two draftGeneral calls, one per legacy mesh segment).
+    func testExtrudeTaperDraftsPerSegment() {
+        let stub = StubCascadeProvider()
+        DocumentEngine.cascadeProvider = stub
+        var part = Part(name: "Taper")
+        let s = plateSketch()
+        part.sketches.append(s)
+        part.features.append(Feature(name: "Ex", kind: .extrude(sketchID: s.id, distance: 5, taperDegrees: 4, mode: .twoSided(second: 2))))
+        let r = DocumentEngine.rebuild(part: part)
+        XCTAssertNil(r.firstError)
+        XCTAssertEqual(stub.prismSpans.count, 2)
+        XCTAssertEqual(stub.draftGeneralCalls.count, 2)
+        XCTAssertTrue(stub.calls.contains("unite"), "tapered segments united: \(stub.calls)")
+    }
+
+    /// Stage 2: extrude2's operation composes exactly through the
+    /// provider — cut subtracts, newBody starts a second body.
+    func testExtrude2OperationsThroughProvider() {
+        let stub = StubCascadeProvider()
+        DocumentEngine.cascadeProvider = stub
+        var part = Part(name: "Ex2")
+        let plate = plateSketch()
+        let pocket = pocketSketch(z: 0)
+        part.sketches += [plate, pocket]
+        part.features.append(Feature(name: "Pad", kind: .pad(sketchID: plate.id, length: 4)))
+        part.features.append(Feature(name: "Cut", kind: .extrude2(sketchID: pocket.id, distance: 2, taperDegrees: 0, mode: .one, operation: .cut, end: .dimension)))
+        var r = DocumentEngine.rebuild(part: part)
+        XCTAssertNil(r.firstError)
+        XCTAssertEqual(r.mesh.volume, 800 - 80, accuracy: 1.0)
+        XCTAssertTrue(stub.calls.contains("subtract"))
+
+        let stub2 = StubCascadeProvider()
+        DocumentEngine.cascadeProvider = stub2
+        var part2 = Part(name: "Ex2b")
+        part2.sketches += [plate, pocket]
+        part2.features.append(Feature(name: "Pad", kind: .pad(sketchID: plate.id, length: 4)))
+        part2.features.append(Feature(name: "New", kind: .extrude2(sketchID: pocket.id, distance: 1, taperDegrees: 0, mode: .one, operation: .newBody, end: .dimension)))
+        r = DocumentEngine.rebuild(part: part2)
+        XCTAssertNil(r.firstError)
+        XCTAssertEqual(r.bodies.count, 2)
+        XCTAssertEqual(r.mesh.volume, 800 + 40, accuracy: 1.0)
     }
 
     /// Stage 1: cascade pocket documents round-trip (the kind was

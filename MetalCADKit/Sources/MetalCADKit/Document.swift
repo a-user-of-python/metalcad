@@ -266,9 +266,66 @@ public enum DocumentEngine {
         /// body to a mesh before its legacy branch runs.
         func kindIsSolidAware(_ kind: FeatureKind) -> Bool {
             switch kind {
-            case .cascadePad, .cascadePocket: return true
+            case .cascadePad, .cascadePocket,
+                 .pad, .pocket, .revolve, .primitive, .extrude, .extrude2:
+                return true
             default: return false
             }
+        }
+
+        /// Extrude span (offset, along) along the sketch normal for
+        /// an extrude mode, mirroring the legacy mesh construction:
+        /// `.one` = [0, d], `.symmetric` = centred on the plane,
+        /// `.twoSided` = [−second, d] as ONE prism (the legacy path
+        /// built two meshes and appended them; the solid is the
+        /// same).
+        func extrudeSpan(_ mode: ExtrudeMode, _ distance: Double) throws -> (offset: Double, along: Double) {
+            switch mode {
+            case .one: return (0, distance)
+            case .symmetric: return (-distance / 2, distance)
+            case .twoSided(let second):
+                guard second > 0 else { throw CADError.padLengthInvalid(second) }
+                return (-second, distance + second)
+            }
+        }
+
+        /// A sketch-extrude tool solid, drafted when the feature
+        /// tapers. The tapered form is built as one drafted segment
+        /// per legacy mesh segment, each drafted about its OWN base
+        /// plane — the legacy construction exactly (a two-sided
+        /// taper keeps the cross-section step it always had at the
+        /// sketch plane; a single draft over the whole span would
+        /// widen below the plane instead).
+        func extrudeTool(_ p: any CascadeKernelProvider, sketch: Sketch,
+                         mode: ExtrudeMode, distance: Double, taper: Double) throws -> Int {
+            if abs(taper) < 1e-9 {
+                let (offset, along) = try extrudeSpan(mode, distance)
+                return try p.prismFromSketch(sketch, offset: offset, along: along)
+            }
+            var segments: [(offset: Double, along: Double)] = []
+            switch mode {
+            case .one: segments = [(0, distance)]
+            case .symmetric: segments = [(-distance / 2, distance)]
+            case .twoSided(let second):
+                guard second > 0 else { throw CADError.padLengthInvalid(second) }
+                segments = [(0, distance), (-second, second)]
+            }
+            let n = sketch.plane.normal
+            var tool: Int? = nil
+            for seg in segments {
+                let s = try p.prismFromSketch(sketch, offset: seg.offset, along: seg.along)
+                let d = try p.draftGeneral(s, pullDirection: n, angleDegrees: taper,
+                                           neutralPoint: sketch.plane.origin + n * seg.offset)
+                p.release(s)
+                if let t = tool {
+                    let u = try p.unite(t, d)
+                    p.release(t); p.release(d)
+                    tool = u
+                } else {
+                    tool = d
+                }
+            }
+            return tool!
         }
 
         for feature in part.features {
@@ -320,6 +377,48 @@ public enum DocumentEngine {
                     continue
                 }
                 if case .extrude2(let sketchID, let distance, let taper, let mode, let op, let end) = feature.kind {
+                    if let p = provider {
+                        // Engine path (Stage 2): end conditions
+                        // resolve exactly as the legacy helper
+                        // resolves them — dimension / through-all
+                        // from the running bounds, up-to-face in the
+                        // legacy planar-face index space (that is
+                        // the space stored documents refer to) — but
+                        // the tool is an engine prism and composition
+                        // is exact.
+                        guard let sketch = part.sketch(sketchID) else { throw CADError.nameNotFound("sketch") }
+                        let (profiles, w) = try sketch.extractProfiles()
+                        warnings += w
+                        guard !profiles.isEmpty else { throw CADError.padNoProfile }
+                        let n = sketch.plane.normal
+                        var dist = distance
+                        switch end {
+                        case .dimension:
+                            guard distance > 0 else { throw CADError.padLengthInvalid(distance) }
+                        case .throughAll:
+                            if let h = solid {
+                                let b = try p.bounds(h)
+                                dist = (b.max - b.min).length + 100
+                            } else {
+                                dist = body.triangleCount == 0 ? 1000 : body.bounds.size.length + 100
+                            }
+                        case .upToFace(let faceIndex):
+                            let faces = FaceExtractor.planarFaces(of: try currentMesh())
+                            guard faceIndex >= 0, faceIndex < faces.count else {
+                                throw CADError.booleanFailed("the target face no longer exists — pick another")
+                            }
+                            let d = (faces[faceIndex].centroid - sketch.plane.origin).dot(n)
+                            guard d > 0.01 else {
+                                throw CADError.booleanFailed("the target face is behind the sketch plane")
+                            }
+                            dist = d
+                        }
+                        let tool = try extrudeTool(p, sketch: sketch, mode: mode, distance: dist, taper: taper)
+                        try booleanWithSolid(tool, op)
+                        statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
+                        logger.debug(.feature, "extrude2 ok (engine)", context: ["feature": feature.name, "op": op.rawValue])
+                        continue
+                    }
                     let tool = try DocumentEngine.extrude2Mesh(part: part, sketchID: sketchID, distance: distance, taper: taper, mode: mode, end: end, body: body, warnings: &warnings)
                     switch op {
                     case .join:
@@ -563,6 +662,98 @@ public enum DocumentEngine {
                     statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil,
                                                   message: String(format: "Cascade (OCCT) volume %.2f mm³", volume)))
                     logger.debug(.feature, "cascade pocket ok", context: ["feature": feature.name, "volume": "\(volume)"])
+                    continue
+                }
+                if case .pad(let sketchID, let length) = feature.kind, let p = provider {
+                    // Engine path (Stage 2). Validation mirrors the
+                    // legacy order (sketch, profiles, length). The
+                    // tool is a prism of ALL the sketch's profiles —
+                    // the cascadePad behaviour; the legacy pad used
+                    // only the first profile.
+                    guard let sketch = part.sketch(sketchID) else { throw CADError.nameNotFound("sketch") }
+                    let (profiles, w) = try sketch.extractProfiles()
+                    warnings += w
+                    guard !profiles.isEmpty else { throw CADError.padNoProfile }
+                    guard length > 0 else { throw CADError.padLengthInvalid(length) }
+                    let tool = try p.prismFromSketch(sketch, offset: 0, along: length)
+                    try booleanWithSolid(tool, .join)
+                    statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
+                    logger.debug(.feature, "pad ok (engine)", context: ["feature": feature.name])
+                    continue
+                }
+                if case .pocket(let sketchID, let depth) = feature.kind, let p = provider {
+                    // Engine path (Stage 2): the same tool span the
+                    // legacy pocket prism used (depth below the
+                    // sketch plane to 1 mm above it), cut exactly.
+                    guard depth > 0 else { throw CADError.holeSpecInvalid("pocket depth must be > 0") }
+                    guard let sketch = part.sketch(sketchID) else { throw CADError.nameNotFound("sketch") }
+                    let (profiles, w) = try sketch.extractProfiles()
+                    warnings += w
+                    guard !profiles.isEmpty else { throw CADError.padNoProfile }
+                    let tool = try p.prismFromSketch(sketch, offset: -depth, along: depth + 1)
+                    try booleanWithSolid(tool, .cut)
+                    statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
+                    logger.debug(.feature, "pocket ok (engine)", context: ["feature": feature.name])
+                    continue
+                }
+                if case .revolve(let sketchID, let axisEntityID, let angle) = feature.kind, let p = provider {
+                    // Engine path (Stage 2): outer profile revolved
+                    // by the engine; each hole loop revolved and
+                    // subtracted (the façade revolves one loop at a
+                    // time). Validation mirrors the legacy order.
+                    guard let sketch = part.sketch(sketchID) else { throw CADError.nameNotFound("sketch") }
+                    guard let axisEnt = sketch.entity(axisEntityID),
+                          case .line(_, let a, let b, _) = axisEnt else { throw CADError.revolveAxisMissing }
+                    let (profiles, w) = try sketch.extractProfiles()
+                    warnings += w
+                    guard let profile = profiles.first else { throw CADError.padNoProfile }
+                    guard angle > 0, angle <= 360 else {
+                        throw CADError.transformInvalid("revolve angle \(angle) outside 0–360")
+                    }
+                    let dir = b - a
+                    guard dir.length > 1e-12 else { throw CADError.revolveAxisMissing }
+                    let dnorm = dir.normalized
+                    var signs = Set<Int>()
+                    for pt in profile.outer {
+                        let d = (pt - a).cross(dnorm)
+                        if abs(d) > 1e-9 { signs.insert(d > 0 ? 1 : -1) }
+                    }
+                    if signs.count > 1 { throw CADError.revolveProfileCrossesAxis }
+                    var result = try p.revolveFromSketch(sketch, axisPoint: a, axisDirection: dir, angleDegrees: angle)
+                    for hole in profile.holes {
+                        let h = try p.revolveFromProfile(hole, plane: sketch.plane,
+                                                         axisPoint: a, axisDirection: dir, angleDegrees: angle)
+                        let r = try p.subtract(result, h)
+                        p.release(result); p.release(h)
+                        result = r
+                    }
+                    try booleanWithSolid(result, .join)
+                    statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
+                    logger.debug(.feature, "revolve ok (engine)", context: ["feature": feature.name])
+                    continue
+                }
+                if case .primitive(let kind, let params) = feature.kind, let p = provider {
+                    // Engine path (Stage 2): native OCCT primitive,
+                    // placed where the legacy kernel placed it (the
+                    // provider's placement contract).
+                    let h = try p.primitive(kind: kind, params: params)
+                    try booleanWithSolid(h, .join)
+                    statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
+                    logger.debug(.feature, "primitive ok (engine)", context: ["feature": feature.name])
+                    continue
+                }
+                if case .extrude(let sketchID, let distance, let taper, let mode) = feature.kind, let p = provider {
+                    // Engine path (Stage 2): prism (+ per-segment
+                    // draft when tapered), composed exactly.
+                    guard distance > 0 else { throw CADError.padLengthInvalid(distance) }
+                    guard let sketch = part.sketch(sketchID) else { throw CADError.nameNotFound("sketch") }
+                    let (profiles, w) = try sketch.extractProfiles()
+                    warnings += w
+                    guard !profiles.isEmpty else { throw CADError.padNoProfile }
+                    let tool = try extrudeTool(p, sketch: sketch, mode: mode, distance: distance, taper: taper)
+                    try booleanWithSolid(tool, .join)
+                    statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
+                    logger.debug(.feature, "extrude ok (engine)", context: ["feature": feature.name])
                     continue
                 }
                 let m = try evaluate(feature: feature, part: part, warnings: &warnings)

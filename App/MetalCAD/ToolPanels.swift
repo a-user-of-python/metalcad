@@ -2846,8 +2846,11 @@ struct ThreadShaftPanel: View {
     @State private var profileAngleText: String
     @State private var taperText: String
     @State private var clearanceText: String
+    @State private var depthText: String   // empty = standard depth
 
     private static let presetNames = ["M3", "M4", "M5", "M6", "M8", "M10", "M12", "M16", "M20",
+                                      "M3x0.35", "M4x0.5", "M5x0.5", "M6x0.75", "M8x0.75", "M8x1",
+                                      "M10x1", "M10x1.25", "M12x1", "M12x1.25", "M16x1.5", "M20x1.5",
                                       "1/4-20", "5/16-18", "3/8-16", "1/2-13",
                                       "NPT 1/4", "NPT 3/8", "NPT 1/2"]
     private static let standards: [ThreadStandard] = [.isoMetric, .unc, .npt, .custom]
@@ -2875,6 +2878,7 @@ struct ThreadShaftPanel: View {
         _profileAngleText = State(initialValue: mcFmt(prefilled.profileAngleDegrees))
         _taperText = State(initialValue: mcFmt(prefilled.taperDegrees))
         _clearanceText = State(initialValue: mcFmt(prefilled.clearance))
+        _depthText = State(initialValue: prefilled.depthOverride.map { mcFmt($0) } ?? "")
     }
 
     /// Prefill rule: the spec IS the measured shaft — major
@@ -2907,6 +2911,7 @@ struct ThreadShaftPanel: View {
         majorText = mcFmt(p.majorDiameter)
         pitchText = mcFmt(p.pitch)
         taperText = mcFmt(p.taperDegrees)
+        depthText = ""   // presets are starting points: depth back to standard
     }
 
     private var previewSpec: ThreadSpec {
@@ -2917,6 +2922,8 @@ struct ThreadShaftPanel: View {
         s.profileAngleDegrees = panelNum(profileAngleText, fallback: s.profileAngleDegrees)
         s.taperDegrees = panelNum(taperText, fallback: s.taperDegrees)
         s.clearance = panelNum(clearanceText, fallback: s.clearance)
+        s.depthOverride = depthText.trimmingCharacters(in: .whitespaces).isEmpty
+            ? nil : (Double(depthText) ?? s.depthOverride)
         return s
     }
 
@@ -2927,7 +2934,7 @@ struct ThreadShaftPanel: View {
 
     private var draftSignature: String {
         [presetName, majorText, pitchText, threadLengthText, profileAngleText,
-         taperText, clearanceText, "\(spec.standard)", "\(spec.kind)", "\(spec.hand)",
+         taperText, clearanceText, depthText, "\(spec.standard)", "\(spec.kind)", "\(spec.hand)",
          "\(spec.starts)", "\(spec.modeled)"].joined(separator: "|")
     }
 
@@ -2953,6 +2960,7 @@ struct ThreadShaftPanel: View {
                 }
                 PanelNumberRow(label: "Major Ø (mm)", text: $majorText)
                 PanelNumberRow(label: "Pitch (mm)", text: $pitchText)
+                PanelNumberRow(label: "Depth (mm) — blank = standard", text: $depthText)
                 PanelNumberRow(label: "Length (mm)", text: $threadLengthText)
                 Stepper(value: $spec.starts, in: 1...4) {
                     Text("Starts: \(spec.starts)").mcFont(19)
@@ -2977,7 +2985,12 @@ struct ThreadShaftPanel: View {
                 .mcFont(19)
                 Toggle("Modeled thread (real geometry)", isOn: $spec.modeled)
                     .mcFont(19)
-                Text("Minor Ø \(mcFmt(previewSpec.minorDiameter)) · Pitch Ø \(mcFmt(previewSpec.pitchDiameter))")
+                if !spec.modeled {
+                    Text("COSMETIC thread: no thread geometry is built — the shaft stays plain, and this feature is labelled cosmetic in the rebuild status.")
+                        .mcFont(16, weight: .semibold)
+                        .foregroundStyle(.orange)
+                }
+                Text("Depth \(mcFmt(previewSpec.threadDepth)) · Minor Ø \(mcFmt(previewSpec.minorDiameter)) · Pitch Ø \(mcFmt(previewSpec.pitchDiameter))")
                     .mcFont(16)
                     .foregroundStyle(.secondary)
                 PanelDraftError(model: model)

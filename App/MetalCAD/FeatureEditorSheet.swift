@@ -127,6 +127,7 @@ struct FeatureEditorSheet: View {
     @State private var profileAngleText: String = "60"
     @State private var taperText: String = "0"
     @State private var clearanceText: String = "0"
+    @State private var depthText: String = ""   // empty = standard depth
     // extrude2 (v4)
     @State private var ex2DistanceText: String = "10"
     @State private var ex2TaperText: String = "0"
@@ -172,6 +173,8 @@ struct FeatureEditorSheet: View {
     @State private var circTotalText: String = "360"
 
     private static let presetNames = ["M3", "M4", "M5", "M6", "M8", "M10", "M12", "M16", "M20",
+                                      "M3x0.35", "M4x0.5", "M5x0.5", "M6x0.75", "M8x0.75", "M8x1",
+                                      "M10x1", "M10x1.25", "M12x1", "M12x1.25", "M16x1.5", "M20x1.5",
                                       "1/4-20", "5/16-18", "3/8-16", "1/2-13",
                                       "NPT 1/4", "NPT 3/8", "NPT 1/2"]
     private static let standards: [ThreadStandard] = [.isoMetric, .unc, .npt, .custom]
@@ -271,6 +274,7 @@ struct FeatureEditorSheet: View {
             _profileAngleText = State(initialValue: mcFmt(s.profileAngleDegrees))
             _taperText = State(initialValue: mcFmt(s.taperDegrees))
             _clearanceText = State(initialValue: mcFmt(s.clearance))
+            _depthText = State(initialValue: s.depthOverride.map { mcFmt($0) } ?? "")
         case .extrude2(let sid, let distance, let taper, let mode, let op, let end):
             initialSketch = sid
             _ex2DistanceText = State(initialValue: mcFmt(distance))
@@ -359,6 +363,7 @@ struct FeatureEditorSheet: View {
             _profileAngleText = State(initialValue: mcFmt(s.profileAngleDegrees))
             _taperText = State(initialValue: mcFmt(s.taperDegrees))
             _clearanceText = State(initialValue: mcFmt(s.clearance))
+            _depthText = State(initialValue: s.depthOverride.map { mcFmt($0) } ?? "")
             threadOrigin = origin
             threadAxis = axis
         case .booleanCutPlaceholder:
@@ -384,7 +389,7 @@ struct FeatureEditorSheet: View {
                 extrudeSecondText, loftAID, loftBID, sweepProfileID,
                 sweepPathID, String(describing: spec), presetName,
                 majorText, pitchText, threadLengthText, profileAngleText,
-                taperText, clearanceText, ex2DistanceText, ex2TaperText,
+                taperText, clearanceText, depthText, ex2DistanceText, ex2TaperText,
                 ex2ModeChoice, ex2SecondText, ex2Operation, ex2EndChoice,
                 ex2FaceIndex.description, chamferModeChoice, chamferAText,
                 chamferBText, chamferAngleText, coilRadiusText,
@@ -830,6 +835,7 @@ struct FeatureEditorSheet: View {
             Section("Thread size — all editable") {
                 numberRow("Major diameter (mm)", $majorText)
                 numberRow("Pitch (mm)", $pitchText)
+                numberRow("Depth (mm) — blank = standard", $depthText)
                 numberRow("Length (mm)", $threadLengthText)
                 Stepper("Starts: \(spec.starts)", value: $spec.starts, in: 1...4)
                     .mcFont(20, weight: .semibold)
@@ -858,7 +864,12 @@ struct FeatureEditorSheet: View {
                 .mcFont(20, weight: .semibold)
                 Toggle("Modeled thread (real ridges)", isOn: $spec.modeled)
                     .mcFont(20, weight: .semibold)
-                Text("Minor Ø \(mcFmt(previewSpec.minorDiameter)) · Pitch Ø \(mcFmt(previewSpec.pitchDiameter)) — from the numbers above.")
+                if !spec.modeled {
+                    Text("COSMETIC thread: no thread geometry is built — the shaft stays plain, and this feature is labelled cosmetic in the rebuild status.")
+                        .mcFont(16, weight: .semibold)
+                        .foregroundStyle(.orange)
+                }
+                Text("Depth \(mcFmt(previewSpec.threadDepth)) · Minor Ø \(mcFmt(previewSpec.minorDiameter)) · Pitch Ø \(mcFmt(previewSpec.pitchDiameter)) — from the numbers above.")
                     .mcFont(16)
                     .foregroundStyle(.secondary)
             }
@@ -870,6 +881,7 @@ struct FeatureEditorSheet: View {
         majorText = mcFmt(preset.majorDiameter)
         pitchText = mcFmt(preset.pitch)
         taperText = mcFmt(preset.taperDegrees)
+        depthText = ""   // presets are starting points: depth back to standard
         spec.standard = preset.standard
     }
 
@@ -883,6 +895,8 @@ struct FeatureEditorSheet: View {
         s.profileAngleDegrees = Double(profileAngleText) ?? s.profileAngleDegrees
         s.taperDegrees = Double(taperText) ?? s.taperDegrees
         s.clearance = Double(clearanceText) ?? s.clearance
+        s.depthOverride = depthText.trimmingCharacters(in: .whitespaces).isEmpty
+            ? nil : (Double(depthText) ?? s.depthOverride)
         return s
     }
 
@@ -984,6 +998,8 @@ struct FeatureEditorSheet: View {
             s.profileAngleDegrees = num(profileAngleText, fallback: old.profileAngleDegrees)
             s.taperDegrees = num(taperText, fallback: old.taperDegrees)
             s.clearance = num(clearanceText, fallback: old.clearance)
+            s.depthOverride = depthText.trimmingCharacters(in: .whitespaces).isEmpty
+                ? nil : (Double(depthText) ?? old.depthOverride)
             return .threadShaft(spec: s)
         case .linearPattern(_, let oldSpacing):
             let spacing = Vec3(num(spacingX, fallback: oldSpacing.x),
@@ -1124,6 +1140,8 @@ struct FeatureEditorSheet: View {
             s.profileAngleDegrees = num(profileAngleText, fallback: s.profileAngleDegrees)
             s.taperDegrees = num(taperText, fallback: s.taperDegrees)
             s.clearance = num(clearanceText, fallback: s.clearance)
+            s.depthOverride = depthText.trimmingCharacters(in: .whitespaces).isEmpty
+                ? nil : (Double(depthText) ?? s.depthOverride)
             return .threadOnShaft(spec: s, origin: threadOrigin, axis: threadAxis)
         case .booleanCutPlaceholder:
             return .booleanCutPlaceholder

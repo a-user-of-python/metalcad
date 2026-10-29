@@ -55,6 +55,18 @@ public protocol CascadeKernelProvider: AnyObject {
     /// polyline path.
     func sweep(profilePlane: Plane3, profile: [Vec2], path: [Vec3]) throws -> Int
 
+    /// A REAL helical thread segment for a MODELED spec, in
+    /// canonical placement (axis +Z, base at the origin,
+    /// z in [0, spec.length]) — façade `mc_thread`. External
+    /// specs return the complete threaded segment (root core +
+    /// fused helical ridge, exact end faces). INTERNAL specs
+    /// return the groove TOOL solid instead — the void a mating
+    /// ridge sweeps out, spanning the minor-to-major annulus —
+    /// which the kit subtracts from a blank or a bored body.
+    /// Cosmetic specs never reach this method: the kit builds
+    /// plain geometry for them and labels them cosmetic.
+    func thread(spec: ThreadSpec) throws -> Int
+
     /// Exact booleans (OCCT BRepAlgoAPI). Inputs unchanged.
     func unite(_ a: Int, _ b: Int) throws -> Int
     func subtract(_ a: Int, _ b: Int) throws -> Int

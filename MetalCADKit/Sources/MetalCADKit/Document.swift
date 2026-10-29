@@ -269,7 +269,8 @@ public enum DocumentEngine {
             case .cascadePad, .cascadePocket,
                  .pad, .pocket, .revolve, .primitive, .extrude, .extrude2,
                  .fillet, .chamfer, .shell, .chamfer2, .filletEdges, .chamferEdges,
-                 .draftBody, .rib, .splitBody:
+                 .draftBody, .rib, .splitBody,
+                 .loft, .sweep, .hole, .coil, .pipe, .threadShaft, .threadOnShaft:
                 return true
             default: return false
             }
@@ -362,6 +363,72 @@ public enum DocumentEngine {
                 out.append(i)
             }
             return out
+        }
+
+        /// Row-major 3x4 for the provider's transform: the local
+        /// axes (u, v, w) map to the COLUMNS, so a local point
+        /// (x, y, z) lands at u*x + v*y + w*z + t.
+        func basisMatrix(_ u: Vec3, _ v: Vec3, _ w: Vec3, _ t: Vec3) -> [Double] {
+            [u.x, v.x, w.x, t.x,
+             u.y, v.y, w.y, t.y,
+             u.z, v.z, w.z, t.z]
+        }
+
+        /// A proper rotation (det +1 — a reflection would flip a
+        /// thread's hand) whose local +Z lands on the unit `axis`,
+        /// with the local origin at `origin`.
+        func axisPlacement(axis: Vec3, origin: Vec3) -> [Double] {
+            let a = axis.normalized
+            let helper = abs(a.y) < 0.9 ? Vec3(0, 1, 0) : Vec3(1, 0, 0)
+            let u = (helper - a * helper.dot(a)).normalized
+            let v = a.cross(u)
+            return basisMatrix(u, v, a, origin)
+        }
+
+        /// An engine cylinder placed on a sketch plane: axis on
+        /// the plane normal through `center`, spanning the axial
+        /// positions [above − height, above] — the legacy hole
+        /// tool's exact placement.
+        func holeCylinder(_ p: any CascadeKernelProvider, plane: Plane3, center: Vec3,
+                          diameter: Double, height: Double, above: Double) throws -> Int {
+            let raw = try p.primitive(kind: .cylinder,
+                                      params: ["diameter": diameter, "height": height])
+            let m = basisMatrix(plane.xAxis, plane.yAxis, plane.normal,
+                                center + plane.normal * (above - height))
+            let moved = try p.transform(raw, matrix: m)
+            p.release(raw)
+            return moved
+        }
+
+        /// The running body's axial span within a cylinder column
+        /// around (origin, axis): every triangle lying WHOLLY
+        /// inside the column votes with its axial extent — the
+        /// measurement the legacy thread-on-shaft used (a
+        /// neighbouring hole's wall or a plate corner, whose
+        /// triangles only partly enter the column, cannot stretch
+        /// the span). Seeds [0, minSpan] like the legacy code.
+        func columnSpan(mesh: Mesh, origin: Vec3, axis: Vec3,
+                        radius: Double, minSpan: Double) -> (lo: Double, hi: Double) {
+            var lo = 0.0
+            var hi = minSpan
+            for t in 0..<mesh.triangleCount {
+                var sMin = Double.infinity
+                var sMax = -Double.infinity
+                var inside = true
+                for k in 0..<3 {
+                    let v = mesh.vertices[Int(mesh.indices[t * 3 + k])]
+                    let d = v - origin
+                    let s = d.dot(axis)
+                    if (d - axis * s).length > radius { inside = false; break }
+                    sMin = min(sMin, s)
+                    sMax = max(sMax, s)
+                }
+                if inside {
+                    lo = min(lo, sMin)
+                    hi = max(hi, sMax)
+                }
+            }
+            return (lo, hi)
         }
 
         /// An axis-aligned engine box with its min corner at `mn`
@@ -742,6 +809,53 @@ public enum DocumentEngine {
                     continue
                 }
                 if case .threadShaft(let spec) = feature.kind {
+                    if let p = provider {
+                        // Engine path (Stage 4): a MODELED thread is
+                        // the engine's real helical segment (mc_thread),
+                        // composed exactly. A COSMETIC spec (the
+                        // user's own choice in the editor — never a
+                        // silent default) builds a plain shaft and
+                        // says so in its status.
+                        let (vspec, tw) = try spec.validated()
+                        warnings += tw
+                        if !vspec.modeled {
+                            let d = vspec.kind == .external ? vspec.majorDiameter : vspec.minorDiameter
+                            let cyl = try p.primitive(kind: .cylinder,
+                                                      params: ["diameter": d, "height": vspec.length])
+                            try booleanWithSolid(cyl, .join)
+                            statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil,
+                                                          message: "Cosmetic thread — plain shaft, no thread geometry (your choice in the editor)."))
+                            logger.debug(.feature, "thread shaft ok (cosmetic)", context: ["feature": feature.name])
+                            continue
+                        }
+                        if vspec.kind == .external {
+                            let seg = try p.thread(spec: vspec)
+                            try booleanWithSolid(seg, .join)
+                        } else {
+                            // Internal: a threaded sleeve — a
+                            // major-diameter blank bored at the
+                            // minor diameter, minus the engine's
+                            // groove tool. (The legacy mesh path
+                            // never built a real internal solid:
+                            // it appended inward ridge triangles
+                            // to a minor-diameter cylinder.)
+                            let blank = try p.primitive(kind: .cylinder,
+                                                        params: ["diameter": vspec.majorDiameter, "height": vspec.length])
+                            let boreRaw = try p.primitive(kind: .cylinder,
+                                                          params: ["diameter": vspec.minorDiameter, "height": vspec.length + 2])
+                            let bore = try p.transform(boreRaw, matrix: basisMatrix(Vec3(1, 0, 0), Vec3(0, 1, 0), Vec3(0, 0, 1), Vec3(0, 0, -1)))
+                            p.release(boreRaw)
+                            let bored = try p.subtract(blank, bore)
+                            p.release(blank); p.release(bore)
+                            let tool = try p.thread(spec: vspec)
+                            let sleeve = try p.subtract(bored, tool)
+                            p.release(bored); p.release(tool)
+                            try booleanWithSolid(sleeve, .join)
+                        }
+                        statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
+                        logger.debug(.feature, "thread shaft ok (engine)", context: ["feature": feature.name])
+                        continue
+                    }
                     // Threads merge WITHOUT a raw CSG union of the ridge:
                     // BSP clipping dices body faces against the helix and
                     // explodes the triangle count (169k for one M10 shaft
@@ -815,6 +929,70 @@ public enum DocumentEngine {
                     continue
                 }
                 if case .threadOnShaft(let spec, let origin, let axis) = feature.kind {
+                    if let p = provider, let h = solid {
+                        // Engine path (Stage 4): the span is measured
+                        // from the body's own tessellation with the
+                        // legacy column vote (the selection's actual
+                        // geometry), then the work is exact solids:
+                        // external = cut the plain cylinder out and
+                        // unite the real threaded segment; internal
+                        // = subtract the engine's groove tool (the
+                        // hole-wall case the legacy path refuses).
+                        let (vspec, tw) = try spec.validated()
+                        warnings += tw
+                        if !vspec.modeled {
+                            statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil,
+                                                          message: "Cosmetic thread — the shaft is unchanged; no thread geometry was cut (your choice in the editor)."))
+                            logger.debug(.feature, "thread on shaft ok (cosmetic)", context: ["feature": feature.name])
+                            continue
+                        }
+                        let ax = axis.normalized
+                        let mesh = try currentMesh()
+                        let rOut = vspec.majorDiameter / 2
+                        let (lo, hi) = columnSpan(mesh: mesh, origin: origin, axis: ax,
+                                                  radius: rOut + 0.5, minSpan: vspec.length)
+                        var effSpec = vspec
+                        effSpec.length = hi - lo
+                        if effSpec.taperDegrees > 0 {
+                            // Same guard as legacy: a longer span
+                            // shrinks a tapered thread's far end
+                            // further; keep it from closing past the
+                            // minor diameter.
+                            let maxLen = (effSpec.majorDiameter - effSpec.minorDiameter - 0.1)
+                                / (2 * tan(effSpec.taperDegrees * .pi / 180))
+                            effSpec.length = min(effSpec.length, max(maxLen, vspec.length))
+                        }
+                        let effOrigin = origin + ax * lo
+                        let place = axisPlacement(axis: ax, origin: effOrigin)
+                        if vspec.kind == .external {
+                            // The cutter is a hair WIDER than the
+                            // shaft (+0.05), exactly as legacy: a
+                            // coincident cutter can leave smooth
+                            // patches of the old wall in place.
+                            let cutterRaw = try p.primitive(kind: .cylinder,
+                                                            params: ["diameter": 2 * (rOut + 0.05), "height": effSpec.length + 2])
+                            let cutter = try p.transform(cutterRaw, matrix: axisPlacement(axis: ax, origin: effOrigin - ax))
+                            p.release(cutterRaw)
+                            let rest = try p.subtract(h, cutter)
+                            p.release(cutter)
+                            let segRaw = try p.thread(spec: effSpec)
+                            let seg = try p.transform(segRaw, matrix: place)
+                            p.release(segRaw)
+                            let joined = try p.unite(rest, seg)
+                            p.release(rest); p.release(seg)
+                            adoptSolid(p, joined)
+                        } else {
+                            let toolRaw = try p.thread(spec: effSpec)
+                            let tool = try p.transform(toolRaw, matrix: place)
+                            p.release(toolRaw)
+                            let cut = try p.subtract(h, tool)
+                            p.release(tool)
+                            adoptSolid(p, cut)
+                        }
+                        statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
+                        logger.debug(.feature, "thread on shaft ok (engine)", context: ["feature": feature.name])
+                        continue
+                    }
                     // Thread an EXISTING shaft (fitted by the app from a
                     // tapped pillar): cut the plain cylinder out, union
                     // the threaded core, append the ridge trimmed to
@@ -1023,6 +1201,190 @@ public enum DocumentEngine {
                     try booleanWithSolid(tool, .join)
                     statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
                     logger.debug(.feature, "extrude ok (engine)", context: ["feature": feature.name])
+                    continue
+                }
+                if case .loft(let idA, let idB) = feature.kind, let p = provider {
+                    // Engine path (Stage 4): a ruled loft through
+                    // the two sketches' first-profile outer loops —
+                    // the legacy loft's straight interpolation, on
+                    // the engine's real surfaces.
+                    guard let skA = part.sketch(idA), let skB = part.sketch(idB) else { throw CADError.nameNotFound("sketch") }
+                    let (profilesA, wA) = try skA.extractProfiles()
+                    warnings += wA
+                    guard let profA = profilesA.first, profA.outer.count >= 3 else { throw CADError.padNoProfile }
+                    let (profilesB, wB) = try skB.extractProfiles()
+                    warnings += wB
+                    guard let profB = profilesB.first, profB.outer.count >= 3 else { throw CADError.padNoProfile }
+                    let h = try p.loft(profiles: [(plane: skA.plane, points: profA.outer),
+                                                  (plane: skB.plane, points: profB.outer)], ruled: true)
+                    try booleanWithSolid(h, .join)
+                    statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
+                    logger.debug(.feature, "loft ok (engine)", context: ["feature": feature.name])
+                    continue
+                }
+                if case .sweep(let profileID, let pathID) = feature.kind, let p = provider {
+                    // Engine path (Stage 4): the profile loop is
+                    // re-centred onto the path start in the legacy
+                    // first-segment frame (centroid ON the path, 2D
+                    // coordinates preserved), then the engine
+                    // sweeps it along the path polyline.
+                    guard let skP = part.sketch(profileID), let skPath = part.sketch(pathID) else { throw CADError.nameNotFound("sketch") }
+                    let loop = try ProfileLoop.worldLoop(sketch: skP)
+                    let path = try DocumentEngine.pathPoints(sketch: skPath)
+                    guard path.count >= 2 else { throw CADError.sweepPathInvalid("path needs at least 2 points") }
+                    let centroid = loop.points.reduce(Vec3.zero) { $0 + $1 } * (1.0 / Double(loop.points.count))
+                    let profile2: [Vec2] = loop.points.map { w in
+                        let d = w - centroid
+                        return Vec2(d.dot(skP.plane.xAxis), d.dot(skP.plane.yAxis))
+                    }
+                    let tangent = (path[1] - path[0]).normalized
+                    let helper = abs(tangent.y) < 0.9 ? Vec3(0, 1, 0) : Vec3(1, 0, 0)
+                    let fx = helper.cross(tangent).normalized
+                    let fy = tangent.cross(fx).normalized
+                    let frame = Plane3(origin: path[0], xAxis: fx, yAxis: fy)
+                    let h = try p.sweep(profilePlane: frame, profile: profile2, path: path)
+                    try booleanWithSolid(h, .join)
+                    statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
+                    logger.debug(.feature, "sweep ok (engine)", context: ["feature": feature.name])
+                    continue
+                }
+                if case .pipe(let pathSketchID, let radius) = feature.kind, let p = provider {
+                    // Engine path (Stage 4): the legacy
+                    // construction — a circular profile
+                    // perpendicular to the path start, swept along
+                    // the path — as ONE engine solid instead of
+                    // CSG-unioned segment prisms. The profile is a
+                    // 64-gon (legacy tessellated 32).
+                    guard radius > 0 else { throw CADError.primitiveParamInvalid("pipe radius must be > 0") }
+                    guard let sketch = part.sketch(pathSketchID) else { throw CADError.nameNotFound("sketch") }
+                    let path = try DocumentEngine.pathPoints(sketch: sketch)
+                    guard path.count >= 2 else { throw CADError.sweepPathInvalid("pipe path needs at least 2 points") }
+                    let tangent = (path[1] - path[0]).normalized
+                    let helper = abs(tangent.y) < 0.9 ? Vec3(0, 1, 0) : Vec3(1, 0, 0)
+                    let u = helper.cross(tangent).normalized
+                    let v = tangent.cross(u).normalized
+                    let plane = Plane3(origin: path[0], xAxis: u, yAxis: v)
+                    var profile: [Vec2] = []
+                    for i in 0..<64 {
+                        let a = Double(i) / 64 * 2 * Double.pi
+                        profile.append(Vec2(radius * cos(a), radius * sin(a)))
+                    }
+                    let h = try p.sweep(profilePlane: plane, profile: profile, path: path)
+                    try booleanWithSolid(h, .join)
+                    statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
+                    logger.debug(.feature, "pipe ok (engine)", context: ["feature": feature.name])
+                    continue
+                }
+                if case .coil(let radius, let pitch, let turns, let wireRadius) = feature.kind, let p = provider {
+                    // Engine path (Stage 4): the wire profile
+                    // swept by the engine along a sampled helix —
+                    // one solid instead of a transported-ring mesh.
+                    // 16 spine points per turn (the legacy coil's
+                    // own ring density), capped at 1024 points.
+                    guard radius > wireRadius, wireRadius > 0, pitch > 0, turns > 0.25 else {
+                        throw CADError.primitiveParamInvalid("coil needs radius > wire radius, pitch > 0, turns > 0.25")
+                    }
+                    let totalSteps = min(1024, max(16, Int(ceil(turns * 16))))
+                    var path: [Vec3] = []
+                    path.reserveCapacity(totalSteps + 1)
+                    for i in 0...totalSteps {
+                        let th = Double(i) / Double(totalSteps) * turns * 2 * Double.pi
+                        path.append(Vec3(radius * cos(th), radius * sin(th), pitch * th / (2 * Double.pi)))
+                    }
+                    let t0 = Vec3(0, radius, pitch / (2 * Double.pi)).normalized
+                    let u = Vec3(1, 0, 0).cross(t0).normalized
+                    let v = t0.cross(u).normalized
+                    let plane = Plane3(origin: path[0], xAxis: u, yAxis: v)
+                    var profile: [Vec2] = []
+                    for i in 0..<32 {
+                        let a = Double(i) / 32 * 2 * Double.pi
+                        profile.append(Vec2(wireRadius * cos(a), wireRadius * sin(a)))
+                    }
+                    let h = try p.sweep(profilePlane: plane, profile: profile, path: path)
+                    try booleanWithSolid(h, .join)
+                    statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
+                    logger.debug(.feature, "coil ok (engine)", context: ["feature": feature.name])
+                    continue
+                }
+                if case .hole(let sketchID, let diameter, let depth, let kind) = feature.kind, let p = provider {
+                    // Engine path (Stage 4): the legacy drill tool
+                    // rebuilt as exact solids — one cylinder per
+                    // site (points drill at the feature diameter,
+                    // circles at their own), plus the counterbore
+                    // cylinder / countersink cone where the kind
+                    // asks — united and cut exactly. Validation
+                    // order and tool placement mirror evaluate().
+                    guard diameter > 0 else { throw CADError.holeSpecInvalid("diameter must be > 0") }
+                    guard let sketch = part.sketch(sketchID) else { throw CADError.nameNotFound("sketch") }
+                    var sites: [(center: Vec2, diameter: Double)] = []
+                    for e in sketch.entities where !e.isConstruction {
+                        switch e {
+                        case .point(_, let at, _):
+                            sites.append((at, diameter))
+                        case .circle(_, let c, let r, _):
+                            sites.append((c, r > 0 ? 2 * r : diameter))
+                        default: break
+                        }
+                    }
+                    guard !sites.isEmpty else { throw CADError.holeSpecInvalid("the hole sketch needs a point or circle center") }
+                    let through = depth <= 0
+                    let cutDepth = through ? 10_000.0 : depth
+                    let toolHeight = through ? 2 * cutDepth : cutDepth + 1
+                    let toolAbove = through ? cutDepth : 1.0
+                    // Kind guards hoisted: they depend only on the
+                    // feature (legacy threw them from the first
+                    // site's iteration — same error, same code).
+                    switch kind {
+                    case .simple: break
+                    case .counterbore(let cbD, let cbDepth):
+                        guard cbD > diameter, cbDepth > 0, cbDepth < cutDepth else {
+                            throw CADError.holeSpecInvalid("counterbore must be wider and shallower than the hole")
+                        }
+                    case .countersink(let angle):
+                        guard angle > 0, angle < 180 else { throw CADError.holeSpecInvalid("countersink angle 0-180") }
+                    }
+                    var tool: Int? = nil
+                    func addTool(_ hTool: Int) throws {
+                        if let t = tool {
+                            let u2 = try p.unite(t, hTool)
+                            p.release(t); p.release(hTool)
+                            tool = u2
+                        } else {
+                            tool = hTool
+                        }
+                    }
+                    for site in sites {
+                        let center3 = sketch.plane.toWorld(site.center)
+                        try addTool(try holeCylinder(p, plane: sketch.plane, center: center3,
+                                                     diameter: site.diameter, height: toolHeight, above: toolAbove))
+                        switch kind {
+                        case .simple: break
+                        case .counterbore(let cbD, let cbDepth):
+                            if site.diameter < cbD {
+                                try addTool(try holeCylinder(p, plane: sketch.plane, center: center3,
+                                                             diameter: cbD, height: cbDepth + 1, above: 1))
+                            }
+                        case .countersink(let angle):
+                            let coneH = (diameter / 2) / tan(angle / 2 * .pi / 180)
+                            let coneRaw = try p.primitive(kind: .cone, params: ["diameter": diameter, "height": coneH])
+                            // The legacy cone (wide ring at local
+                            // z = 0, apex at z = coneH) mapped by
+                            // orientCylinder: local z lands at
+                            // (1 − z) along the normal — a proper
+                            // rotation (the y flip is invisible on
+                            // a surface of revolution).
+                            let m = basisMatrix(sketch.plane.xAxis, sketch.plane.yAxis * -1,
+                                                sketch.plane.normal * -1,
+                                                center3 + sketch.plane.normal)
+                            let cone = try p.transform(coneRaw, matrix: m)
+                            p.release(coneRaw)
+                            try addTool(cone)
+                        }
+                    }
+                    guard let toolSolid = tool else { throw CADError.holeSpecInvalid("the hole sketch needs a point or circle center") }
+                    try booleanWithSolid(toolSolid, .cut)
+                    statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
+                    logger.debug(.feature, "hole ok (engine)", context: ["feature": feature.name])
                     continue
                 }
                 let m = try evaluate(feature: feature, part: part, warnings: &warnings)

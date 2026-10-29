@@ -197,4 +197,57 @@ final class ThreadTests: XCTestCase {
         let back = try JSONDecoder().decode(ThreadSpec.self, from: data)
         XCTAssertEqual(back, s)
     }
+
+    // Stage 4: ISO metric FINE presets are starting points in the
+    // same table (the spec stays fully editable afterwards).
+    func testFinePresets() throws {
+        let m10f = try ThreadSpec.preset("M10x1.25")
+        XCTAssertEqual(m10f.majorDiameter, 10)
+        XCTAssertEqual(m10f.pitch, 1.25)
+        let m8f = try ThreadSpec.preset("M8x1")
+        XCTAssertEqual(m8f.majorDiameter, 8)
+        XCTAssertEqual(m8f.pitch, 1.0)
+        XCTAssertNil(m10f.depthOverride, "presets never lock a depth")
+    }
+
+    // Stage 4: the depth override drives threadDepth (and so the
+    // minor diameter and the engine's mc_thread depth); nil keeps
+    // the standard depth.
+    func testDepthOverride() throws {
+        var s = try ThreadSpec.preset("M10")
+        XCTAssertNil(s.depthOverride)
+        XCTAssertEqual(s.threadDepth, 0.61343 * 1.5, accuracy: 1e-9)
+        s.depthOverride = 0.5
+        XCTAssertEqual(s.threadDepth, 0.5, accuracy: 1e-12)
+        XCTAssertEqual(s.minorDiameter, 9.0, accuracy: 1e-12)
+        let (v, _) = try s.validated()
+        XCTAssertEqual(v.threadDepth, 0.5, accuracy: 1e-12)
+    }
+
+    // Stage 4: an impossible depth override fails with a coded
+    // error (TH503), never a silent bad solid.
+    func testDepthOverrideTooDeepThrows() throws {
+        var s = try ThreadSpec.preset("M10")
+        s.depthOverride = 5.0  // == major/2: cuts through the core
+        XCTAssertThrowsError(try s.validated()) { e in
+            XCTAssertEqual((e as? CADError)?.code, "MCAD-TH503")
+        }
+        s.depthOverride = -1
+        XCTAssertThrowsError(try s.validated()) { e in
+            XCTAssertEqual((e as? CADError)?.code, "MCAD-TH503")
+        }
+    }
+
+    // Stage 4: documents written before depthOverride existed
+    // (the key absent from the JSON) decode with a nil override.
+    func testSpecDecodesWithoutDepthOverrideKey() throws {
+        var s = try ThreadSpec.preset("M10")
+        s.depthOverride = nil
+        let data = try JSONEncoder().encode(s)
+        let json = String(data: data, encoding: .utf8) ?? ""
+        XCTAssertFalse(json.contains("depthOverride"))
+        let back = try JSONDecoder().decode(ThreadSpec.self, from: data)
+        XCTAssertNil(back.depthOverride)
+        XCTAssertEqual(back, s)
+    }
 }

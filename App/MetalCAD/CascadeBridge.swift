@@ -297,6 +297,29 @@ final class CascadeKernelBridge: CascadeKernelProvider {
         }
     }
 
+    func thread(spec: ThreadSpec) throws -> Int {
+        try locked {
+            var err: Int32 = 0
+            // Canonical placement (façade contract): axis +Z, base
+            // at the origin, segment z in [0, length]. External →
+            // the complete threaded segment; internal → the groove
+            // TOOL the kit subtracts from a bored blank. The kit
+            // passes the VALIDATED spec, so the façade's own
+            // validation agrees by construction.
+            guard let h = mc_thread(spec.majorDiameter, spec.pitch,
+                                    spec.threadDepth,
+                                    spec.profileAngleDegrees,
+                                    Int32(spec.starts),
+                                    spec.kind == .internal ? 1 : 0,
+                                    spec.hand == .left ? 1 : 0,
+                                    spec.taperDegrees, spec.clearance,
+                                    spec.length, &err) else {
+                throw CADError.kernelOperationFailed(Self.lastError())
+            }
+            return try own(h)
+        }
+    }
+
     // MARK: Booleans / finishing / transforms
 
     func unite(_ a: Int, _ b: Int) throws -> Int {

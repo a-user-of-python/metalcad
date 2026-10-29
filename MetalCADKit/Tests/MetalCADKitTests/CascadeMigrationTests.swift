@@ -85,8 +85,71 @@ final class StubCascadeProvider: CascadeKernelProvider {
 
     func sweep(profilePlane: Plane3, profile: [Vec2], path: [Vec3]) throws -> Int {
         calls.append("sweep")
+        // Ring-transport stand-in for the engine's one-shot sweep:
+        // the kit's SweepTessellator CSG-unions one prism per path
+        // segment and blows its 60000-triangle cap on long paths
+        // (a 3-turn coil) — the real engine has no such cap, so the
+        // stub stitches the transported rings into a single mesh
+        // instead. Volume is exact on straight runs and within a
+        // few percent on gentle bends.
         let loop = profile.map { profilePlane.toWorld($0) }
-        return store(try SweepTessellator.sweep(profileLoop: loop, profilePlane: profilePlane, path: path))
+        guard loop.count >= 3, path.count >= 2 else { throw CADError.sweepPathInvalid("stub sweep: bad input") }
+        let centroid = loop.reduce(Vec3.zero) { $0 + $1 } * (1.0 / Double(loop.count))
+        let rel = loop.map { $0 - centroid }
+        func ring(at point: Vec3, tangent: Vec3) -> [Vec3] {
+            let helper = abs(tangent.y) < 0.9 ? Vec3(0, 1, 0) : Vec3(1, 0, 0)
+            let fx = helper.cross(tangent).normalized
+            let fy = tangent.cross(fx).normalized
+            return rel.map { d in point + fx * d.dot(profilePlane.xAxis) + fy * d.dot(profilePlane.yAxis) }
+        }
+        // One ring pair per segment (start + end in the segment's
+        // own frame); consecutive segments share the corner point
+        // but not the frame, and the wedge between the two corner
+        // rings is stitched too — a single ring per path point
+        // twists the strip at corners and halves the volume.
+        var rings: [[Vec3]] = []
+        for s in 0..<(path.count - 1) {
+            let t = (path[s + 1] - path[s]).normalized
+            rings.append(ring(at: path[s], tangent: t))
+            rings.append(ring(at: path[s + 1], tangent: t))
+        }
+        var builder = MeshBuilder()
+        let rv = rings.map { r in r.map { builder.vertex($0) } }
+        for s in 0..<(rings.count - 1) {
+            for i in 0..<loop.count {
+                let j = (i + 1) % loop.count
+                builder.quad(rv[s][i], rv[s][j], rv[s + 1][j], rv[s + 1][i])
+            }
+        }
+        let c0 = builder.vertex(path[0]), c1 = builder.vertex(path[path.count - 1])
+        for i in 0..<loop.count {
+            let j = (i + 1) % loop.count
+            builder.triangle(c0, rv[0][j], rv[0][i])
+            builder.triangle(c1, rv[rings.count - 1][i], rv[rings.count - 1][j])
+        }
+        var mesh = builder.mesh
+        if mesh.signedVolume < 0 {
+            var idx: [UInt32] = []
+            for t in 0..<mesh.triangleCount { idx += [mesh.indices[t * 3], mesh.indices[t * 3 + 2], mesh.indices[t * 3 + 1]] }
+            mesh = Mesh(vertices: mesh.vertices, indices: idx)
+        }
+        return store(mesh)
+    }
+
+    func thread(spec: ThreadSpec) throws -> Int {
+        calls.append("thread")
+        let (vspec, _) = try spec.validated()
+        if vspec.kind == .external {
+            // The kit's own modeled-thread mesh (core + ridge).
+            return store(try ThreadTessellator.threadedShaft(spec: vspec))
+        }
+        // Internal: the groove TOOL, approximated as the plain
+        // annulus between the minor and major cylinders — the
+        // right span and placement for wiring tests (the real
+        // provider returns the exact helical void).
+        let outer = try Tessellation.cylinder(radius: vspec.majorDiameter / 2, height: vspec.length)
+        let inner = try Tessellation.cylinder(radius: vspec.minorDiameter / 2, height: vspec.length)
+        return store(try CSG.subtract(outer, inner))
     }
 
     func unite(_ a: Int, _ b: Int) throws -> Int { calls.append("unite"); return store(try CSG.union(try mesh(a), try mesh(b))) }
@@ -602,6 +665,249 @@ final class CascadeMigrationTests: XCTestCase {
         XCTAssertFalse(stub.calls.contains("fillet"), "fillet after materialization stays legacy: \(stub.calls)")
         XCTAssertLessThan(r.mesh.volume, 1600)
         XCTAssertGreaterThan(r.mesh.volume, 1400)
+    }
+
+    // MARK: Stage 4 (loft, sweep, hole, coil, pipe, threads)
+
+    private func topSketch(z: Double, _ build: (inout Sketch) -> Void) -> Sketch {
+        var s = Sketch(name: "s", plane: Plane3(origin: Vec3(0, 0, z), xAxis: Vec3(1, 0, 0), yAxis: Vec3(0, 1, 0)))
+        build(&s)
+        return s
+    }
+
+    /// Stage 4: .loft builds through the provider (ruled).
+    func testLoftRoutesThroughProvider() {
+        let stub = StubCascadeProvider()
+        DocumentEngine.cascadeProvider = stub
+        var part = Part(name: "Loft")
+        let a = topSketch(z: 0) { $0.addRectangle(from: Vec2(-10, -5), to: Vec2(10, 5)) }
+        let b = topSketch(z: 10) { $0.addRectangle(from: Vec2(-5, -5), to: Vec2(5, 5)) }
+        part.sketches += [a, b]
+        part.features.append(Feature(name: "Loft", kind: .loft(sketchA: a.id, sketchB: b.id)))
+        let r = DocumentEngine.rebuild(part: part)
+        XCTAssertNil(r.firstError)
+        XCTAssertTrue(stub.calls.contains("loft"), "loft via engine: \(stub.calls)")
+        // Frustum between 200 and 100 mm^2 over 10 mm: ~1491.
+        XCTAssertEqual(r.mesh.volume, 1491, accuracy: 60)
+    }
+
+    /// Stage 4: .sweep re-centres the profile on the path and
+    /// sweeps through the provider.
+    func testSweepRoutesThroughProvider() {
+        let stub = StubCascadeProvider()
+        DocumentEngine.cascadeProvider = stub
+        var part = Part(name: "Sweep")
+        let prof = topSketch(z: 0) { $0.addRectangle(from: Vec2(-2, -2), to: Vec2(2, 2)) }
+        var path = Sketch(name: "path")
+        path.addLine(Vec2(0, 0), Vec2(30, 0))
+        path.addLine(Vec2(30, 0), Vec2(30, 20))
+        part.sketches += [prof, path]
+        part.features.append(Feature(name: "Sweep", kind: .sweep(profileSketchID: prof.id, pathSketchID: path.id)))
+        let r = DocumentEngine.rebuild(part: part)
+        XCTAssertNil(r.firstError)
+        XCTAssertTrue(stub.calls.contains("sweep"), "sweep via engine: \(stub.calls)")
+        XCTAssertGreaterThan(r.mesh.volume, 500)  // 16 mm^2 x ~50 mm path
+        DocumentEngine.cascadeProvider = nil
+        let legacy = DocumentEngine.rebuild(part: part)
+        XCTAssertNil(legacy.firstError)
+        XCTAssertEqual(r.mesh.volume, legacy.mesh.volume, accuracy: legacy.mesh.volume * 0.25)
+    }
+
+    /// Stage 4: .pipe sweeps its circular profile through the
+    /// provider (recorded as a sweep).
+    func testPipeRoutesThroughProvider() {
+        let stub = StubCascadeProvider()
+        DocumentEngine.cascadeProvider = stub
+        var part = Part(name: "Pipe")
+        var path = Sketch(name: "path")
+        path.addLine(Vec2(0, 0), Vec2(30, 0))
+        path.addLine(Vec2(30, 0), Vec2(30, 20))
+        part.sketches.append(path)
+        part.features.append(Feature(name: "Pipe", kind: .pipe(pathSketchID: path.id, radius: 2)))
+        let r = DocumentEngine.rebuild(part: part)
+        XCTAssertNil(r.firstError)
+        XCTAssertTrue(stub.calls.contains("sweep"), "pipe via engine sweep: \(stub.calls)")
+        XCTAssertGreaterThan(r.mesh.volume, 400)  // ~pi*4*50 = 628 less the bend
+    }
+
+    /// Stage 4: .coil sweeps the wire profile along the helix
+    /// through the provider.
+    func testCoilRoutesThroughProvider() {
+        let stub = StubCascadeProvider()
+        DocumentEngine.cascadeProvider = stub
+        var part = Part(name: "Coil")
+        part.features.append(Feature(name: "Coil", kind: .coil(radius: 10, pitch: 5, turns: 3, wireRadius: 1)))
+        let r = DocumentEngine.rebuild(part: part)
+        XCTAssertNil(r.firstError)
+        XCTAssertTrue(stub.calls.contains("sweep"), "coil via engine sweep: \(stub.calls)")
+        // Tube: pi * 1^2 * (3 * sqrt((2pi*10)^2 + 25)) ~= 594.
+        XCTAssertEqual(r.mesh.volume, 594, accuracy: 90)
+    }
+
+    /// Stage 4: .hole cuts an engine tool; through and blind
+    /// depths measure like the legacy drill.
+    func testHoleRoutesThroughProvider() {
+        let stub = StubCascadeProvider()
+        DocumentEngine.cascadeProvider = stub
+        var part = Part(name: "Holes")
+        let plate = plateSketch()
+        part.sketches.append(plate)
+        part.features.append(Feature(name: "Pad", kind: .pad(sketchID: plate.id, length: 4)))
+        let drill = topSketch(z: 4) { $0.addPoint(Vec2(0, 0)) }
+        part.sketches.append(drill)
+        part.features.append(Feature(name: "Hole", kind: .hole(sketchID: drill.id, diameter: 5, depth: 0, kind: .simple)))
+        let r = DocumentEngine.rebuild(part: part)
+        XCTAssertNil(r.firstError)
+        XCTAssertTrue(stub.calls.contains("subtract"), "hole cut via engine: \(stub.calls)")
+        XCTAssertEqual(r.mesh.volume, 800 - Double.pi * 6.25 * 4, accuracy: 4)
+        // Blind: depth 2 removes half as much again from a fresh plate.
+        var part2 = Part(name: "Blind")
+        part2.sketches.append(plate)
+        part2.features.append(Feature(name: "Pad", kind: .pad(sketchID: plate.id, length: 4)))
+        part2.sketches.append(drill)
+        part2.features.append(Feature(name: "Hole", kind: .hole(sketchID: drill.id, diameter: 5, depth: 2, kind: .simple)))
+        let r2 = DocumentEngine.rebuild(part: part2)
+        XCTAssertNil(r2.firstError)
+        XCTAssertEqual(r2.mesh.volume, 800 - Double.pi * 6.25 * 2, accuracy: 4)
+    }
+
+    /// Stage 4: a sketched circle drills at its OWN diameter on
+    /// the engine path too (the 2026-10-26 device bug's rule).
+    func testHoleCircleSiteUsesOwnDiameter() {
+        let stub = StubCascadeProvider()
+        DocumentEngine.cascadeProvider = stub
+        var part = Part(name: "CircleSite")
+        let plate = plateSketch()
+        part.sketches.append(plate)
+        part.features.append(Feature(name: "Pad", kind: .pad(sketchID: plate.id, length: 4)))
+        let drill = topSketch(z: 4) { $0.addCircle(Vec2(0, 0), 3) }
+        part.sketches.append(drill)
+        part.features.append(Feature(name: "Hole", kind: .hole(sketchID: drill.id, diameter: 5, depth: 0, kind: .simple)))
+        let r = DocumentEngine.rebuild(part: part)
+        XCTAssertNil(r.firstError)
+        XCTAssertEqual(r.mesh.volume, 800 - Double.pi * 9 * 4, accuracy: 5)
+    }
+
+    /// Stage 4: a hole with no body fails the same way on both
+    /// paths (booleanEmptyResult, never a silent no-op).
+    func testHoleOnEmptyBodyFailsLikeLegacy() {
+        let stub = StubCascadeProvider()
+        DocumentEngine.cascadeProvider = stub
+        var part = Part(name: "NoBody")
+        let drill = topSketch(z: 0) { $0.addPoint(Vec2(0, 0)) }
+        part.sketches.append(drill)
+        part.features.append(Feature(name: "Hole", kind: .hole(sketchID: drill.id, diameter: 5, depth: 0, kind: .simple)))
+        let r = DocumentEngine.rebuild(part: part)
+        XCTAssertNotNil(r.firstError)
+        DocumentEngine.cascadeProvider = nil
+        let legacy = DocumentEngine.rebuild(part: part)
+        XCTAssertEqual(r.firstError?.code, legacy.firstError?.code)
+    }
+
+    /// Stage 4: a MODELED thread shaft routes through the
+    /// provider's thread op and measures like the legacy build.
+    func testThreadShaftModeledRoutesThroughProvider() throws {
+        let stub = StubCascadeProvider()
+        DocumentEngine.cascadeProvider = stub
+        var spec = try ThreadSpec.preset("M10")
+        spec.length = 12
+        var part = Part(name: "Bolt")
+        part.features.append(Feature(name: "Thread", kind: .threadShaft(spec: spec)))
+        let r = DocumentEngine.rebuild(part: part)
+        XCTAssertNil(r.firstError)
+        XCTAssertTrue(stub.calls.contains("thread"), "modeled thread via engine: \(stub.calls)")
+        XCTAssertGreaterThan(r.mesh.volume, 700)
+        XCTAssertLessThan(r.mesh.volume, 820)
+        DocumentEngine.cascadeProvider = nil
+        let legacy = DocumentEngine.rebuild(part: part)
+        XCTAssertNil(legacy.firstError)
+        XCTAssertEqual(r.mesh.volume, legacy.mesh.volume, accuracy: 1.0)
+    }
+
+    /// Stage 4: a COSMETIC thread shaft (the user's editor
+    /// choice) never reaches the thread op: it builds the plain
+    /// major-diameter shaft and its status says "Cosmetic".
+    func testThreadShaftCosmeticIsPlainAndLabelled() throws {
+        let stub = StubCascadeProvider()
+        DocumentEngine.cascadeProvider = stub
+        var spec = try ThreadSpec.preset("M10")
+        spec.length = 12
+        spec.modeled = false
+        var part = Part(name: "CosmeticBolt")
+        part.features.append(Feature(name: "Thread", kind: .threadShaft(spec: spec)))
+        let r = DocumentEngine.rebuild(part: part)
+        XCTAssertNil(r.firstError)
+        XCTAssertFalse(stub.calls.contains("thread"), "cosmetic must not call the thread op: \(stub.calls)")
+        XCTAssertEqual(r.mesh.volume, Double.pi * 25 * 12, accuracy: 6)
+        XCTAssertTrue(r.statuses.first?.message?.contains("Cosmetic") == true,
+                      "status labels the cosmetic thread: \(String(describing: r.statuses.first?.message))")
+    }
+
+    /// Stage 4: an internal thread shaft composes blank − bore −
+    /// groove tool through the provider.
+    func testThreadShaftInternalComposesTool() throws {
+        let stub = StubCascadeProvider()
+        DocumentEngine.cascadeProvider = stub
+        var spec = try ThreadSpec.preset("M10")
+        spec.length = 12
+        spec.kind = .internal
+        var part = Part(name: "Nut")
+        part.features.append(Feature(name: "Thread", kind: .threadShaft(spec: spec)))
+        let r = DocumentEngine.rebuild(part: part)
+        XCTAssertNil(r.firstError)
+        XCTAssertTrue(stub.calls.contains("thread"), "internal thread via engine tool: \(stub.calls)")
+        XCTAssertEqual(stub.calls.filter { $0 == "subtract" }.count, 2,
+                       "blank-bore and bore-tool subtractions: \(stub.calls)")
+    }
+
+    /// Stage 4: thread-on-shaft (external) on an engine body:
+    /// measured span, exact segment united through the provider.
+    func testThreadOnShaftExternalThroughProvider() throws {
+        let stub = StubCascadeProvider()
+        DocumentEngine.cascadeProvider = stub
+        var spec = try ThreadSpec.preset("M10")
+        spec.length = 12
+        var part = Part(name: "Shafted")
+        part.features.append(Feature(name: "Shaft", kind: .primitive(kind: .cylinder, params: ["diameter": 10, "height": 20])))
+        part.features.append(Feature(name: "Thread", kind: .threadOnShaft(spec: spec, origin: .zero, axis: Vec3(0, 0, 1))))
+        let r = DocumentEngine.rebuild(part: part)
+        XCTAssertNil(r.firstError)
+        XCTAssertTrue(stub.calls.contains("thread"), "thread on shaft via engine: \(stub.calls)")
+        // The plain shaft is cut out and replaced by the threaded
+        // segment over the measured 20 mm span: root core ~1046 +
+        // ridge ~224.
+        XCTAssertEqual(r.mesh.volume, 1270, accuracy: 140)
+    }
+
+    /// Stage 4: thread-on-shaft INTERNAL on an engine body — the
+    /// hole-wall case the legacy path refuses — cuts the groove
+    /// tool through the provider.
+    func testThreadOnShaftInternalThroughProvider() throws {
+        let stub = StubCascadeProvider()
+        DocumentEngine.cascadeProvider = stub
+        var part = Part(name: "NutBody")
+        let plate = plateSketch()
+        part.sketches.append(plate)
+        part.features.append(Feature(name: "Pad", kind: .pad(sketchID: plate.id, length: 12)))
+        let drill = topSketch(z: 12) { $0.addPoint(Vec2(0, 0)) }
+        part.sketches.append(drill)
+        part.features.append(Feature(name: "Hole", kind: .hole(sketchID: drill.id, diameter: 8.15971, depth: 0, kind: .simple)))
+        var spec = try ThreadSpec.preset("M10")
+        spec.length = 12
+        spec.kind = .internal
+        part.features.append(Feature(name: "Thread", kind: .threadOnShaft(spec: spec, origin: .zero, axis: Vec3(0, 0, 1))))
+        let r = DocumentEngine.rebuild(part: part)
+        XCTAssertNil(r.firstError)
+        XCTAssertTrue(stub.calls.contains("thread"), "internal on-shaft via engine tool: \(stub.calls)")
+        // Plate is 2400; the bore removed ~628 and the groove
+        // tool removes more of the annulus.
+        XCTAssertGreaterThan(r.mesh.volume, 0)
+        XCTAssertLessThan(r.mesh.volume, 2400 - 620)
+        // The legacy path still refuses the same feature on a
+        // mesh body (its documented limit).
+        DocumentEngine.cascadeProvider = nil
+        let legacy = DocumentEngine.rebuild(part: part)
+        XCTAssertNotNil(legacy.firstError)
     }
 
     /// Stage 1: cascade pocket documents round-trip (the kind was

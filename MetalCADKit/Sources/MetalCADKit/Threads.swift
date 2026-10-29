@@ -16,12 +16,20 @@ public struct ThreadSpec: Codable, Equatable {
     public var taperDegrees: Double = 0        // NPT: 1.7899
     public var length: Double = 20             // mm of thread
     public var clearance: Double = 0           // fit offset added to the gap
-    public var modeled: Bool = true            // false = cosmetic (v1: noted only)
+    public var modeled: Bool = true            // false = cosmetic (labelled, no geometry)
+    /// User-set thread depth (mm). Nil = the standard depth for
+    /// the pitch/angle (`threadDepth`'s formula). Always
+    /// overridable in the editor; presets never set it.
+    public var depthOverride: Double? = nil
 
     public init() {}
 
-    /// ISO/UNC external thread depth (sharp-V approximation factor).
-    public var threadDepth: Double { 0.61343 * pitch * (profileAngleDegrees == 60 ? 1 : tan(profileAngleDegrees * .pi / 360) / tan(30 * .pi / 180)) }
+    /// Thread depth: the user's override when set, else the
+    /// ISO/UNC standard depth (sharp-V approximation factor).
+    public var threadDepth: Double {
+        if let d = depthOverride { return d }
+        return 0.61343 * pitch * (profileAngleDegrees == 60 ? 1 : tan(profileAngleDegrees * .pi / 360) / tan(30 * .pi / 180))
+    }
     public var minorDiameter: Double { majorDiameter - 2 * threadDepth }
     public var pitchDiameter: Double { majorDiameter - 0.64952 * pitch }
     public var lead: Double { pitch * Double(starts) }
@@ -33,6 +41,12 @@ public struct ThreadSpec: Codable, Equatable {
         let metric: [String: (Double, Double)] = [
             "M3": (3, 0.5), "M4": (4, 0.7), "M5": (5, 0.8), "M6": (6, 1.0),
             "M8": (8, 1.25), "M10": (10, 1.5), "M12": (12, 1.75), "M16": (16, 2.0), "M20": (20, 2.5),
+            // ISO metric FINE pitches (name carries the pitch).
+            "M3X0.35": (3, 0.35), "M4X0.5": (4, 0.5), "M5X0.5": (5, 0.5),
+            "M6X0.75": (6, 0.75), "M8X0.75": (8, 0.75), "M8X1": (8, 1.0),
+            "M10X1": (10, 1.0), "M10X1.25": (10, 1.25),
+            "M12X1": (12, 1.0), "M12X1.25": (12, 1.25),
+            "M16X1.5": (16, 1.5), "M20X1.5": (20, 1.5),
         ]
         if let (d, p) = metric[n] { s.majorDiameter = d; s.pitch = p; return s }
         let uncTable: [String: (Double, Double)] = [   // name: (major mm, pitch mm)
@@ -55,6 +69,15 @@ public struct ThreadSpec: Codable, Equatable {
         var s = self
         var warnings: [CADError] = []
         guard pitch > 0, pitch < majorDiameter else { throw CADError.threadPitchInvalid(pitch) }
+        // The depth override is checked BEFORE the minor-diameter
+        // guard: an impossible override is a profile error (TH503),
+        // not a diameter error (TH502) — the guard below would
+        // otherwise claim it first via minorDiameter <= 0.
+        if let d = depthOverride {
+            guard d > 0, d < majorDiameter / 2 else {
+                throw CADError.threadProfileInvalid("depth \(d) mm must be more than zero and less than half the major diameter — the thread would cut through its own core")
+            }
+        }
         guard majorDiameter > 0, minorDiameter > 0 else {
             throw CADError.threadDiameterInvalid(major: majorDiameter, minor: minorDiameter)
         }

@@ -127,7 +127,9 @@ struct FeatureEditorSheet: View {
     @State private var profileAngleText: String = "60"
     @State private var taperText: String = "0"
     @State private var clearanceText: String = "0"
-    @State private var depthText: String = ""   // empty = standard depth
+    // Thread depth override reuses the shared depthText @State
+    // declared with the pocket fields above ("" = standard depth);
+    // each feature's init loads it before use.
     // extrude2 (v4)
     @State private var ex2DistanceText: String = "10"
     @State private var ex2TaperText: String = "0"

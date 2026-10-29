@@ -65,6 +65,12 @@ public protocol CascadeKernelProvider: AnyObject {
     func fillet(_ s: Int, radius: Double, edgeIndices: [Int]?) throws -> Int
     /// Symmetric chamfer, same edge convention as `fillet`.
     func chamfer(_ s: Int, distance: Double, edgeIndices: [Int]?) throws -> Int
+    /// Two-distance (asymmetric) chamfer, same edge convention.
+    /// `distanceA` is measured along "face A" of each edge, DEFINED
+    /// as the adjacent face with the lower census index (a stored
+    /// document carries no other face reference for an asymmetric
+    /// chamfer, so the convention is fixed here and in the façade).
+    func chamfer2(_ s: Int, distanceA: Double, distanceB: Double, edgeIndices: [Int]?) throws -> Int
     /// Closed hollow solid, walls growing inward by `thickness`.
     func shell(_ s: Int, thickness: Double) throws -> Int
     /// Draft every side face around the neutral plane at the

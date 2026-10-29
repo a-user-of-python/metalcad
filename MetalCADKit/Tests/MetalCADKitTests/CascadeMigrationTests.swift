@@ -115,6 +115,15 @@ final class StubCascadeProvider: CascadeKernelProvider {
         return store(try EdgeFinisher.chamfer(body: m, distance: distance))
     }
 
+    func chamfer2(_ s: Int, distanceA: Double, distanceB: Double, edgeIndices: [Int]?) throws -> Int {
+        calls.append("chamfer2")
+        // The stub's mesh kernel has no census, so edgeIndices are
+        // accepted for the record and the whole-body two-distance
+        // chamfer runs (wiring fidelity, like the other stub ops).
+        _ = edgeIndices
+        return store(try EdgeFinisher.chamfer2(body: try mesh(s), distanceA: distanceA, distanceB: distanceB))
+    }
+
     func shell(_ s: Int, thickness: Double) throws -> Int {
         calls.append("shell")
         return store(try EdgeFinisher.shell(body: try mesh(s), thickness: thickness))
@@ -425,6 +434,174 @@ final class CascadeMigrationTests: XCTestCase {
         XCTAssertNil(r.firstError)
         XCTAssertEqual(r.bodies.count, 2)
         XCTAssertEqual(r.mesh.volume, 800 + 40, accuracy: 1.0)
+    }
+
+    // MARK: - Stage 3 (1.18): fillet / chamfer / shell / chamfer2 /
+    // filletEdges / chamferEdges / draftBody / rib / splitBody
+
+    private func engineBox(_ stub: StubCascadeProvider, size: Double = 20) -> Part {
+        DocumentEngine.cascadeProvider = stub
+        var part = Part(name: "Box")
+        var s = Sketch(name: "s")
+        s.addRectangle(from: Vec2(0, 0), to: Vec2(size, size))
+        part.sketches.append(s)
+        part.features.append(Feature(name: "Pad", kind: .pad(sketchID: s.id, length: size)))
+        return part
+    }
+
+    /// Stage 3: .fillet on an engine body routes through the
+    /// provider with a census edge list.
+    func testFilletRoutesThroughProvider() {
+        let stub = StubCascadeProvider()
+        var part = engineBox(stub)
+        part.features.append(Feature(name: "Fillet", kind: .fillet(radius: 2)))
+        let r = DocumentEngine.rebuild(part: part)
+        XCTAssertNil(r.firstError)
+        XCTAssertTrue(stub.calls.contains("fillet"), "fillet via engine: \(stub.calls)")
+        XCTAssertLessThan(r.mesh.volume, 8000)
+        XCTAssertGreaterThan(r.mesh.volume, 7000)
+    }
+
+    /// Stage 3: .chamfer routes through the provider.
+    func testChamferRoutesThroughProvider() {
+        let stub = StubCascadeProvider()
+        var part = engineBox(stub)
+        part.features.append(Feature(name: "Chamfer", kind: .chamfer(distance: 2)))
+        let r = DocumentEngine.rebuild(part: part)
+        XCTAssertNil(r.firstError)
+        XCTAssertTrue(stub.calls.contains("chamfer"), "chamfer via engine: \(stub.calls)")
+        XCTAssertLessThan(r.mesh.volume, 8000)
+    }
+
+    /// Stage 3: .shell routes through the provider. (The stub
+    /// reproduces the legacy mesh shell, so this asserts routing +
+    /// stub/legacy parity; the exact engine value — 3904 for this
+    /// part, where the legacy approximation gives ~2568 — is proven
+    /// against mc_shell in the façade harness.)
+    func testShellRoutesThroughProvider() {
+        let stub = StubCascadeProvider()
+        var part = engineBox(stub)
+        part.features.append(Feature(name: "Shell", kind: .shell(thickness: 2)))
+        let r = DocumentEngine.rebuild(part: part)
+        XCTAssertNil(r.firstError)
+        XCTAssertTrue(stub.calls.contains("shell"), "shell via engine: \(stub.calls)")
+        DocumentEngine.cascadeProvider = nil
+        let legacy = DocumentEngine.rebuild(part: part)
+        XCTAssertNil(legacy.firstError)
+        XCTAssertEqual(r.mesh.volume, legacy.mesh.volume, accuracy: 0.01)
+    }
+
+    /// Stage 3: .chamfer2 (two distances) routes through the
+    /// provider's chamfer2; equal distances take the symmetric path.
+    func testChamfer2RoutesThroughProvider() {
+        let stub = StubCascadeProvider()
+        var part = engineBox(stub)
+        part.features.append(Feature(name: "C2", kind: .chamfer2(mode: .twoDistances(2, 1))))
+        var r = DocumentEngine.rebuild(part: part)
+        XCTAssertNil(r.firstError)
+        XCTAssertTrue(stub.calls.contains("chamfer2"), "chamfer2 via engine: \(stub.calls)")
+        XCTAssertLessThan(r.mesh.volume, 8000)
+
+        let stub2 = StubCascadeProvider()
+        var part2 = engineBox(stub2)
+        part2.features.append(Feature(name: "C2", kind: .chamfer2(mode: .equal(1.5))))
+        r = DocumentEngine.rebuild(part: part2)
+        XCTAssertNil(r.firstError)
+        XCTAssertFalse(stub2.calls.contains("chamfer2"), "equal distances use symmetric chamfer")
+        XCTAssertTrue(stub2.calls.contains("chamfer"))
+    }
+
+    /// Stage 3: .filletEdges matches the picked midpoint to a
+    /// census edge; a stale midpoint fails with a coded error.
+    func testFilletEdgesMatchesPickedMidpoint() {
+        let stub = StubCascadeProvider()
+        DocumentEngine.cascadeProvider = stub
+        var part = Part(name: "Plate")
+        let s = plateSketch()
+        part.sketches.append(s)
+        part.features.append(Feature(name: "Pad", kind: .pad(sketchID: s.id, length: 4)))
+        part.features.append(Feature(name: "FE", kind: .filletEdges(radius: 1, midpoints: [Vec3(10, 5, 2)])))
+        var r = DocumentEngine.rebuild(part: part)
+        XCTAssertNil(r.firstError)
+        XCTAssertTrue(stub.calls.contains("fillet"))
+        XCTAssertLessThan(r.mesh.volume, 800)
+        XCTAssertGreaterThan(r.mesh.volume, 780)
+
+        var bad = Part(name: "Plate2")
+        bad.sketches.append(s)
+        bad.features.append(Feature(name: "Pad", kind: .pad(sketchID: s.id, length: 4)))
+        bad.features.append(Feature(name: "FE", kind: .filletEdges(radius: 1, midpoints: [Vec3(999, 999, 999)])))
+        r = DocumentEngine.rebuild(part: bad)
+        XCTAssertNotNil(r.firstError, "stale picked edge must fail, not silently no-op")
+    }
+
+    /// Stage 3: .draftBody routes through the provider and narrows
+    /// the top (volume drops, matching the legacy morph on a box).
+    func testDraftBodyRoutesThroughProvider() {
+        let stub = StubCascadeProvider()
+        var part = engineBox(stub)
+        part.features.append(Feature(name: "Draft", kind: .draftBody(angleDegrees: 5, pullAxis: 2)))
+        let r = DocumentEngine.rebuild(part: part)
+        XCTAssertNil(r.firstError)
+        XCTAssertTrue(stub.calls.contains("draft"), "draft via engine: \(stub.calls)")
+        XCTAssertLessThan(r.mesh.volume, 8000)
+        XCTAssertGreaterThan(r.mesh.volume, 6000)
+    }
+
+    /// Stage 3: .splitBody on an engine body yields two bodies
+    /// whose volumes sum to the original.
+    func testSplitBodyThroughProvider() {
+        let stub = StubCascadeProvider()
+        var part = engineBox(stub)
+        part.features.append(Feature(name: "Split", kind: .splitBody(axis: 2, offset: 10)))
+        let r = DocumentEngine.rebuild(part: part)
+        XCTAssertNil(r.firstError)
+        XCTAssertEqual(r.bodies.count, 2)
+        XCTAssertEqual(r.bodies[0].volume, 4000, accuracy: 40)
+        XCTAssertEqual(r.bodies[1].volume, 4000, accuracy: 40)
+        XCTAssertEqual(r.mesh.volume, 8000, accuracy: 40)
+    }
+
+    /// Stage 3: .rib on an engine body builds the wall from engine
+    /// solids and lands at the legacy volume (same part as the
+    /// legacy rib test: plate 6400 + fin ~360).
+    func testRibThroughProvider() {
+        let stub = StubCascadeProvider()
+        DocumentEngine.cascadeProvider = stub
+        var part = Part(name: "ribbed")
+        var base = Sketch(name: "base")
+        base.addRectangle(from: Vec2(0, 0), to: Vec2(40, 40))
+        part.sketches.append(base)
+        part.features.append(Feature(name: "Plate", kind: .pad(sketchID: base.id, length: 4)))
+        var rib = Sketch(name: "rib profile")
+        rib.plane = Plane3(origin: Vec3(0, 20, 10), xAxis: Vec3(1, 0, 0), yAxis: Vec3(0, 0, 1))
+        rib.addLine(Vec2(5, 0), Vec2(35, 0))
+        part.sketches.append(rib)
+        part.features.append(Feature(name: "Rib", kind: .rib(sketchID: rib.id, thickness: 2, depth: 8)))
+        let r = DocumentEngine.rebuild(part: part)
+        XCTAssertNil(r.firstError)
+        XCTAssertTrue(stub.calls.contains("intersect"), "rib wall trimmed via engine: \(stub.calls)")
+        XCTAssertEqual(r.mesh.volume, 6400 + 360, accuracy: 120)
+        XCTAssertEqual(r.mesh.bounds.max.z, 10, accuracy: 0.6)
+    }
+
+    /// Stage 3: a body-op AFTER a legacy feature (the body was
+    /// materialized to a mesh) takes the legacy path — the engine
+    /// is not asked to fillet a mesh it does not hold.
+    func testBodyOpAfterLegacyFeatureFallsBack() {
+        let stub = StubCascadeProvider()
+        DocumentEngine.cascadeProvider = stub
+        var part = Part(name: "Mixed")
+        let s = plateSketch()
+        part.sketches.append(s)
+        part.features.append(Feature(name: "Pad", kind: .pad(sketchID: s.id, length: 4)))
+        part.features.append(Feature(name: "Scale", kind: .scaleBody(factors: Vec3(2, 1, 1))))
+        part.features.append(Feature(name: "Fillet", kind: .fillet(radius: 1)))
+        let r = DocumentEngine.rebuild(part: part)
+        XCTAssertNil(r.firstError)
+        XCTAssertFalse(stub.calls.contains("fillet"), "fillet after materialization stays legacy: \(stub.calls)")
+        XCTAssertLessThan(r.mesh.volume, 1600)
+        XCTAssertGreaterThan(r.mesh.volume, 1400)
     }
 
     /// Stage 1: cascade pocket documents round-trip (the kind was

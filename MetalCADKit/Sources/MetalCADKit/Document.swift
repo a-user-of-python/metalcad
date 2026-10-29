@@ -267,7 +267,9 @@ public enum DocumentEngine {
         func kindIsSolidAware(_ kind: FeatureKind) -> Bool {
             switch kind {
             case .cascadePad, .cascadePocket,
-                 .pad, .pocket, .revolve, .primitive, .extrude, .extrude2:
+                 .pad, .pocket, .revolve, .primitive, .extrude, .extrude2,
+                 .fillet, .chamfer, .shell, .chamfer2, .filletEdges, .chamferEdges,
+                 .draftBody, .rib, .splitBody:
                 return true
             default: return false
             }
@@ -328,6 +330,54 @@ public enum DocumentEngine {
             return tool!
         }
 
+        // ---- Stage 3 helpers (engine body operations) ----
+
+        /// Replace the running engine solid with a derived one
+        /// (the old handle is released exactly once).
+        func adoptSolid(_ p: any CascadeKernelProvider, _ new: Int) {
+            if let old = solid { p.release(old) }
+            solid = new
+            solidMesh = nil
+        }
+
+        /// Census indices of the body's straight edges at least
+        /// 0.5 mm long — the edge set the legacy finisher worked
+        /// on (it only ever finished straight edges; circle edges
+        /// such as hole rims are excluded by the line filter).
+        func lineEdgeIndices(_ p: any CascadeKernelProvider, _ h: Int) throws -> [Int] {
+            try p.edgeInfos(h).enumerated()
+                .filter { $0.element.curveType == 0 && $0.element.length >= 0.5 }
+                .map { $0.offset }
+        }
+
+        /// Census indices of the edges whose midpoint matches one
+        /// of the user's picked midpoints (0.05 mm, the legacy
+        /// tolerance) — selection-driven ops act on the selection's
+        /// real edges, never a guessed set.
+        func midpointEdgeIndices(_ p: any CascadeKernelProvider, _ h: Int,
+                                 _ midpoints: [Vec3]) throws -> [Int] {
+            var out: [Int] = []
+            for (i, e) in try p.edgeInfos(h).enumerated()
+            where midpoints.contains(where: { $0.distance(to: e.midPoint) < 0.05 }) {
+                out.append(i)
+            }
+            return out
+        }
+
+        /// An axis-aligned engine box with its min corner at `mn`
+        /// (the provider's box is XY-centred with z from 0, so it
+        /// is translated into place).
+        func boxSolid(_ p: any CascadeKernelProvider, min mn: Vec3, size sz: Vec3) throws -> Int {
+            let raw = try p.primitive(kind: .box,
+                                      params: ["width": sz.x, "depth": sz.y, "height": sz.z])
+            let m: [Double] = [1, 0, 0, mn.x + sz.x / 2,
+                               0, 1, 0, mn.y + sz.y / 2,
+                               0, 0, 1, mn.z]
+            let moved = try p.transform(raw, matrix: m)
+            p.release(raw)
+            return moved
+        }
+
         for feature in part.features {
             if firstError != nil {
                 statuses.append(FeatureStatus(featureID: feature.id, ok: false, errorCode: nil, message: "paused"))
@@ -356,6 +406,22 @@ public enum DocumentEngine {
                     continue
                 }
                 if case .fillet(let radius) = feature.kind {
+                    if let p = provider, let h = solid {
+                        // Engine path (Stage 3): exact OCCT fillet
+                        // on the body's straight census edges. The
+                        // legacy finisher silently shrank the radius
+                        // (a 5% ladder) and capped the edge count;
+                        // the engine applies the requested radius
+                        // exactly or fails with a coded error.
+                        guard radius > 0 else { throw CADError.filletFailed("radius must be > 0") }
+                        let edges = try lineEdgeIndices(p, h)
+                        if !edges.isEmpty {
+                            adoptSolid(p, try p.fillet(h, radius: radius, edgeIndices: edges))
+                        }
+                        statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
+                        logger.debug(.feature, "fillet ok (engine)", context: ["feature": feature.name, "radius": "\(radius)"])
+                        continue
+                    }
                     guard body.triangleCount > 0 else { throw CADError.filletFailed("no solid to fillet yet") }
                     body = try EdgeFinisher.fillet(body: body, radius: radius)
                     statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
@@ -363,6 +429,18 @@ public enum DocumentEngine {
                     continue
                 }
                 if case .chamfer(let distance) = feature.kind {
+                    if let p = provider, let h = solid {
+                        // Engine path (Stage 3): exact OCCT chamfer
+                        // on the straight census edges (see fillet).
+                        guard distance > 0 else { throw CADError.chamferInvalid("distance must be > 0") }
+                        let edges = try lineEdgeIndices(p, h)
+                        if !edges.isEmpty {
+                            adoptSolid(p, try p.chamfer(h, distance: distance, edgeIndices: edges))
+                        }
+                        statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
+                        logger.debug(.feature, "chamfer ok (engine)", context: ["feature": feature.name, "distance": "\(distance)"])
+                        continue
+                    }
                     guard body.triangleCount > 0 else { throw CADError.chamferInvalid("no solid to chamfer yet") }
                     body = try EdgeFinisher.chamfer(body: body, distance: distance)
                     statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
@@ -370,6 +448,16 @@ public enum DocumentEngine {
                     continue
                 }
                 if case .shell(let thickness) = feature.kind {
+                    if let p = provider, let h = solid {
+                        // Engine path (Stage 3): mc_shell — closed
+                        // hollow, exact offset (the legacy shell was
+                        // a vertex-normal approximation).
+                        guard thickness > 0 else { throw CADError.shellFailed("wall thickness must be > 0") }
+                        adoptSolid(p, try p.shell(h, thickness: thickness))
+                        statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
+                        logger.debug(.feature, "shell ok (engine)", context: ["feature": feature.name, "wall": "\(thickness)"])
+                        continue
+                    }
                     guard body.triangleCount > 0 else { throw CADError.shellFailed("no solid to shell yet") }
                     body = try EdgeFinisher.shell(body: body, thickness: thickness)
                     statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
@@ -438,12 +526,109 @@ public enum DocumentEngine {
                     continue
                 }
                 if case .rib(let sketchID, let thickness, let depth) = feature.kind {
+                    if let p = provider, let h = solid {
+                        // Engine path (Stage 3): the legacy rib
+                        // construction rebuilt from engine solids —
+                        // one oriented box chunk per path segment
+                        // (segment x thickness along the sketch
+                        // normal x depth+1 along the extension
+                        // direction, 1 mm buried overshoot), trimmed
+                        // by the same oriented clip box, joined
+                        // exactly. Guards mirror ribMesh's order.
+                        guard thickness > 0, depth > 0 else {
+                            throw CADError.primitiveParamInvalid("rib needs thickness > 0 and depth > 0")
+                        }
+                        guard let sketch = part.sketch(sketchID) else { throw CADError.nameNotFound("sketch") }
+                        let pts = try DocumentEngine.pathPoints(sketch: sketch)
+                        guard pts.count >= 2 else { throw CADError.padNoProfile }
+                        let bnd = try p.bounds(h)
+                        let bbCenter = (bnd.min + bnd.max) * 0.5
+                        let diag = (bnd.max - bnd.min).length
+                        let n = sketch.plane.normal
+                        let seg0 = (pts[1] - pts[0]).normalized
+                        let mid = pts.reduce(Vec3.zero) { $0 + $1 } * (1.0 / Double(pts.count))
+                        let e1 = n.cross(seg0).normalized
+                        let e = e1.dot(bbCenter - mid) >= 0 ? e1 : e1 * -1
+                        var wall: Int? = nil
+                        for i in 0..<(pts.count - 1) {
+                            let a = pts[i], b = pts[i + 1]
+                            let seg = b - a
+                            let len = seg.length
+                            guard len > 1e-9 else { continue }
+                            let sd = seg * (1 / len)
+                            var nn = n
+                            // Keep the basis right-handed (the box
+                            // is symmetric in thickness, so flipping
+                            // the normal changes nothing else).
+                            if sd.dot(nn.cross(e)) < 0 { nn = nn * -1 }
+                            let raw = try p.primitive(kind: .box, params: ["width": len, "depth": thickness, "height": depth + 1])
+                            let c = (a + b) * 0.5
+                            let m: [Double] = [sd.x, nn.x, e.x, c.x,
+                                               sd.y, nn.y, e.y, c.y,
+                                               sd.z, nn.z, e.z, c.z]
+                            let chunk = try p.transform(raw, matrix: m)
+                            p.release(raw)
+                            if let w = wall {
+                                let u2 = try p.unite(w, chunk)
+                                p.release(w); p.release(chunk)
+                                wall = u2
+                            } else {
+                                wall = chunk
+                            }
+                        }
+                        guard let wallH = wall else { throw CADError.padNoProfile }
+                        let helper = abs(e.y) < 0.9 ? Vec3(0, 1, 0) : Vec3(1, 0, 0)
+                        let u = helper.cross(e).normalized
+                        let v = e.cross(u).normalized
+                        let hw = (diag + depth + 2) / 2
+                        let cc = bbCenter - e * ((depth + 2) / 2) - e * hw
+                        let rawClip = try p.primitive(kind: .box, params: ["width": 2 * diag, "depth": 2 * diag, "height": 2 * hw])
+                        let cm: [Double] = [u.x, v.x, e.x, cc.x,
+                                            u.y, v.y, e.y, cc.y,
+                                            u.z, v.z, e.z, cc.z]
+                        let clip = try p.transform(rawClip, matrix: cm)
+                        p.release(rawClip)
+                        let trimmed = try p.intersect(wallH, clip)
+                        p.release(wallH); p.release(clip)
+                        guard try p.volume(trimmed) > 1e-9 else {
+                            p.release(trimmed)
+                            throw CADError.booleanFailed("the rib wall misses the body entirely")
+                        }
+                        try booleanWithSolid(trimmed, .join)
+                        statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
+                        logger.debug(.feature, "rib ok (engine)", context: ["feature": feature.name])
+                        continue
+                    }
                     body = try DocumentEngine.ribMesh(part: part, sketchID: sketchID, thickness: thickness, depth: depth, body: body)
                     statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
                     logger.debug(.feature, "rib ok", context: ["feature": feature.name])
                     continue
                 }
                 if case .chamfer2(let mode) = feature.kind {
+                    if let p = provider, let h = solid {
+                        // Engine path (Stage 3): two-distance
+                        // chamfer via mc_chamfer2 — distanceA along
+                        // the lower-census-index adjacent face (the
+                        // fixed face-A convention; a document stores
+                        // no other face reference). Equal distances
+                        // take the symmetric path. The legacy
+                        // binary-search "largest that fits" message
+                        // is not replicated: an impossible chamfer
+                        // fails with the engine's coded error.
+                        let (dA, dB) = mode.distances
+                        guard dA > 0, dB > 0 else { throw CADError.chamferInvalid("distances must be > 0") }
+                        let edges = try lineEdgeIndices(p, h)
+                        if !edges.isEmpty {
+                            if dA == dB {
+                                adoptSolid(p, try p.chamfer(h, distance: dA, edgeIndices: edges))
+                            } else {
+                                adoptSolid(p, try p.chamfer2(h, distanceA: dA, distanceB: dB, edgeIndices: edges))
+                            }
+                        }
+                        statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
+                        logger.debug(.feature, "chamfer2 ok (engine)", context: ["feature": feature.name])
+                        continue
+                    }
                     guard body.triangleCount > 0 else { throw CADError.chamferInvalid("no solid to chamfer yet") }
                     let (dA, dB) = mode.distances
                     body = try EdgeFinisher.chamfer2(body: body, distanceA: dA, distanceB: dB)
@@ -452,6 +637,22 @@ public enum DocumentEngine {
                     continue
                 }
                 if case .draftBody(let angle, let axis) = feature.kind {
+                    if let p = provider, let h = solid {
+                        // Engine path (Stage 3): mc_draft rotates
+                        // the real side faces about the neutral
+                        // plane at the body's minimum along the
+                        // pull axis — identical to the legacy morph
+                        // on prismatic parts (the legacy morph
+                        // displaced vertices radially from the
+                        // bounds centre on other shapes).
+                        guard abs(angle) > 1e-9, abs(angle) < 30 else {
+                            throw CADError.transformInvalid("draft angle must be between -30 and 30 degrees")
+                        }
+                        adoptSolid(p, try p.draft(h, angleDegrees: angle, pullAxis: axis))
+                        statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
+                        logger.debug(.feature, "draft ok (engine)", context: ["feature": feature.name])
+                        continue
+                    }
                     guard body.triangleCount > 0 else { throw CADError.transformInvalid("no solid to draft yet") }
                     body = try DocumentEngine.draftMesh(body: body, angleDegrees: angle, pullAxis: axis)
                     statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
@@ -475,6 +676,47 @@ public enum DocumentEngine {
                     continue
                 }
                 if case .splitBody(let axis, let offset) = feature.kind {
+                    if let p = provider, let h = solid {
+                        // Engine path (Stage 3): exact intersect
+                        // with two half-boxes meeting AT the split
+                        // plane. (The legacy half-boxes overshot
+                        // the plane by 0.001 on both sides, so its
+                        // halves overlapped in a 0.002 slab; the
+                        // engine split is exact and conserves
+                        // volume.) Guards mirror splitMesh.
+                        let bnd = try p.bounds(h)
+                        let lo = axis == 0 ? bnd.min.x : axis == 1 ? bnd.min.y : bnd.min.z
+                        let hi = axis == 0 ? bnd.max.x : axis == 1 ? bnd.max.y : bnd.max.z
+                        guard offset > lo + 1e-6, offset < hi - 1e-6 else {
+                            throw CADError.booleanFailed("the split plane misses the body")
+                        }
+                        var mn1 = bnd.min - Vec3(1, 1, 1)
+                        var mx1 = bnd.max + Vec3(1, 1, 1)
+                        var mn2 = mn1
+                        var mx2 = mx1
+                        switch axis {
+                        case 0: mx1.x = offset; mn2.x = offset
+                        case 1: mx1.y = offset; mn2.y = offset
+                        default: mx1.z = offset; mn2.z = offset
+                        }
+                        let box1 = try boxSolid(p, min: mn1, size: mx1 - mn1)
+                        let half1 = try p.intersect(h, box1)
+                        p.release(box1)
+                        let box2 = try boxSolid(p, min: mn2, size: mx2 - mn2)
+                        let half2 = try p.intersect(h, box2)
+                        p.release(box2)
+                        guard try p.volume(half1) > 1e-9, try p.volume(half2) > 1e-9 else {
+                            p.release(half1); p.release(half2)
+                            throw CADError.booleanFailed("the split plane misses the body")
+                        }
+                        p.release(h)
+                        solidBodies.append(half2)
+                        solid = half1
+                        solidMesh = nil
+                        statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
+                        logger.debug(.feature, "split ok (engine)", context: ["feature": feature.name])
+                        continue
+                    }
                     guard body.triangleCount > 0 else { throw CADError.booleanFailed("no solid to split yet") }
                     let (h1, h2) = try DocumentEngine.splitMesh(body: body, axis: axis, offset: offset)
                     bodies.append(h2)
@@ -532,6 +774,21 @@ public enum DocumentEngine {
                     continue
                 }
                 if case .filletEdges(let radius, let midpoints) = feature.kind {
+                    if let p = provider, let h = solid {
+                        // Engine path (Stage 3): the user's picked
+                        // midpoints are matched to census edges
+                        // (0.05 mm, the legacy tolerance) and ONLY
+                        // those edges are filleted, exactly.
+                        guard radius > 0 else { throw CADError.filletFailed("radius must be > 0") }
+                        let idx = try midpointEdgeIndices(p, h, midpoints)
+                        guard !idx.isEmpty else {
+                            throw CADError.filletFailed("the picked edge is gone — the part changed above it")
+                        }
+                        adoptSolid(p, try p.fillet(h, radius: radius, edgeIndices: idx))
+                        statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
+                        logger.debug(.feature, "fillet edges ok (engine)", context: ["feature": feature.name, "edges": "\(idx.count)"])
+                        continue
+                    }
                     guard body.triangleCount > 0 else { throw CADError.filletFailed("no solid to fillet yet") }
                     body = try EdgeFinisher.fillet(body: body, radius: radius, onlyMidpoints: midpoints)
                     statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
@@ -539,6 +796,18 @@ public enum DocumentEngine {
                     continue
                 }
                 if case .chamferEdges(let distance, let midpoints) = feature.kind {
+                    if let p = provider, let h = solid {
+                        // Engine path (Stage 3): see filletEdges.
+                        guard distance > 0 else { throw CADError.chamferInvalid("distance must be > 0") }
+                        let idx = try midpointEdgeIndices(p, h, midpoints)
+                        guard !idx.isEmpty else {
+                            throw CADError.chamferInvalid("the picked edge is gone — the part changed above it")
+                        }
+                        adoptSolid(p, try p.chamfer(h, distance: distance, edgeIndices: idx))
+                        statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
+                        logger.debug(.feature, "chamfer edges ok (engine)", context: ["feature": feature.name, "edges": "\(idx.count)"])
+                        continue
+                    }
                     guard body.triangleCount > 0 else { throw CADError.chamferInvalid("no solid to chamfer yet") }
                     body = try EdgeFinisher.chamfer(body: body, distance: distance, onlyMidpoints: midpoints)
                     statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))

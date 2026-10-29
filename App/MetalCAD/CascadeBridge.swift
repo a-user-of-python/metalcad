@@ -344,6 +344,18 @@ final class CascadeKernelBridge: CascadeKernelProvider {
         }
     }
 
+    func chamfer2(_ s: Int, distanceA: Double, distanceB: Double, edgeIndices: [Int]?) throws -> Int {
+        try locked {
+            var err: Int32 = 0
+            let h = try shape(s)
+            if let idx = edgeIndices {
+                let list = idx.map { Int32($0) }
+                return try own(mc_chamfer2(h, distanceA, distanceB, list, Int32(list.count), &err))
+            }
+            return try own(mc_chamfer2(h, distanceA, distanceB, nil, 0, &err))
+        }
+    }
+
     func shell(_ s: Int, thickness: Double) throws -> Int {
         try locked {
             var err: Int32 = 0

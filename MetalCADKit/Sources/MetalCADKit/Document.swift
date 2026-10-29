@@ -270,7 +270,8 @@ public enum DocumentEngine {
                  .pad, .pocket, .revolve, .primitive, .extrude, .extrude2,
                  .fillet, .chamfer, .shell, .chamfer2, .filletEdges, .chamferEdges,
                  .draftBody, .rib, .splitBody,
-                 .loft, .sweep, .hole, .coil, .pipe, .threadShaft, .threadOnShaft:
+                 .loft, .sweep, .hole, .coil, .pipe, .threadShaft, .threadOnShaft,
+                 .linearPattern, .circularPattern, .mirror, .scaleBody, .moveBody:
                 return true
             default: return false
             }
@@ -445,6 +446,184 @@ public enum DocumentEngine {
             return moved
         }
 
+        // ---- Stage 5 helpers (transforms + verified fusion) ----
+
+        /// Row-major 3x4 rotation about the world axis (0=X, 1=Y,
+        /// 2=Z) line through `center`, right-hand rule — the exact
+        /// map the legacy mesh kernel's rotatedAround applies.
+        func rotationMatrix(axis: Int, degrees: Double, center: Vec3) -> [Double] {
+            let a = degrees * Double.pi / 180
+            let c = cos(a), s = sin(a)
+            let r: [Double]
+            switch axis {
+            case 0: r = [1, 0, 0, 0, c, -s, 0, s, c]
+            case 1: r = [c, 0, s, 0, 1, 0, -s, 0, c]
+            default: r = [c, -s, 0, s, c, 0, 0, 0, 1]
+            }
+            let tx = center.x - (r[0] * center.x + r[1] * center.y + r[2] * center.z)
+            let ty = center.y - (r[3] * center.x + r[4] * center.y + r[5] * center.z)
+            let tz = center.z - (r[6] * center.x + r[7] * center.y + r[8] * center.z)
+            return [r[0], r[1], r[2], tx,
+                    r[3], r[4], r[5], ty,
+                    r[6], r[7], r[8], tz]
+        }
+
+        /// Apply a row-major 3x4 (the provider transform's
+        /// convention) to a point.
+        func applyMatrix(_ m: [Double], _ v: Vec3) -> Vec3 {
+            Vec3(m[0] * v.x + m[1] * v.y + m[2] * v.z + m[3],
+                 m[4] * v.x + m[5] * v.y + m[6] * v.z + m[7],
+                 m[8] * v.x + m[9] * v.y + m[10] * v.z + m[11])
+        }
+
+        /// Tolerance for equality-class volume checks (transform
+        /// preservation, exact addition): 1e-6 relative — two
+        /// orders of magnitude tighter than any failure signature
+        /// Stage 4 recorded (a dropped solid loses whole percent),
+        /// loose enough for GProp integration noise.
+        func volumeTol(_ v: Double) -> Double { max(1e-6, abs(v) * 1e-6) }
+
+        /// A point PROVEN strictly inside solid `h` — a material
+        /// witness for verify-then-accept — or nil when no point
+        /// can be proven: the bounds centre when it classifies in,
+        /// else the largest planar faces' centres stepped inward
+        /// along their outward normals (2% of the smallest bounds
+        /// dimension, up to 8 faces tried). A face census the
+        /// provider cannot answer (a test stub) also yields nil.
+        /// A nil witness never fails a feature — the volume
+        /// envelope still applies — it only means this body
+        /// offered no provable interior point.
+        func interiorWitness(_ p: any CascadeKernelProvider, _ h: Int) throws -> Vec3? {
+            let b = try p.bounds(h)
+            let center = (b.min + b.max) * 0.5
+            if try p.contains(h, point: center) { return center }
+            let size = b.max - b.min
+            let minDim = min(size.x, min(size.y, size.z))
+            guard minDim > 0 else { return nil }
+            do {
+                let census = try p.census(h)
+                var faces: [(area: Double, center: Vec3, normal: Vec3)] = []
+                for i in 0..<census.faces {
+                    let f = try p.faceInfo(h, index: i)
+                    if f.isPlanar, f.area > 0 {
+                        faces.append((area: f.area, center: f.center, normal: f.normal))
+                    }
+                }
+                faces.sort { $0.area > $1.area }
+                let step = minDim * 0.02
+                for f in faces.prefix(8) {
+                    let candidate = f.center - f.normal * step
+                    if try p.contains(h, point: candidate) { return candidate }
+                }
+            } catch {
+                return nil
+            }
+            return nil
+        }
+
+        /// The axis on which two bounding boxes are disjoint
+        /// (intervals separated or just touching) and the gap's
+        /// midpoint coordinate on it — nil when the boxes overlap
+        /// on every axis. Copies disjoint from the accumulated
+        /// body must fuse to exactly the summed volume, and a
+        /// point on the gap's mid-plane is provably outside both.
+        func disjointAxis(_ a: (min: Vec3, max: Vec3),
+                          _ b: (min: Vec3, max: Vec3)) -> (axis: Int, mid: Double)? {
+            let amin = [a.min.x, a.min.y, a.min.z], amax = [a.max.x, a.max.y, a.max.z]
+            let bmin = [b.min.x, b.min.y, b.min.z], bmax = [b.max.x, b.max.y, b.max.z]
+            for k in 0..<3 {
+                if bmin[k] >= amax[k] { return (axis: k, mid: (amax[k] + bmin[k]) / 2) }
+                if amin[k] >= bmax[k] { return (axis: k, mid: (bmax[k] + amin[k]) / 2) }
+            }
+            return nil
+        }
+
+        /// Fuse ONE transformed copy of `source` into `acc`,
+        /// verify-then-accept — the Stage 5 discipline, mirroring
+        /// mc_thread's verified fallback candidates (Stage 4 found
+        /// this OCCT build's boolean classifier unreliable per
+        /// configuration against transformed solids, so no fused
+        /// result is adopted on faith):
+        ///  - the copy alone must measure the source's volume (a
+        ///    transform that corrupts geometry is caught before
+        ///    it can poison the body);
+        ///  - the material witness, transported by the same
+        ///    matrix, must classify IN the copy and IN the result;
+        ///  - the fused volume must lie inside
+        ///    [max(acc, copy), acc + copy] — a fuse that drops or
+        ///    invents material is rejected, never adopted;
+        ///  - when the copy's bounds are disjoint from the
+        ///    accumulated bounds, the volumes must ADD (1e-5) and
+        ///    the gap-mid witness must classify OUT of the result.
+        /// Any failed check throws kernelShapeInvalid (KN603:
+        /// "the previous solid is kept" — it is; `acc` and
+        /// `source` are NOT released here, on success or failure;
+        /// the caller owns them and adopts the returned handle).
+        /// The copy is released in all paths; `accVolume` and
+        /// `accBounds` are updated on success only.
+        func fuseVerifiedCopy(_ p: any CascadeKernelProvider, source: Int,
+                              matrix: [Double], acc: Int,
+                              accVolume: inout Double,
+                              accBounds: inout (min: Vec3, max: Vec3),
+                              unitVolume: Double, witness: Vec3?,
+                              what: String) throws -> Int {
+            let copy = try p.transform(source, matrix: matrix)
+            do {
+                let copyVolume = try p.volume(copy)
+                guard abs(copyVolume - unitVolume) <= volumeTol(unitVolume) else {
+                    throw CADError.kernelShapeInvalid("\(what): a copied piece measured \(String(format: "%.3f", copyVolume)) mm³ instead of \(String(format: "%.3f", unitVolume)) mm³")
+                }
+                var witnessCopy: Vec3? = nil
+                if let w = witness {
+                    let t = applyMatrix(matrix, w)
+                    guard try p.contains(copy, point: t) else {
+                        throw CADError.kernelShapeInvalid("\(what): a copied piece is missing material it should hold")
+                    }
+                    witnessCopy = t
+                }
+                let copyBounds = try p.bounds(copy)
+                let gap = disjointAxis(accBounds, copyBounds)
+                let fused = try p.unite(acc, copy)
+                do {
+                    let fusedVolume = try p.volume(fused)
+                    let sum = accVolume + copyVolume
+                    guard fusedVolume >= max(accVolume, copyVolume) - volumeTol(sum),
+                          fusedVolume <= sum + volumeTol(sum) else {
+                        throw CADError.kernelShapeInvalid("\(what): combining the pieces measured \(String(format: "%.3f", fusedVolume)) mm³, outside the possible range \(String(format: "%.3f", max(accVolume, copyVolume)))–\(String(format: "%.3f", sum)) mm³")
+                    }
+                    if let g = gap {
+                        guard abs(fusedVolume - sum) <= max(1e-5, sum * 1e-5) else {
+                            throw CADError.kernelShapeInvalid("\(what): separated pieces should add to \(String(format: "%.3f", sum)) mm³ but measured \(String(format: "%.3f", fusedVolume)) mm³")
+                        }
+                        var outPoint = (accBounds.min + accBounds.max) * 0.5
+                        switch g.axis {
+                        case 0: outPoint = Vec3(g.mid, outPoint.y, outPoint.z)
+                        case 1: outPoint = Vec3(outPoint.x, g.mid, outPoint.z)
+                        default: outPoint = Vec3(outPoint.x, outPoint.y, g.mid)
+                        }
+                        guard try !p.contains(fused, point: outPoint) else {
+                            throw CADError.kernelShapeInvalid("\(what): the empty gap between pieces measured as solid")
+                        }
+                    }
+                    if let t = witnessCopy {
+                        guard try p.contains(fused, point: t) else {
+                            throw CADError.kernelShapeInvalid("\(what): a combined piece lost material it should hold")
+                        }
+                    }
+                    accVolume = fusedVolume
+                    accBounds = try p.bounds(fused)
+                    p.release(copy)
+                    return fused
+                } catch {
+                    p.release(fused)
+                    throw error
+                }
+            } catch {
+                p.release(copy)
+                throw error
+            }
+        }
+
         for feature in part.features {
             if firstError != nil {
                 statuses.append(FeatureStatus(featureID: feature.id, ok: false, errorCode: nil, message: "paused"))
@@ -459,12 +638,81 @@ public enum DocumentEngine {
                     try materializeBody()
                 }
                 if case .linearPattern(let count, let spacing) = feature.kind {
+                    if let p = provider, let h = solid {
+                        // Engine path (Stage 5): each copy is
+                        // transformed from the ORIGINAL solid and
+                        // fused in under verify-then-accept (see
+                        // fuseVerifiedCopy) — the legacy path
+                        // APPENDED translated copies without
+                        // combining them, so overlapping copies
+                        // double-counted their overlap; the engine
+                        // fuses, and the overlap is counted once.
+                        // The guard mirrors applyPattern's exactly.
+                        guard count >= 1, spacing.length > 0 else { throw CADError.patternCountInvalid(count) }
+                        let unit = try p.volume(h)
+                        let witness = try interiorWitness(p, h)
+                        var acc = h
+                        var accVolume = unit
+                        var accBounds = try p.bounds(h)
+                        do {
+                            for i in 1..<count {
+                                let t = spacing * Double(i)
+                                let next = try fuseVerifiedCopy(
+                                    p, source: h,
+                                    matrix: [1, 0, 0, t.x, 0, 1, 0, t.y, 0, 0, 1, t.z],
+                                    acc: acc, accVolume: &accVolume, accBounds: &accBounds,
+                                    unitVolume: unit, witness: witness, what: "the pattern")
+                                let old = acc
+                                acc = next
+                                if old != h { p.release(old) }
+                            }
+                        } catch {
+                            if acc != h { p.release(acc) }
+                            throw error
+                        }
+                        if acc != h { p.release(h) }
+                        solid = acc
+                        solidMesh = nil
+                        statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
+                        logger.debug(.feature, "pattern ok (engine)", context: ["feature": feature.name, "count": "\(count)"])
+                        continue
+                    }
                     body = try DocumentEngine.applyPattern(mesh: body, count: count, spacing: spacing)
                     statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
                     logger.debug(.feature, "pattern ok", context: ["feature": feature.name, "count": "\(count)"])
                     continue
                 }
                 if case .mirror(let plane) = feature.kind {
+                    if let p = provider, let h = solid {
+                        // Engine path (Stage 5): the mirrored copy
+                        // across the ORIGIN plane — the legacy
+                        // semantics (Mesh.mirrored negates one
+                        // coordinate about zero, it does NOT mirror
+                        // about the body's own centre) — fused
+                        // under verify-then-accept.
+                        var m: [Double] = [1, 0, 0, 0,
+                                           0, 1, 0, 0,
+                                           0, 0, 1, 0]
+                        switch plane.axis {
+                        case 0: m[0] = -1
+                        case 1: m[5] = -1
+                        default: m[10] = -1
+                        }
+                        let unit = try p.volume(h)
+                        let witness = try interiorWitness(p, h)
+                        var accVolume = unit
+                        var accBounds = try p.bounds(h)
+                        let fused = try fuseVerifiedCopy(
+                            p, source: h, matrix: m, acc: h,
+                            accVolume: &accVolume, accBounds: &accBounds,
+                            unitVolume: unit, witness: witness, what: "the mirror")
+                        p.release(h)
+                        solid = fused
+                        solidMesh = nil
+                        statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
+                        logger.debug(.feature, "mirror ok (engine)", context: ["feature": feature.name, "plane": plane.rawValue])
+                        continue
+                    }
                     if body.triangleCount > 0 {
                         body = try CSG.union(body, body.mirrored(axis: plane.axis))
                     }
@@ -727,6 +975,45 @@ public enum DocumentEngine {
                     continue
                 }
                 if case .scaleBody(let f) = feature.kind {
+                    if let p = provider, let h = solid {
+                        // Engine path (Stage 5): a GTrsf scale
+                        // about the bounds centre — the legacy
+                        // centre (the engine's bounds are the true
+                        // B-rep bounds; the legacy centre came from
+                        // the tessellation's bounds) — verified
+                        // against the factor-product volume law
+                        // before the result is adopted. The law is
+                        // checked at 2%, not exactly: a NON-uniform
+                        // scale is the one transform whose curved
+                        // surfaces the engine converts to BSplines,
+                        // and its volume reading over those faces
+                        // drifts (+0.86% measured on a cylinder,
+                        // harness §13) even though the solid itself
+                        // is exact (bounds- and cut-verified there).
+                        // A uniform scale takes the exact path and
+                        // measures to 1e-6 — 2% still catches any
+                        // real factor error many times over. (The
+                        // matrix's axis placement itself is pinned
+                        // exactly by the kit's stub tests.)
+                        guard f.x > 0, f.y > 0, f.z > 0 else { throw CADError.transformInvalid("scale factors must be > 0") }
+                        let b = try p.bounds(h)
+                        let c = (b.min + b.max) * 0.5
+                        let m: [Double] = [f.x, 0, 0, c.x * (1 - f.x),
+                                           0, f.y, 0, c.y * (1 - f.y),
+                                           0, 0, f.z, c.z * (1 - f.z)]
+                        let r = try p.transform(h, matrix: m)
+                        let v0 = try p.volume(h)
+                        let v1 = try p.volume(r)
+                        let want = v0 * f.x * f.y * f.z
+                        guard abs(v1 - want) <= max(1e-4, want * 0.02) else {
+                            p.release(r)
+                            throw CADError.kernelShapeInvalid("scaling the body measured \(String(format: "%.3f", v1)) mm³ instead of the expected \(String(format: "%.3f", want)) mm³")
+                        }
+                        adoptSolid(p, r)
+                        statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
+                        logger.debug(.feature, "scale ok (engine)", context: ["feature": feature.name])
+                        continue
+                    }
                     guard body.triangleCount > 0 else { throw CADError.transformInvalid("no solid to scale yet") }
                     guard f.x > 0, f.y > 0, f.z > 0 else { throw CADError.transformInvalid("scale factors must be > 0") }
                     body = body.scaled(by: f, center: body.bounds.center)
@@ -735,6 +1022,30 @@ public enum DocumentEngine {
                     continue
                 }
                 if case .moveBody(let t, let axis, let deg) = feature.kind {
+                    if let p = provider, let h = solid {
+                        // Engine path (Stage 5): ONE GTrsf — rotate
+                        // about the bounds-centre axis, then
+                        // translate (the legacy order) — verified
+                        // volume-preserving before adoption (a rigid
+                        // map must conserve volume exactly).
+                        let b = try p.bounds(h)
+                        let center = (b.min + b.max) * 0.5
+                        var m = rotationMatrix(axis: axis, degrees: deg, center: center)
+                        m[3] += t.x
+                        m[7] += t.y
+                        m[11] += t.z
+                        let r = try p.transform(h, matrix: m)
+                        let v0 = try p.volume(h)
+                        let v1 = try p.volume(r)
+                        guard abs(v1 - v0) <= volumeTol(v0) else {
+                            p.release(r)
+                            throw CADError.kernelShapeInvalid("moving the body measured \(String(format: "%.3f", v1)) mm³ instead of \(String(format: "%.3f", v0)) mm³")
+                        }
+                        adoptSolid(p, r)
+                        statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
+                        logger.debug(.feature, "move ok (engine)", context: ["feature": feature.name])
+                        continue
+                    }
                     guard body.triangleCount > 0 else { throw CADError.transformInvalid("no solid to move yet") }
                     if abs(deg) > 1e-9 { body = body.rotatedAround(axis: axis, degrees: deg, center: body.bounds.center) }
                     body = body.translated(by: t)
@@ -794,6 +1105,48 @@ public enum DocumentEngine {
                 }
                 if case .circularPattern(let count, let axis, let total) = feature.kind {
                     guard count >= 2 else { throw CADError.patternCountInvalid(count) }
+                    if let p = provider, let h = solid {
+                        // Engine path (Stage 5): copies rotated
+                        // about the bounds-centre axis — the legacy
+                        // centre (engine bounds are the true B-rep
+                        // bounds) — each transformed from the
+                        // ORIGINAL and fused under verify-then-
+                        // accept. The angle ladder mirrors legacy
+                        // exactly: a full circle divides by count,
+                        // a partial arc divides by count - 1 so the
+                        // last copy lands on the total.
+                        let b = try p.bounds(h)
+                        let center = (b.min + b.max) * 0.5
+                        let full = total >= 359.999
+                        let unit = try p.volume(h)
+                        let witness = try interiorWitness(p, h)
+                        var acc = h
+                        var accVolume = unit
+                        var accBounds = b
+                        do {
+                            for i in 1..<count {
+                                let a = full ? total * Double(i) / Double(count)
+                                             : total * Double(i) / Double(count - 1)
+                                let next = try fuseVerifiedCopy(
+                                    p, source: h,
+                                    matrix: rotationMatrix(axis: axis, degrees: a, center: center),
+                                    acc: acc, accVolume: &accVolume, accBounds: &accBounds,
+                                    unitVolume: unit, witness: witness, what: "the circular pattern")
+                                let old = acc
+                                acc = next
+                                if old != h { p.release(old) }
+                            }
+                        } catch {
+                            if acc != h { p.release(acc) }
+                            throw error
+                        }
+                        if acc != h { p.release(h) }
+                        solid = acc
+                        solidMesh = nil
+                        statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil, message: nil))
+                        logger.debug(.feature, "circular pattern ok (engine)", context: ["feature": feature.name, "count": "\(count)"])
+                        continue
+                    }
                     guard body.triangleCount > 0 else { throw CADError.booleanEmptyResult }
                     let center = body.bounds.center
                     let full = total >= 359.999

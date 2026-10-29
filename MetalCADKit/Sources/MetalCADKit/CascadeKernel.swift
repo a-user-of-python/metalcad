@@ -100,6 +100,13 @@ public protocol CascadeKernelProvider: AnyObject {
     /// 3x4): rotation, translation, scale, mirror.
     func transform(_ s: Int, matrix: [Double]) throws -> Int
 
+    /// Point-in-solid classification: true only for points
+    /// strictly inside the solid (façade mc_contains — the
+    /// Load + Perform form of the solid classifier). Stage 5's
+    /// verify-then-accept pattern/mirror fusions witness their
+    /// results with it.
+    func contains(_ s: Int, point: Vec3) throws -> Bool
+
     /// OCCT's own volume (mm^3) / bounding box / census counts.
     func volume(_ s: Int) throws -> Double
     func bounds(_ s: Int) throws -> (min: Vec3, max: Vec3)

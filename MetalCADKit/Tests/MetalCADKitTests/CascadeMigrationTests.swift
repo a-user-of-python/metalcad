@@ -152,7 +152,16 @@ final class StubCascadeProvider: CascadeKernelProvider {
         return store(try CSG.subtract(outer, inner))
     }
 
-    func unite(_ a: Int, _ b: Int) throws -> Int { calls.append("unite"); return store(try CSG.union(try mesh(a), try mesh(b))) }
+    /// When true, `unite` returns a sliver instead of the real
+    /// union — a Stage-4-style silent classifier failure — so
+    /// tests can prove rebuild's verify-then-accept rejects it.
+    var corruptUnites = false
+
+    func unite(_ a: Int, _ b: Int) throws -> Int {
+        calls.append("unite")
+        if corruptUnites { return store(try Tessellation.box(width: 0.1, depth: 0.1, height: 0.1)) }
+        return store(try CSG.union(try mesh(a), try mesh(b)))
+    }
     func subtract(_ a: Int, _ b: Int) throws -> Int { calls.append("subtract"); return store(try CSG.subtract(try mesh(a), try mesh(b))) }
     func intersect(_ a: Int, _ b: Int) throws -> Int { calls.append("intersect"); return store(try CSG.intersect(try mesh(a), try mesh(b))) }
 
@@ -225,7 +234,26 @@ final class StubCascadeProvider: CascadeKernelProvider {
                  m[4] * v.x + m[5] * v.y + m[6] * v.z + m[7],
                  m[8] * v.x + m[9] * v.y + m[10] * v.z + m[11])
         }
-        return store(Mesh(vertices: out, indices: src.indices))
+        // A reflection (negative determinant) reverses winding;
+        // the real GTransform keeps faces outward, so flip the
+        // triangles to match — CSG and the volume sign depend on
+        // it (the same flip Mesh.mirrored performs).
+        let det = m[0] * (m[5] * m[10] - m[6] * m[9])
+                - m[1] * (m[4] * m[10] - m[6] * m[8])
+                + m[2] * (m[4] * m[9] - m[5] * m[8])
+        var idx = src.indices
+        if det < 0 {
+            idx = []
+            for t in 0..<src.triangleCount {
+                idx += [src.indices[t * 3], src.indices[t * 3 + 2], src.indices[t * 3 + 1]]
+            }
+        }
+        return store(Mesh(vertices: out, indices: idx))
+    }
+
+    func contains(_ s: Int, point: Vec3) throws -> Bool {
+        calls.append("contains")
+        return try mesh(s).contains(point)
     }
 
     func volume(_ s: Int) throws -> Double { try mesh(s).volume }
@@ -648,10 +676,15 @@ final class CascadeMigrationTests: XCTestCase {
         XCTAssertEqual(r.mesh.bounds.max.z, 10, accuracy: 0.6)
     }
 
-    /// Stage 3: a body-op AFTER a legacy feature (the body was
-    /// materialized to a mesh) takes the legacy path — the engine
-    /// is not asked to fillet a mesh it does not hold.
-    func testBodyOpAfterLegacyFeatureFallsBack() {
+    /// Stage 3 wrote this test as "a body-op after a legacy
+    /// feature falls back": scaleBody was its materializing
+    /// feature. Stage 5 migrated scaleBody, so the same chain now
+    /// stays on the engine end to end — pad (prism), scale
+    /// (transform), fillet (engine) — and the fillet IS asked of
+    /// the provider. (After Stage 5 every body feature is
+    /// solid-aware; the materialize-then-legacy fallback remains
+    /// only for booleanCutPlaceholder, which throws by design.)
+    func testBodyOpAfterScaleStaysOnEngine() {
         let stub = StubCascadeProvider()
         DocumentEngine.cascadeProvider = stub
         var part = Part(name: "Mixed")
@@ -662,7 +695,7 @@ final class CascadeMigrationTests: XCTestCase {
         part.features.append(Feature(name: "Fillet", kind: .fillet(radius: 1)))
         let r = DocumentEngine.rebuild(part: part)
         XCTAssertNil(r.firstError)
-        XCTAssertFalse(stub.calls.contains("fillet"), "fillet after materialization stays legacy: \(stub.calls)")
+        XCTAssertTrue(stub.calls.contains("fillet"), "fillet after an engine scale stays on the engine: \(stub.calls)")
         XCTAssertLessThan(r.mesh.volume, 1600)
         XCTAssertGreaterThan(r.mesh.volume, 1400)
     }
@@ -927,5 +960,259 @@ final class CascadeMigrationTests: XCTestCase {
         }
         XCTAssertEqual(sid, s.id)
         XCTAssertEqual(depth, 2.5)
+    }
+
+    // MARK: Stage 5 — patterns, mirror, move/scale
+
+    private func rectSketch(_ name: String, _ from: Vec2, _ to: Vec2) -> Sketch {
+        var sketch = Sketch(name: name, plane: Plane3(origin: .zero, xAxis: Vec3(1, 0, 0), yAxis: Vec3(0, 1, 0)))
+        sketch.addRectangle(from: from, to: to)
+        return sketch
+    }
+
+    /// Stage 5: a disjoint linear pattern fuses engine copies —
+    /// transform + unite through the provider, volumes adding
+    /// exactly (3 x the 800 mm^3 plate).
+    func testLinearPatternEngineDisjoint() {
+        let stub = StubCascadeProvider()
+        DocumentEngine.cascadeProvider = stub
+        var part = Part(name: "LP")
+        let s = plateSketch()
+        part.sketches.append(s)
+        part.features.append(Feature(name: "Pad", kind: .cascadePad(sketchID: s.id, length: 4)))
+        part.features.append(Feature(name: "Pattern", kind: .linearPattern(count: 3, spacing: Vec3(30, 0, 0))))
+        let r = DocumentEngine.rebuild(part: part)
+        XCTAssertNil(r.firstError)
+        XCTAssertEqual(r.mesh.volume, 2400, accuracy: 0.01)
+        XCTAssertTrue(stub.calls.contains("transform"))
+        XCTAssertTrue(stub.calls.contains("unite"))
+        XCTAssertEqual(r.bodies.count, 1)
+    }
+
+    /// Stage 5: overlapping linear-pattern copies FUSE on the
+    /// engine path (the union spans x -10...30 = 1600 mm^3).
+    func testLinearPatternEngineOverlappingFuses() {
+        let stub = StubCascadeProvider()
+        DocumentEngine.cascadeProvider = stub
+        var part = Part(name: "LPO")
+        let s = plateSketch()
+        part.sketches.append(s)
+        part.features.append(Feature(name: "Pad", kind: .cascadePad(sketchID: s.id, length: 4)))
+        part.features.append(Feature(name: "Pattern", kind: .linearPattern(count: 3, spacing: Vec3(10, 0, 0))))
+        let r = DocumentEngine.rebuild(part: part)
+        XCTAssertNil(r.firstError)
+        XCTAssertEqual(r.mesh.volume, 1600, accuracy: 0.01)
+    }
+
+    /// The legacy path APPENDS copies without combining them, so
+    /// the same overlapping pattern measures 2400 there — the
+    /// documented Stage 5 parity delta (legacy double-counts the
+    /// overlap; the engine counts it once).
+    func testLinearPatternLegacyAppendDelta() {
+        var part = Part(name: "LPL")
+        let s = plateSketch()
+        part.sketches.append(s)
+        part.features.append(Feature(name: "Pad", kind: .pad(sketchID: s.id, length: 4)))
+        part.features.append(Feature(name: "Pattern", kind: .linearPattern(count: 3, spacing: Vec3(10, 0, 0))))
+        let r = DocumentEngine.rebuild(part: part)
+        XCTAssertNil(r.firstError)
+        XCTAssertEqual(r.mesh.volume, 2400, accuracy: 0.01)
+    }
+
+    /// Stage 5: the pattern guard is the legacy one (count >= 1,
+    /// non-zero spacing) on the engine path too.
+    func testLinearPatternEngineRejectsZeroCount() {
+        let stub = StubCascadeProvider()
+        DocumentEngine.cascadeProvider = stub
+        var part = Part(name: "LP0")
+        let s = plateSketch()
+        part.sketches.append(s)
+        part.features.append(Feature(name: "Pad", kind: .cascadePad(sketchID: s.id, length: 4)))
+        part.features.append(Feature(name: "Pattern", kind: .linearPattern(count: 0, spacing: Vec3(10, 0, 0))))
+        let r = DocumentEngine.rebuild(part: part)
+        XCTAssertEqual(r.firstError?.code, "MCAD-FT411")
+    }
+
+    /// Stage 5: verify-then-accept REJECTS a silently corrupt
+    /// fuse (the stub returns a sliver): the feature fails with
+    /// KN603 and the rebuild output is still the pre-pattern body.
+    func testPatternVerificationRejectsCorruptUnite() {
+        let stub = StubCascadeProvider()
+        stub.corruptUnites = true
+        DocumentEngine.cascadeProvider = stub
+        var part = Part(name: "LPC")
+        let s = plateSketch()
+        part.sketches.append(s)
+        part.features.append(Feature(name: "Pad", kind: .cascadePad(sketchID: s.id, length: 4)))
+        part.features.append(Feature(name: "Pattern", kind: .linearPattern(count: 2, spacing: Vec3(30, 0, 0))))
+        let r = DocumentEngine.rebuild(part: part)
+        XCTAssertEqual(r.firstError?.code, "MCAD-KN603")
+        XCTAssertEqual(r.statuses.last?.ok, false)
+        XCTAssertEqual(r.mesh.volume, 800, accuracy: 0.01)
+    }
+
+    /// Stage 5: circular pattern about the bounds centre. The
+    /// 6x2 block (48 mm^3) at 0/90/180/270 degrees: the 6x2 and
+    /// 2x6 footprints cross in a 2x2 square, so the union is
+    /// 48 + 48 - 16 = 80.
+    func testCircularPatternEngine() {
+        let stub = StubCascadeProvider()
+        DocumentEngine.cascadeProvider = stub
+        var part = Part(name: "CP")
+        let s = rectSketch("Block", Vec2(8, -1), Vec2(14, 1))
+        part.sketches.append(s)
+        part.features.append(Feature(name: "Pad", kind: .cascadePad(sketchID: s.id, length: 4)))
+        part.features.append(Feature(name: "Circular", kind: .circularPattern(count: 4, axis: 2, totalDegrees: 360)))
+        let r = DocumentEngine.rebuild(part: part)
+        XCTAssertNil(r.firstError)
+        XCTAssertEqual(r.mesh.volume, 80, accuracy: 0.01)
+        XCTAssertTrue(stub.calls.contains("transform"))
+        XCTAssertTrue(stub.calls.contains("unite"))
+    }
+
+    /// Stage 5: circular pattern keeps the legacy count guard.
+    func testCircularPatternEngineRejectsCountOne() {
+        let stub = StubCascadeProvider()
+        DocumentEngine.cascadeProvider = stub
+        var part = Part(name: "CP1")
+        let s = plateSketch()
+        part.sketches.append(s)
+        part.features.append(Feature(name: "Pad", kind: .cascadePad(sketchID: s.id, length: 4)))
+        part.features.append(Feature(name: "Circular", kind: .circularPattern(count: 1, axis: 2, totalDegrees: 360)))
+        let r = DocumentEngine.rebuild(part: part)
+        XCTAssertEqual(r.firstError?.code, "MCAD-FT411")
+    }
+
+    /// Stage 5: mirror across the YZ origin plane — a block at
+    /// x 2...6 gains its disjoint twin (volume doubles, bounds
+    /// span -6...6).
+    func testMirrorEngineDisjoint() {
+        let stub = StubCascadeProvider()
+        DocumentEngine.cascadeProvider = stub
+        var part = Part(name: "MI")
+        let s = rectSketch("Block", Vec2(2, -2), Vec2(6, 2))
+        part.sketches.append(s)
+        part.features.append(Feature(name: "Pad", kind: .cascadePad(sketchID: s.id, length: 4)))
+        part.features.append(Feature(name: "Mirror", kind: .mirror(plane: .yz)))
+        let r = DocumentEngine.rebuild(part: part)
+        XCTAssertNil(r.firstError)
+        XCTAssertEqual(r.mesh.volume, 128, accuracy: 0.01)
+        XCTAssertEqual(r.mesh.bounds.min.x, -6, accuracy: 0.01)
+        XCTAssertEqual(r.mesh.bounds.max.x, 6, accuracy: 0.01)
+    }
+
+    /// Stage 5: a body crossing the mirror plane fuses with its
+    /// overlapping twin (union spans x -6...6 = 192 mm^3).
+    func testMirrorEngineCrossing() {
+        let stub = StubCascadeProvider()
+        DocumentEngine.cascadeProvider = stub
+        var part = Part(name: "MIX")
+        let s = rectSketch("Block", Vec2(-2, -2), Vec2(6, 2))
+        part.sketches.append(s)
+        part.features.append(Feature(name: "Pad", kind: .cascadePad(sketchID: s.id, length: 4)))
+        part.features.append(Feature(name: "Mirror", kind: .mirror(plane: .yz)))
+        let r = DocumentEngine.rebuild(part: part)
+        XCTAssertNil(r.firstError)
+        XCTAssertEqual(r.mesh.volume, 192, accuracy: 0.01)
+    }
+
+    /// Stage 5: a downstream cut composes with the mirrored pair
+    /// (a pocket over the mirrored half removes exactly its top).
+    func testMirrorThenPocketEngine() {
+        let stub = StubCascadeProvider()
+        DocumentEngine.cascadeProvider = stub
+        var part = Part(name: "MIP")
+        let s = rectSketch("Block", Vec2(2, -2), Vec2(6, 2))
+        part.sketches.append(s)
+        part.features.append(Feature(name: "Pad", kind: .cascadePad(sketchID: s.id, length: 4)))
+        part.features.append(Feature(name: "Mirror", kind: .mirror(plane: .yz)))
+        var pocketSketch = Sketch(name: "Pocket", plane: Plane3(origin: Vec3(0, 0, 4), xAxis: Vec3(1, 0, 0), yAxis: Vec3(0, 1, 0)))
+        pocketSketch.addRectangle(from: Vec2(-6, -2), to: Vec2(-2, 2))
+        part.sketches.append(pocketSketch)
+        part.features.append(Feature(name: "Pocket", kind: .cascadePocket(sketchID: pocketSketch.id, depth: 2)))
+        let r = DocumentEngine.rebuild(part: part)
+        XCTAssertNil(r.firstError)
+        XCTAssertEqual(r.mesh.volume, 96, accuracy: 0.01)
+    }
+
+    /// Stage 5: move = rotate about the bounds centre, then
+    /// translate (the legacy order), through the engine.
+    func testMoveBodyEngineTranslation() {
+        let stub = StubCascadeProvider()
+        DocumentEngine.cascadeProvider = stub
+        var part = Part(name: "MV")
+        let s = plateSketch()
+        part.sketches.append(s)
+        part.features.append(Feature(name: "Pad", kind: .cascadePad(sketchID: s.id, length: 4)))
+        part.features.append(Feature(name: "Move", kind: .moveBody(translation: Vec3(5, 3, 0), rotationAxis: 2, rotationDegrees: 0)))
+        let r = DocumentEngine.rebuild(part: part)
+        XCTAssertNil(r.firstError)
+        XCTAssertEqual(r.mesh.volume, 800, accuracy: 0.01)
+        XCTAssertEqual(r.mesh.bounds.min.x, -5, accuracy: 0.01)
+        XCTAssertEqual(r.mesh.bounds.min.y, -2, accuracy: 0.01)
+        XCTAssertEqual(r.mesh.bounds.max.x, 15, accuracy: 0.01)
+        XCTAssertEqual(r.mesh.bounds.max.y, 8, accuracy: 0.01)
+    }
+
+    /// Stage 5: a 90-degree move rotation about the bounds centre
+    /// swaps the footprint extents, volume unchanged.
+    func testMoveBodyEngineRotation() {
+        let stub = StubCascadeProvider()
+        DocumentEngine.cascadeProvider = stub
+        var part = Part(name: "MVR")
+        let s = rectSketch("Block", Vec2(8, -1), Vec2(14, 1))
+        part.sketches.append(s)
+        part.features.append(Feature(name: "Pad", kind: .cascadePad(sketchID: s.id, length: 4)))
+        part.features.append(Feature(name: "Move", kind: .moveBody(translation: .zero, rotationAxis: 2, rotationDegrees: 90)))
+        let r = DocumentEngine.rebuild(part: part)
+        XCTAssertNil(r.firstError)
+        XCTAssertEqual(r.mesh.volume, 48, accuracy: 0.01)
+        XCTAssertEqual(r.mesh.bounds.min.x, 10, accuracy: 0.01)
+        XCTAssertEqual(r.mesh.bounds.max.x, 12, accuracy: 0.01)
+        XCTAssertEqual(r.mesh.bounds.min.y, -3, accuracy: 0.01)
+        XCTAssertEqual(r.mesh.bounds.max.y, 3, accuracy: 0.01)
+    }
+
+    /// Stage 5: scale about the bounds centre — (2,1,0.5) keeps
+    /// the volume (factor product 1) and maps the bounds exactly;
+    /// (2,2,2) multiplies the volume by 8.
+    func testScaleBodyEngine() {
+        let stub = StubCascadeProvider()
+        DocumentEngine.cascadeProvider = stub
+        var part = Part(name: "SC")
+        let s = plateSketch()
+        part.sketches.append(s)
+        part.features.append(Feature(name: "Pad", kind: .cascadePad(sketchID: s.id, length: 4)))
+        part.features.append(Feature(name: "Scale", kind: .scaleBody(factors: Vec3(2, 1, 0.5))))
+        let r = DocumentEngine.rebuild(part: part)
+        XCTAssertNil(r.firstError)
+        XCTAssertEqual(r.mesh.volume, 800, accuracy: 0.01)
+        XCTAssertEqual(r.mesh.bounds.min.x, -20, accuracy: 0.01)
+        XCTAssertEqual(r.mesh.bounds.max.x, 20, accuracy: 0.01)
+        XCTAssertEqual(r.mesh.bounds.min.z, 1, accuracy: 0.01)
+        XCTAssertEqual(r.mesh.bounds.max.z, 3, accuracy: 0.01)
+
+        var part2 = Part(name: "SC2")
+        let s2 = plateSketch()
+        part2.sketches.append(s2)
+        part2.features.append(Feature(name: "Pad", kind: .cascadePad(sketchID: s2.id, length: 4)))
+        part2.features.append(Feature(name: "Scale", kind: .scaleBody(factors: Vec3(2, 2, 2))))
+        let r2 = DocumentEngine.rebuild(part: part2)
+        XCTAssertNil(r2.firstError)
+        XCTAssertEqual(r2.mesh.volume, 6400, accuracy: 0.01)
+    }
+
+    /// Stage 5: the scale factor guard is the legacy one on the
+    /// engine path too.
+    func testScaleBodyEngineRejectsZeroFactor() {
+        let stub = StubCascadeProvider()
+        DocumentEngine.cascadeProvider = stub
+        var part = Part(name: "SC0")
+        let s = plateSketch()
+        part.sketches.append(s)
+        part.features.append(Feature(name: "Pad", kind: .cascadePad(sketchID: s.id, length: 4)))
+        part.features.append(Feature(name: "Scale", kind: .scaleBody(factors: Vec3(0, 1, 1))))
+        let r = DocumentEngine.rebuild(part: part)
+        XCTAssertEqual(r.firstError?.code, "MCAD-FT412")
     }
 }

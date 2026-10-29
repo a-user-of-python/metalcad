@@ -459,6 +459,15 @@ final class CascadeKernelBridge: CascadeKernelProvider {
         }
     }
 
+    func contains(_ s: Int, point: Vec3) throws -> Bool {
+        try locked {
+            var err: Int32 = 0
+            let r = mc_contains(try shape(s), point.x, point.y, point.z, &err)
+            guard err == MC_OK.rawValue else { throw CADError.kernelOperationFailed(Self.lastError()) }
+            return r == 1
+        }
+    }
+
     func census(_ s: Int) throws -> (faces: Int, edges: Int, vertices: Int) {
         try locked {
             var err: Int32 = 0

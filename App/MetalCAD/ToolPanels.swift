@@ -613,10 +613,13 @@ struct NewSketchPanel: View {
 
     private func create() {
         guard let plane = resolvedPlane else { return }
+        var faceIndex: Int? = nil
+        if case .face(let face) = model.planeChoice { faceIndex = face.censusIndex }
         let name = nameText.isEmpty
-            ? "Sketch \((model.part?.sketches.count ?? 0) + 1)"
+            ? (faceIndex.map { "Sketch on Face \($0)" }
+               ?? "Sketch \((model.part?.sketches.count ?? 0) + 1)")
             : nameText
-        let sketch = model.addSketch(plane: plane, name: name)
+        let sketch = model.addSketch(plane: plane, name: name, sourceFaceIndex: faceIndex)
         if case .face(let face) = model.planeChoice {
             model.faceOutlines[sketch.id] = face.outline2D
         }

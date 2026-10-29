@@ -8,6 +8,19 @@ public struct PlanarFace: Equatable {
     public var area: Double
     public var centroid: Vec3
     public var triangleCount: Int
+    /// Census face index when this face was resolved through the
+    /// OCCT engine (Stage 6 sketch-on-face); nil for faces grouped
+    /// from a tessellation by FaceExtractor.
+    public var censusIndex: Int? = nil
+    public init(plane: Plane3, outline2D: [Vec2], area: Double, centroid: Vec3,
+                triangleCount: Int, censusIndex: Int? = nil) {
+        self.plane = plane
+        self.outline2D = outline2D
+        self.area = area
+        self.centroid = centroid
+        self.triangleCount = triangleCount
+        self.censusIndex = censusIndex
+    }
 }
 
 /// Remove points that lie on the segment between their neighbours
@@ -154,6 +167,63 @@ public enum FaceExtractor {
             return a.centroid.z < b.centroid.z
         }
         return (order.map { faces[$0] }, order.map { faceTris[$0] }, mesh)
+    }
+
+    /// The outer boundary of an explicit triangle set of `mesh`,
+    /// expressed in `plane` coordinates — the sketch editor's
+    /// guide outline for a face resolved through the engine
+    /// (Stage 6): the triangles are one census face's tessellation
+    /// range, whose vertices are shared within the face, so
+    /// boundary edges (used by exactly one of the triangles) chain
+    /// into exact loops. The largest loop wins, as in groupedFaces.
+    public static func outline(of mesh: Mesh, triangles: [Int], plane: Plane3) -> [Vec2] {
+        guard !triangles.isEmpty else { return [] }
+        func key(_ a: UInt32, _ b: UInt32) -> UInt64 {
+            (UInt64(max(a, b)) << 32) | UInt64(min(a, b))
+        }
+        var edgeUse: [UInt64: Int] = [:]
+        for t in triangles {
+            for k in 0..<3 {
+                let i0 = mesh.indices[t * 3 + k], i1 = mesh.indices[t * 3 + (k + 1) % 3]
+                edgeUse[key(i0, i1), default: 0] += 1
+            }
+        }
+        func to2D(_ p: Vec3) -> Vec2 {
+            let d = p - plane.origin
+            return Vec2(d.dot(plane.xAxis), d.dot(plane.yAxis))
+        }
+        var remaining: [(Vec2, Vec2)] = []
+        for t in triangles {
+            for k in 0..<3 {
+                let i0 = mesh.indices[t * 3 + k], i1 = mesh.indices[t * 3 + (k + 1) % 3]
+                if edgeUse[key(i0, i1)] == 1 {
+                    remaining.append((to2D(mesh.vertices[Int(i0)]), to2D(mesh.vertices[Int(i1)])))
+                }
+            }
+        }
+        var loops: [[Vec2]] = []
+        while !remaining.isEmpty {
+            var chain: [Vec2] = [remaining[0].0, remaining[0].1]
+            remaining.removeFirst()
+            var grew = true
+            while grew {
+                grew = false
+                for i in remaining.indices {
+                    let e = remaining[i]
+                    if e.0.distance(to: chain.last!) < 1e-6 {
+                        chain.append(e.1); remaining.remove(at: i); grew = true; break
+                    } else if e.1.distance(to: chain.last!) < 1e-6 {
+                        chain.append(e.0); remaining.remove(at: i); grew = true; break
+                    }
+                }
+            }
+            if chain.count >= 3 {
+                if chain.count > 1 && chain.first!.distance(to: chain.last!) < 1e-6 { chain.removeLast() }
+                loops.append(chain)
+            }
+        }
+        let outline = loops.max(by: { abs(polygonArea($0)) < abs(polygonArea($1)) }) ?? []
+        return dropCollinear(outline)
     }
 
     public static func planarFaces(of meshIn: Mesh, minArea: Double = 1e-6) -> [PlanarFace] {

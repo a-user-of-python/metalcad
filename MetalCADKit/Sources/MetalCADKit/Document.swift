@@ -140,6 +140,12 @@ public struct RebuildResult {
     public var firstError: CADError?
     /// Mass in grams from the part's material density; nil if no material.
     public var massGrams: Double? = nil
+    /// Stage 6: a retained reference to the final engine solid,
+    /// present only when the rebuild ended on one and its display
+    /// tessellation carried census face ranges. Sketch-on-face
+    /// resolves picked triangles through it. Releasing the result
+    /// releases the engine handle (the snapshot's deinit).
+    public var engineBody: EngineBodySnapshot? = nil
 }
 
 public enum DocumentEngine {
@@ -187,14 +193,20 @@ public enum DocumentEngine {
         let provider = DocumentEngine.cascadeProvider
         var solid: Int? = nil
         var solidMesh: Mesh? = nil     // tessellation cache for `solid`
+        var solidFaceOfTriangle: [Int] = []  // census ranges paired with `solidMesh`
         var solidBodies: [Int] = []    // completed engine bodies
 
         /// The running body as a mesh (tessellating the engine
-        /// solid on first ask).
+        /// solid on first ask). The tessellation is taken WITH its
+        /// census face ranges: the pair is only ever filled here,
+        /// together, so the ranges always describe `solidMesh` —
+        /// Stage 6's end-of-rebuild snapshot relies on that.
         func currentMesh() throws -> Mesh {
             if let h = solid {
                 if solidMesh == nil {
-                    solidMesh = try provider!.tessellate(h, deflection: DocumentEngine.previewDeflection)
+                    let t = try provider!.tessellateWithFaceRanges(h, deflection: DocumentEngine.previewDeflection)
+                    solidMesh = t.mesh
+                    solidFaceOfTriangle = t.faceOfTriangle
                 }
                 return solidMesh!
             }
@@ -1764,8 +1776,12 @@ public enum DocumentEngine {
             }
         }
         var allBodies = bodies
+        var engineBody: EngineBodySnapshot? = nil
         // Engine bodies join the output through tessellation; every
-        // handle is released exactly once, here or in materialize.
+        // handle is released exactly once, here or in materialize —
+        // except the final running body's, whose ownership passes
+        // to the result's Stage 6 snapshot when its tessellation
+        // carried census face ranges (the snapshot releases it).
         if let p = provider {
             do {
                 for h in solidBodies {
@@ -1773,8 +1789,17 @@ public enum DocumentEngine {
                     p.release(h)
                 }
                 if let h = solid {
-                    allBodies.append(try currentMesh())
-                    p.release(h)
+                    let offset = allBodies.reduce(0) { $0 + $1.triangleCount }
+                    let finalMesh = try currentMesh()
+                    allBodies.append(finalMesh)
+                    if solidFaceOfTriangle.count == finalMesh.triangleCount,
+                       !solidFaceOfTriangle.isEmpty {
+                        engineBody = EngineBodySnapshot(
+                            provider: p, handle: h, mesh: finalMesh,
+                            triangleOffset: offset, faceOfTriangle: solidFaceOfTriangle)
+                    } else {
+                        p.release(h)
+                    }
                 } else if body.triangleCount > 0 {
                     allBodies.append(body)
                 }
@@ -1800,7 +1825,7 @@ public enum DocumentEngine {
             "ok": firstError == nil ? "1" : "0",
         ])
         return RebuildResult(mesh: combined, bodies: allBodies, statuses: statuses, warnings: warnings,
-                             firstError: firstError, massGrams: mass)
+                             firstError: firstError, massGrams: mass, engineBody: engineBody)
     }
 
     /// Chain a sketch's line entities into an ordered world-space polyline

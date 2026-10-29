@@ -320,9 +320,13 @@ final class EditorModel: ObservableObject {
 
     /// Create a sketch on an explicit plane (New Sketch panel) and
     /// return it so the caller can navigate straight into it.
+    /// `sourceFaceIndex` is Stage 6 metadata: the census face the
+    /// plane was taken from, when it was taken from one (display
+    /// only — the plane itself is the stored contract).
     @discardableResult
-    func addSketch(plane: Plane3, name: String) -> Sketch {
-        let sketch = Sketch(name: name, plane: plane)
+    func addSketch(plane: Plane3, name: String, sourceFaceIndex: Int? = nil) -> Sketch {
+        var sketch = Sketch(name: name, plane: plane)
+        sketch.sourceFaceIndex = sourceFaceIndex
         mutate { $0.sketches.append(sketch) }
         MCLog.shared.info(.sketch, "sketch created",
                           context: ["name": name])
@@ -658,15 +662,71 @@ final class EditorModel: ObservableObject {
 
     /// Create a sketch on an already-resolved face and remember its
     /// outline as the editor guide. Returns the new sketch's id.
+    /// A face resolved through the engine (censusIndex set, Stage 6)
+    /// names the sketch after its census face and stamps the
+    /// source-face metadata.
     @discardableResult
     func addSketchOnFace(_ face: PlanarFace) -> String {
-        let sketch = Sketch(name: "Face sketch", plane: face.plane)
+        var sketch = Sketch(name: face.censusIndex.map { "Sketch on Face \($0)" } ?? "Face sketch",
+                            plane: face.plane)
+        sketch.sourceFaceIndex = face.censusIndex
         faceOutlines[sketch.id] = face.outline2D
         mutate { $0.sketches.append(sketch) }
         MCLog.shared.info(.sketch, "face sketch created",
                           context: ["area": String(format: "%.1f", face.area),
                                     "tris": "\(face.triangleCount)"])
         return sketch.id
+    }
+
+    /// Stage 6: how a face pick resolves when the rebuild ended on
+    /// an engine solid whose tessellation carries census ranges.
+    enum EngineFaceResolution {
+        /// The tapped triangle is not part of the retained engine
+        /// body (or there is none) — the caller falls back to the
+        /// mesh face resolver, unchanged.
+        case notCovered
+        /// The tapped census face exists but is curved — refused
+        /// with a plain-words coded error (already in actionError).
+        case refused
+        /// A planar census face, resolved exactly through the
+        /// engine (plane from the façade, not from triangles).
+        case face(PlanarFace)
+    }
+
+    /// Resolve a SceneKit hit-test triangle through the retained
+    /// engine body's census (Stage 6 sketch-on-face). The sketch
+    /// plane is the face's OWN plane from OCCT — origin and axes
+    /// exact, normal outward — never a fit through tessellation
+    /// triangles. Curved faces are refused (KN602, plain words):
+    /// no tangent-plane approximation is ever substituted.
+    func resolveEngineFace(triangleIndex: Int) -> EngineFaceResolution {
+        guard let snap = rebuild?.engineBody,
+              let faceIndex = snap.faceIndex(combinedTriangle: triangleIndex) else {
+            return .notCovered
+        }
+        do {
+            let info = try snap.faceInfo(faceIndex)
+            guard info.isPlanar else {
+                actionError = .kernelOperationFailed(
+                    "that face is curved — a sketch needs a flat face. Tap a flat face of the part instead.")
+                MCLog.shared.log(error: actionError!, category: .sketch,
+                                 context: ["face": "\(faceIndex)"])
+                return .refused
+            }
+            let plane = try snap.facePlane(faceIndex)
+            let tris = snap.triangles(ofFace: faceIndex)
+            let outline = FaceExtractor.outline(of: snap.mesh, triangles: tris, plane: plane)
+            return .face(PlanarFace(plane: plane, outline2D: outline, area: info.area,
+                                    centroid: info.center, triangleCount: tris.count,
+                                    censusIndex: faceIndex))
+        } catch let e as CADError {
+            actionError = e
+            MCLog.shared.log(error: e, category: .sketch, context: ["face": "\(faceIndex)"])
+            return .refused
+        } catch {
+            actionError = .unknown("\(error)")
+            return .refused
+        }
     }
 
     // MARK: File actions
@@ -1668,6 +1728,30 @@ struct EditorView: View {
 
     private func handleFacePicked(_ triangleIndex: Int) {
         pickingFace = false
+        // Stage 6: the two SKETCH purposes resolve through the
+        // engine census first when the tapped triangle belongs to
+        // the retained engine body — the sketch plane is then the
+        // face's exact OCCT plane, and a curved face is refused
+        // with plain words. Anything not covered by the snapshot
+        // (earlier bodies, mesh-ended chains) keeps the mesh
+        // resolver below, unchanged; the datum / midplane /
+        // redefine purposes always use it, as before.
+        if pickPurpose == .sketchOnFace || pickPurpose == .newSketchFace {
+            switch model.resolveEngineFace(triangleIndex: triangleIndex) {
+            case .face(let face):
+                if pickPurpose == .sketchOnFace {
+                    sketchNav = SketchNav(id: model.addSketchOnFace(face))
+                } else {
+                    model.planeChoice = .face(face)
+                    activeTool = .newSketch
+                }
+                return
+            case .refused:
+                return
+            case .notCovered:
+                break
+            }
+        }
         guard let face = model.resolvePickedFace(triangleIndex: triangleIndex) else { return }
         switch pickPurpose {
         case .sketchOnFace:

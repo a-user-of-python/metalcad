@@ -265,8 +265,52 @@ final class StubCascadeProvider: CascadeKernelProvider {
         let m = try mesh(s)
         return (m.triangleCount, 0, m.vertices.count)
     }
+    /// Stage 6: per-handle grouped faces (lazily extracted from
+    /// the stored mesh with the kit's own FaceExtractor) backing
+    /// faceInfo / facePlane / tessellation face ranges — the
+    /// stub's stand-in for the census. Indices are the grouped
+    /// faces' deterministic order.
+    private var groupedCache: [Int: (faces: [PlanarFace], triangles: [[Int]])] = [:]
+    /// Face indices `faceInfo` reports as curved; `facePlane`
+    /// refuses them (the curved-face refusal path).
+    var curvedFaceIndices: Set<Int> = []
+
+    private func grouped(_ s: Int) throws -> (faces: [PlanarFace], triangles: [[Int]]) {
+        if let g = groupedCache[s] { return g }
+        let g = FaceExtractor.groupedFaces(of: try mesh(s))
+        groupedCache[s] = (g.faces, g.triangles)
+        return groupedCache[s]!
+    }
+
     func faceInfo(_ s: Int, index: Int) throws -> (area: Double, center: Vec3, normal: Vec3, isPlanar: Bool) {
-        throw CADError.kernelOperationFailed("stub: no face info")
+        let g = try grouped(s)
+        guard g.faces.indices.contains(index) else {
+            throw CADError.kernelOperationFailed("stub: face index out of range")
+        }
+        let f = g.faces[index]
+        return (f.area, f.centroid, f.plane.normal, !curvedFaceIndices.contains(index))
+    }
+
+    func facePlane(_ s: Int, index: Int) throws -> Plane3 {
+        calls.append("facePlane")
+        guard !curvedFaceIndices.contains(index) else {
+            throw CADError.kernelOperationFailed("stub: face is not planar - a sketch plane needs a flat face")
+        }
+        let g = try grouped(s)
+        guard g.faces.indices.contains(index) else {
+            throw CADError.kernelOperationFailed("stub: face index out of range")
+        }
+        return g.faces[index].plane
+    }
+
+    func tessellateWithFaceRanges(_ s: Int, deflection: Double) throws -> (mesh: Mesh, faceOfTriangle: [Int]) {
+        let m = try mesh(s)
+        let g = try grouped(s)
+        var map = [Int](repeating: 0, count: m.triangleCount)
+        for (fi, tris) in g.triangles.enumerated() {
+            for t in tris { map[t] = fi }
+        }
+        return (m, map)
     }
     func edgeInfos(_ s: Int) throws -> [CascadeEdgeInfo] {
         let m = try mesh(s)
@@ -278,7 +322,11 @@ final class StubCascadeProvider: CascadeKernelProvider {
     func tessellate(_ s: Int, deflection: Double) throws -> Mesh { try mesh(s) }
     func exportSTEP(_ s: Int, path: String) throws { throw CADError.kernelOperationFailed("stub: no STEP") }
     func importSTEP(path: String) throws -> Int { throw CADError.kernelOperationFailed("stub: no STEP") }
-    func release(_ s: Int) { registry[s] = nil }
+    func release(_ s: Int) { registry[s] = nil; groupedCache[s] = nil }
+    /// Test probe: handles the stub still holds (snapshot
+    /// ownership shows up here — a retained final body stays
+    /// registered until its snapshot goes away).
+    var liveHandles: [Int] { Array(registry.keys) }
 }
 
 final class CascadeMigrationTests: XCTestCase {
@@ -1214,5 +1262,225 @@ final class CascadeMigrationTests: XCTestCase {
         part.features.append(Feature(name: "Scale", kind: .scaleBody(factors: Vec3(0, 1, 1))))
         let r = DocumentEngine.rebuild(part: part)
         XCTAssertEqual(r.firstError?.code, "MCAD-FT412")
+    }
+
+    // MARK: - Stage 6 (1.21): sketch-on-face
+
+    /// A 20x10 plate padded 10 thick through the provider.
+    private func platePart10() -> Part {
+        var part = Part(name: "FacePlate")
+        let s = plateSketch()
+        part.sketches.append(s)
+        part.features.append(Feature(name: "Pad", kind: .cascadePad(sketchID: s.id, length: 10)))
+        return part
+    }
+
+    /// The census-style index of the stub face whose normal is +Z
+    /// (the plate's top), resolved through the snapshot itself.
+    private func topFaceIndex(_ snap: EngineBodySnapshot) throws -> Int {
+        for i in 0..<64 {
+            guard let info = try? snap.faceInfo(i) else { break }
+            if info.isPlanar, info.normal.z > 0.999 { return i }
+        }
+        throw CADError.kernelOperationFailed("test: no +Z face")
+    }
+
+    /// Stage 6: a rebuild that ends on an engine solid carries a
+    /// snapshot; every combined-mesh triangle of the body resolves
+    /// to a census face, and the top face's plane is exact.
+    func testRebuildEndsWithEngineSnapshot() throws {
+        let stub = StubCascadeProvider()
+        DocumentEngine.cascadeProvider = stub
+        let result = DocumentEngine.rebuild(part: platePart10())
+        XCTAssertNil(result.firstError)
+        let snap = try XCTUnwrap(result.engineBody, "engine-ended rebuild must carry a snapshot")
+        XCTAssertEqual(snap.triangleOffset, 0)
+        XCTAssertEqual(snap.faceOfTriangle.count, result.mesh.triangleCount)
+        for t in 0..<result.mesh.triangleCount {
+            XCTAssertNotNil(snap.faceIndex(combinedTriangle: t), "triangle \(t) must resolve to a face")
+        }
+        XCTAssertNil(snap.faceIndex(combinedTriangle: result.mesh.triangleCount))
+        let top = try topFaceIndex(snap)
+        let plane = try snap.facePlane(top)
+        XCTAssertEqual(plane.normal.z, 1, accuracy: 1e-9)
+        XCTAssertEqual(plane.origin.z, 10, accuracy: 1e-9)
+        XCTAssertTrue(stub.calls.contains("facePlane"))
+    }
+
+    /// Stage 6: the snapshot OWNS the final handle — it stays live
+    /// while the result lives and is released with it; every other
+    /// handle rebuild made was already released inside rebuild.
+    func testSnapshotOwnsFinalHandle() {
+        let stub = StubCascadeProvider()
+        DocumentEngine.cascadeProvider = stub
+        var result: RebuildResult? = DocumentEngine.rebuild(part: platePart10())
+        XCTAssertNotNil(result?.engineBody)
+        XCTAssertEqual(stub.liveHandles.count, 1,
+                       "only the snapshot's handle may outlive rebuild: \(stub.liveHandles)")
+        result = nil
+        XCTAssertEqual(stub.liveHandles.count, 0,
+                       "dropping the result must release the snapshot handle")
+    }
+
+    /// Stage 6: no provider → no snapshot (kit-only contexts are
+    /// exactly as before).
+    func testNoProviderNoSnapshot() {
+        DocumentEngine.cascadeProvider = nil
+        let result = DocumentEngine.rebuild(part: platePart10())
+        XCTAssertNil(result.engineBody)
+    }
+
+    /// Stage 6, the headline flow: sketch on the plate's TOP face
+    /// (plane taken from the snapshot), pocket 2 deep through the
+    /// engine — the volume is the plate minus the pocket prism.
+    func testFaceSketchPocketIntoEngineBody() throws {
+        let stub = StubCascadeProvider()
+        DocumentEngine.cascadeProvider = stub
+        var part = platePart10()
+        let first = DocumentEngine.rebuild(part: part)
+        let snap = try XCTUnwrap(first.engineBody)
+        let top = try topFaceIndex(snap)
+        var faceSketch = Sketch(name: "Sketch on Face \(top)", plane: try snap.facePlane(top))
+        faceSketch.sourceFaceIndex = top
+        faceSketch.addRectangle(from: Vec2(-3, -2), to: Vec2(3, 2))
+        part.sketches.append(faceSketch)
+        part.features.append(Feature(name: "Pocket", kind: .cascadePocket(sketchID: faceSketch.id, depth: 2)))
+
+        let result = DocumentEngine.rebuild(part: part)
+        XCTAssertNil(result.firstError)
+        XCTAssertTrue(result.statuses.allSatisfy { $0.ok })
+        XCTAssertEqual(result.mesh.volume, 2000 - 6 * 4 * 2, accuracy: 2.0)
+    }
+
+    /// Stage 6: sketch on a SIDE face — the pad grows along the
+    /// face normal (+X), not along +Z.
+    func testFaceSketchPadOnSideFace() throws {
+        let stub = StubCascadeProvider()
+        DocumentEngine.cascadeProvider = stub
+        var part = platePart10()
+        let first = DocumentEngine.rebuild(part: part)
+        let snap = try XCTUnwrap(first.engineBody)
+        var side = -1
+        for i in 0..<64 {
+            guard let info = try? snap.faceInfo(i) else { break }
+            if info.isPlanar, info.normal.x > 0.999 { side = i; break }
+        }
+        XCTAssertGreaterThanOrEqual(side, 0)
+        var faceSketch = Sketch(name: "Sketch on Face \(side)", plane: try snap.facePlane(side))
+        faceSketch.sourceFaceIndex = side
+        // The +X face's plane coords: the rect is centred on the
+        // face in 3D by construction of the stub's grouped plane
+        // (origin at the face centroid).
+        faceSketch.addRectangle(from: Vec2(-2, -2), to: Vec2(2, 2))
+        part.sketches.append(faceSketch)
+        part.features.append(Feature(name: "Boss", kind: .cascadePad(sketchID: faceSketch.id, length: 3)))
+
+        let result = DocumentEngine.rebuild(part: part)
+        XCTAssertNil(result.firstError)
+        XCTAssertEqual(result.mesh.volume, 2000 + 4 * 4 * 3, accuracy: 2.0)
+        XCTAssertEqual(result.mesh.bounds.max.x, 13, accuracy: 0.05)
+    }
+
+    /// Stage 6: a face the census calls curved is refused by
+    /// facePlane with a coded error — never approximated.
+    func testCurvedFacePlaneRefused() throws {
+        let stub = StubCascadeProvider()
+        DocumentEngine.cascadeProvider = stub
+        let first = DocumentEngine.rebuild(part: platePart10())
+        let snap = try XCTUnwrap(first.engineBody)
+        let top = try topFaceIndex(snap)
+        stub.curvedFaceIndices = [top]
+        let info = try snap.faceInfo(top)
+        XCTAssertFalse(info.isPlanar)
+        XCTAssertThrowsError(try snap.facePlane(top)) { error in
+            XCTAssertEqual((error as? CADError)?.code, "MCAD-KN602")
+        }
+    }
+
+    /// Stage 6: the face sketch is a self-contained document
+    /// citizen — its plane (and the source-face metadata) survive
+    /// a save/load round trip, and a document JSON written before
+    /// Stage 6 (no sourceFaceIndex key) still decodes.
+    func testFaceSketchDocumentRoundTrip() throws {
+        let stub = StubCascadeProvider()
+        DocumentEngine.cascadeProvider = stub
+        var part = platePart10()
+        let first = DocumentEngine.rebuild(part: part)
+        let snap = try XCTUnwrap(first.engineBody)
+        let top = try topFaceIndex(snap)
+        var faceSketch = Sketch(name: "Sketch on Face \(top)", plane: try snap.facePlane(top))
+        faceSketch.sourceFaceIndex = top
+        faceSketch.addRectangle(from: Vec2(-3, -2), to: Vec2(3, 2))
+        part.sketches.append(faceSketch)
+        var doc = CADDocument(name: "Face Doc")
+        doc.parts.append(part)
+        let data = try JSONEncoder().encode(doc)
+        let back = try JSONDecoder().decode(CADDocument.self, from: data)
+        XCTAssertEqual(back, doc)
+        XCTAssertEqual(back.parts[0].sketches.last?.sourceFaceIndex, top)
+
+        // Pre-Stage-6 JSON: strip the key, decoding must yield nil.
+        var json = String(decoding: data, as: UTF8.self)
+        json = json.replacingOccurrences(of: "\"sourceFaceIndex\":\(top),", with: "")
+        let legacy = try JSONDecoder().decode(CADDocument.self, from: Data(json.utf8))
+        XCTAssertNil(legacy.parts[0].sketches.last?.sourceFaceIndex)
+        XCTAssertEqual(legacy.parts[0].sketches.last?.plane, faceSketch.plane)
+    }
+
+    /// Stage 6: rebuild is deterministic for a face-sketch part —
+    /// same mesh, same census mapping, same plane, twice.
+    func testFaceSketchRebuildDeterminism() throws {
+        let stub = StubCascadeProvider()
+        DocumentEngine.cascadeProvider = stub
+        var part = platePart10()
+        let first = DocumentEngine.rebuild(part: part)
+        let snap = try XCTUnwrap(first.engineBody)
+        let top = try topFaceIndex(snap)
+        var faceSketch = Sketch(name: "Sketch on Face \(top)", plane: try snap.facePlane(top))
+        faceSketch.sourceFaceIndex = top
+        faceSketch.addRectangle(from: Vec2(-3, -2), to: Vec2(3, 2))
+        part.sketches.append(faceSketch)
+        part.features.append(Feature(name: "Pocket", kind: .cascadePocket(sketchID: faceSketch.id, depth: 2)))
+
+        let r1 = DocumentEngine.rebuild(part: part)
+        let r2 = DocumentEngine.rebuild(part: part)
+        XCTAssertNil(r1.firstError)
+        XCTAssertNil(r2.firstError)
+        XCTAssertEqual(r1.mesh.volume, r2.mesh.volume, accuracy: 1e-9)
+        XCTAssertEqual(r1.engineBody?.faceOfTriangle, r2.engineBody?.faceOfTriangle)
+        let p1 = try XCTUnwrap(r1.engineBody).facePlane(top)
+        let p2 = try XCTUnwrap(r2.engineBody).facePlane(top)
+        XCTAssertEqual(p1, p2)
+    }
+
+    /// Stage 6: the face-sketch document does not depend on the
+    /// engine staying attached — rebuilt with NO provider, the
+    /// same part goes down the legacy paths and the pocket still
+    /// lands (the sketch's stored plane is the whole contract).
+    func testFaceSketchPartRebuildsOnLegacyKernel() throws {
+        let stub = StubCascadeProvider()
+        DocumentEngine.cascadeProvider = stub
+        // The base is a plain .pad (a kind with a true legacy
+        // path), so the no-provider rebuild below is legacy end
+        // to end; the face sketch itself comes from the engine
+        // snapshot of the engine rebuild.
+        var part = Part(name: "FacePlateLegacy")
+        let base = plateSketch()
+        part.sketches.append(base)
+        part.features.append(Feature(name: "Pad", kind: .pad(sketchID: base.id, length: 10)))
+        let first = DocumentEngine.rebuild(part: part)
+        let snap = try XCTUnwrap(first.engineBody)
+        let top = try topFaceIndex(snap)
+        var faceSketch = Sketch(name: "Sketch on Face \(top)", plane: try snap.facePlane(top))
+        faceSketch.sourceFaceIndex = top
+        faceSketch.addRectangle(from: Vec2(-3, -2), to: Vec2(3, 2))
+        part.sketches.append(faceSketch)
+        part.features.append(Feature(name: "Pocket", kind: .pocket(sketchID: faceSketch.id, depth: 2)))
+
+        DocumentEngine.cascadeProvider = nil
+        let legacy = DocumentEngine.rebuild(part: part)
+        XCTAssertNil(legacy.firstError)
+        XCTAssertNil(legacy.engineBody)
+        XCTAssertEqual(legacy.mesh.volume, 2000 - 6 * 4 * 2, accuracy: 2.0)
     }
 }

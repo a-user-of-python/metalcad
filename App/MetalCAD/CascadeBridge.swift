@@ -528,6 +528,15 @@ final class CascadeKernelBridge: CascadeKernelProvider {
     // MARK: Tessellation / STEP
 
     func tessellate(_ s: Int, deflection: Double) throws -> Mesh {
+        try tessellateWithFaceRanges(s, deflection: deflection).mesh
+    }
+
+    /// Tessellation WITH the census face index of every triangle
+    /// (Stage 6): the façade mesh's per-face ranges, expanded.
+    /// Vertices are duplicated per face in the façade output, so
+    /// the ranges are exact — this mapping is what sketch-on-face
+    /// picks through.
+    func tessellateWithFaceRanges(_ s: Int, deflection: Double) throws -> (mesh: Mesh, faceOfTriangle: [Int]) {
         try locked {
             let h = try shape(s)
             var err: Int32 = 0
@@ -551,7 +560,43 @@ final class CascadeKernelBridge: CascadeKernelProvider {
             for i in 0..<(tcount * 3) {
                 indices.append(UInt32(fmesh.indices[i]))
             }
-            return Mesh(vertices: vertices, indices: indices)
+            // The façade appends triangles face by face (its
+            // documented contract), so expanding the ranges is an
+            // ordered fill: face f owns the next faceTriCount[f]
+            // triangles.
+            var faceOfTriangle: [Int] = []
+            faceOfTriangle.reserveCapacity(tcount)
+            if fmesh.faceCount > 0, fmesh.faceTriCount != nil {
+                for f in 0..<Int(fmesh.faceCount) {
+                    for _ in 0..<Int(fmesh.faceTriCount[f]) {
+                        faceOfTriangle.append(f)
+                    }
+                }
+            }
+            if faceOfTriangle.count != tcount {
+                // Ranges incomplete — report none rather than a
+                // partial map (rebuild then offers no snapshot).
+                faceOfTriangle = []
+            }
+            return (Mesh(vertices: vertices, indices: indices), faceOfTriangle)
+        }
+    }
+
+    /// The exact sketch plane of a planar census face (façade
+    /// `mc_face_plane`). A non-planar face is refused by the
+    /// façade and surfaces here as KN602 with its plain words.
+    func facePlane(_ s: Int, index: Int) throws -> Plane3 {
+        try locked {
+            var err: Int32 = 0
+            var origin = [Double](repeating: 0, count: 3)
+            var xDir = [Double](repeating: 0, count: 3)
+            var yDir = [Double](repeating: 0, count: 3)
+            guard mc_face_plane(try shape(s), Int32(index), &origin, &xDir, &yDir, &err) == MC_OK.rawValue else {
+                throw CADError.kernelOperationFailed(Self.lastError())
+            }
+            return Plane3(origin: Vec3(origin[0], origin[1], origin[2]),
+                          xAxis: Vec3(xDir[0], xDir[1], xDir[2]),
+                          yAxis: Vec3(yDir[0], yDir[1], yDir[2]))
         }
     }
 

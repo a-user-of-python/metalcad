@@ -114,11 +114,24 @@ public protocol CascadeKernelProvider: AnyObject {
     /// Per-face census info: area, centroid, outward normal
     /// (zero for non-planar), planarity.
     func faceInfo(_ s: Int, index: Int) throws -> (area: Double, center: Vec3, normal: Vec3, isPlanar: Bool)
+    /// The exact sketch plane of a PLANAR census face (façade
+    /// `mc_face_plane`): origin on the face, axes the face
+    /// surface's own, xAxis x yAxis = the outward normal. A
+    /// non-planar face throws — never a tangent-plane substitute.
+    func facePlane(_ s: Int, index: Int) throws -> Plane3
     /// Per-edge census info for every edge, in census order.
     func edgeInfos(_ s: Int) throws -> [CascadeEdgeInfo]
 
     /// Triangulate for display (the kit's normal render path).
     func tessellate(_ s: Int, deflection: Double) throws -> Mesh
+
+    /// Triangulate WITH the census face index of every triangle
+    /// (the façade tessellation's per-face ranges, expanded).
+    /// `faceOfTriangle[i]` is the census face that owns triangle
+    /// i of the returned mesh. Providers that cannot supply the
+    /// ranges return an empty array (the default implementation)
+    /// — rebuild then offers no face snapshot for that body.
+    func tessellateWithFaceRanges(_ s: Int, deflection: Double) throws -> (mesh: Mesh, faceOfTriangle: [Int])
 
     /// STEP exchange through OCCT.
     func exportSTEP(_ s: Int, path: String) throws
@@ -126,6 +139,81 @@ public protocol CascadeKernelProvider: AnyObject {
 
     /// Free a handle. Unknown handles are ignored.
     func release(_ s: Int)
+}
+
+public extension CascadeKernelProvider {
+    /// Default: ranges unavailable (see the protocol requirement).
+    func tessellateWithFaceRanges(_ s: Int, deflection: Double) throws -> (mesh: Mesh, faceOfTriangle: [Int]) {
+        (try tessellate(s, deflection: deflection), [])
+    }
+}
+
+/// A retained reference to the engine solid a rebuild ended on
+/// (Stage 6, sketch-on-face). Rebuild normally releases every
+/// handle before returning; when the final running body is an
+/// engine solid AND its display tessellation carries census face
+/// ranges, rebuild instead transfers the handle to one of these
+/// snapshots in the result. The snapshot owns the handle — it is
+/// released when the snapshot is deallocated (the app drops the
+/// old rebuild result on the next rebuild) — and answers the two
+/// questions sketch-on-face asks: which census face owns a
+/// displayed triangle, and what that face's exact plane is.
+///
+/// Scope: the FINAL running body only. Bodies finished earlier
+/// by a `.newBody` feature are tessellated and released as
+/// before, and a body a legacy feature materialised to a mesh
+/// has no snapshot — the app falls back to its mesh face picker
+/// for those, unchanged.
+public final class EngineBodySnapshot {
+    /// The body's own display tessellation; its triangle order is
+    /// `faceOfTriangle`'s order and its segment of the combined
+    /// result mesh (starting at `triangleOffset`).
+    public let mesh: Mesh
+    /// Index of this body's first triangle within the combined
+    /// rebuild mesh (and within the welded display mesh — welding
+    /// preserves triangle order and count).
+    public let triangleOffset: Int
+    /// Census face index per body-local triangle.
+    public let faceOfTriangle: [Int]
+
+    private let provider: any CascadeKernelProvider
+    private let handle: Int
+
+    public init(provider: any CascadeKernelProvider, handle: Int, mesh: Mesh,
+                triangleOffset: Int, faceOfTriangle: [Int]) {
+        self.provider = provider
+        self.handle = handle
+        self.mesh = mesh
+        self.triangleOffset = triangleOffset
+        self.faceOfTriangle = faceOfTriangle
+    }
+
+    deinit { provider.release(handle) }
+
+    /// The census face owning a triangle of the COMBINED result
+    /// mesh, or nil when the triangle is outside this body.
+    public func faceIndex(combinedTriangle triangle: Int) -> Int? {
+        let local = triangle - triangleOffset
+        guard local >= 0, local < faceOfTriangle.count else { return nil }
+        return faceOfTriangle[local]
+    }
+
+    /// Body-local triangle indices belonging to census face
+    /// `index` (for the sketch editor's face outline guide).
+    public func triangles(ofFace index: Int) -> [Int] {
+        faceOfTriangle.indices.filter { faceOfTriangle[$0] == index }
+    }
+
+    /// Census info for one face of the retained solid.
+    public func faceInfo(_ index: Int) throws -> (area: Double, center: Vec3, normal: Vec3, isPlanar: Bool) {
+        try provider.faceInfo(handle, index: index)
+    }
+
+    /// The exact sketch plane of a planar census face. Throws a
+    /// coded CADError for a non-planar face.
+    public func facePlane(_ index: Int) throws -> Plane3 {
+        try provider.facePlane(handle, index: index)
+    }
 }
 
 /// One edge of a solid in the census index space shared by

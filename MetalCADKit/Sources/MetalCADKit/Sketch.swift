@@ -157,6 +157,14 @@ public struct Sketch: Codable, Equatable, Identifiable {
     public var id: String
     public var name: String
     public var plane: Plane3
+    /// Stage 6 metadata: when this sketch's plane was taken from
+    /// a face of an engine body, the census face index it came
+    /// from — recorded for display only ("Sketch on Face 12").
+    /// The PLANE is what the document keeps: it is captured at
+    /// creation and does NOT track the face if the body above it
+    /// changes. Nil for base/datum-plane sketches and for every
+    /// document written before Stage 6.
+    public var sourceFaceIndex: Int? = nil
     public var entities: [SketchEntity] = []
     public var constraints: [SketchConstraint] = []
     private var nextEntityID: Int = 1

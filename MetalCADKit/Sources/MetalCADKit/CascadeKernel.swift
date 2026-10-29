@@ -135,7 +135,27 @@ public protocol CascadeKernelProvider: AnyObject {
 
     /// STEP exchange through OCCT.
     func exportSTEP(_ s: Int, path: String) throws
-    func importSTEP(path: String) throws -> Int
+    /// Import a STEP file; returns the new handle AND the number
+    /// of solids (TopAbs_SOLID) inside it — a multi-solid file
+    /// arrives as one compound handle, and the count is the only
+    /// way to say so honestly in the feature's status.
+    func importSTEP(path: String) throws -> (handle: Int, solidCount: Int)
+    /// Write several bodies to ONE STEP file (façade
+    /// `mc_export_step_bodies`: a compound of the bodies, plain
+    /// writer, no colours). STEP write failures throw
+    /// `CADError.stepWriteFailed` (MCAD-IO706), not KN602.
+    func exportSTEPBodies(_ ids: [Int], path: String) throws
+    /// Write bodies to a STEP file through the XDE layer (façade
+    /// `mc_export_step_xde`): every solid carries the colour at
+    /// the same index in `colors` (one colour per body = the part
+    /// material colour) and the document is labelled `name`.
+    /// STEP write failures throw MCAD-IO706 as above.
+    func exportSTEPXDE(_ ids: [Int], colors: [CensusFaceColor], name: String, path: String) throws
+    /// Per-face surface colours of a shape, in census face order
+    /// (façade `mc_shape_face_colors`). Only handles that came
+    /// from `importSTEP` can carry colours; every other shape
+    /// returns one entry per census face with `hasColor == false`.
+    func faceColors(_ s: Int) throws -> [CensusFaceColor]
 
     /// Free a handle. Unknown handles are ignored.
     func release(_ s: Int)
@@ -145,6 +165,22 @@ public extension CascadeKernelProvider {
     /// Default: ranges unavailable (see the protocol requirement).
     func tessellateWithFaceRanges(_ s: Int, deflection: Double) throws -> (mesh: Mesh, faceOfTriangle: [Int]) {
         (try tessellate(s, deflection: deflection), [])
+    }
+    /// Default: no colour source (see the protocol requirement).
+    func faceColors(_ s: Int) throws -> [CensusFaceColor] { [] }
+}
+
+/// One census face's STEP surface colour (Stage 7): RGB in 0..1
+/// plus whether the file actually gave the face a colour —
+/// colourless faces keep the part material in the renderer.
+public struct CensusFaceColor: Equatable {
+    public var red: Double
+    public var green: Double
+    public var blue: Double
+    public var hasColor: Bool
+    public init(red: Double, green: Double, blue: Double, hasColor: Bool) {
+        self.red = red; self.green = green; self.blue = blue
+        self.hasColor = hasColor
     }
 }
 

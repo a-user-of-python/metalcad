@@ -11,6 +11,11 @@ struct MetalCADApp: App {
         // Implant the Cascade (Open CASCADE) engine: registers the
         // evaluator the kit's .cascadePad features rebuild through.
         CascadeBridge.register()
+        // Stage 7: the app's own STEP folder (Files ▸ On My iPad ▸
+        // MetalCAD ▸ STEP) — created and seeded at launch; the
+        // Documents screen's Import STEP sheet reads it. (No
+        // system document picker: Sean's signing breaks it.)
+        STEPFolder.setup()
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
         MCLog.shared.info(.lifecycle, "MetalCAD launched", context: ["version": version])
     }

@@ -91,6 +91,47 @@ final class DocumentLibrary: ObservableObject {
         }
     }
 
+    /// Create a document whose only part starts from an imported
+    /// STEP file (Stage 7): the file's bytes become an
+    /// `.importedSTEP` base feature and the document is named
+    /// after the file. Over the document size cap → MCAD-IO702,
+    /// like any unreadable import.
+    func createImportedDocument(from stepURL: URL) -> Result<(doc: CADDocument, url: URL), CADError> {
+        let data: Data
+        do {
+            data = try Data(contentsOf: stepURL)
+        } catch {
+            return .failure(.importFileUnreadable("couldn't read \(stepURL.lastPathComponent)"))
+        }
+        guard data.count <= DocumentEngine.maxImportedSTEPBytes else {
+            return .failure(.importFileUnreadable(
+                "that STEP file is \(data.count / (1024 * 1024)) MB — too large to keep inside a document (the limit is \(DocumentEngine.maxImportedSTEPBytes / (1024 * 1024)) MB)"))
+        }
+        let baseName = stepURL.deletingPathExtension().lastPathComponent
+        var name = baseName
+        var url = docsDir.appendingPathComponent(name + ".json")
+        var n = 2
+        while FileManager.default.fileExists(atPath: url.path) {
+            name = "\(baseName) \(n)"
+            url = docsDir.appendingPathComponent(name + ".json")
+            n += 1
+        }
+        var doc = CADDocument(name: name)
+        var part = Part(name: baseName)
+        part.features.append(Feature(name: "Imported STEP — \(stepURL.lastPathComponent)",
+                                     kind: .importedSTEP(name: stepURL.lastPathComponent, stepData: data)))
+        doc.parts.append(part)
+        do {
+            try IOService.saveJSON(doc, to: url)
+            refresh()
+            return .success((doc, url))
+        } catch let e as CADError {
+            return .failure(e)
+        } catch {
+            return .failure(.unknown("\(error)"))
+        }
+    }
+
     func delete(_ file: DocFile) {
         do {
             try FileManager.default.removeItem(at: file.url)
@@ -173,6 +214,7 @@ struct DocumentsView: View {
     @EnvironmentObject private var session: AppSession
     @State private var alertInfo: DocAlert?
     @State private var showSettings = false
+    @State private var showImportSTEP = false
     @AppStorage(MCAccent.key) private var accentHex: String = MCAccent.defaultHex
     private var accent: Color { MCAccent.color(hex: accentHex) }
 
@@ -229,6 +271,14 @@ struct DocumentsView: View {
                 }
                 ToolbarItem(placement: .primaryAction) {
                     Button {
+                        showImportSTEP = true
+                    } label: {
+                        Label("Import STEP", systemImage: "square.and.arrow.down")
+                            .mcFont(20, weight: .semibold)
+                    }
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
                         if let made = library.createBlankDocument() {
                             session.open(document: made.doc, url: made.url)
                         }
@@ -241,6 +291,20 @@ struct DocumentsView: View {
             .onAppear { library.refresh() }
             .sheet(isPresented: $showSettings) {
                 HomeSettingsView()
+            }
+            .sheet(isPresented: $showImportSTEP) {
+                STEPImportSheet { stepURL in
+                    switch library.createImportedDocument(from: stepURL) {
+                    case .success(let made):
+                        showImportSTEP = false
+                        session.open(document: made.doc, url: made.url)
+                    case .failure(let e):
+                        MCLog.shared.log(error: e, category: .io)
+                        showImportSTEP = false
+                        alertInfo = DocAlert(title: "Couldn't import STEP",
+                                             message: e.userMessage, code: e.code)
+                    }
+                }
             }
             .alert(item: $alertInfo) { info in
                 Alert(

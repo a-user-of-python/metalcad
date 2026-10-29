@@ -209,6 +209,8 @@ struct FeatureEditorSheet: View {
         case .cascadePocket(let sid, let depth):
             initialSketch = sid
             _depthText = State(initialValue: mcFmt(depth))
+        case .importedSTEP:
+            break  // nothing editable: the geometry is the file
         case .pocket(let sid, let depth):
             initialSketch = sid
             _depthText = State(initialValue: mcFmt(depth))
@@ -453,6 +455,14 @@ struct FeatureEditorSheet: View {
                 sketchPicker
                 numberRow("Depth (mm)", $depthText)
                 Text("Cut by the Open CASCADE engine — an exact boolean cut; the volume shown in the feature list is the engine's own.")
+                    .mcFont(16)
+                    .foregroundStyle(.secondary)
+            }
+        case .importedSTEP(let name, let data):
+            Section("Imported STEP") {
+                Text(name)
+                    .mcFont(18, weight: .semibold)
+                Text("The solid comes from this STEP file (\(max(1, data.count / 1024)) KB, kept inside the document) and rebuilds through the Open CASCADE engine. There are no numbers to edit — change the body with the features after it.")
                     .mcFont(16)
                     .foregroundStyle(.secondary)
             }
@@ -981,6 +991,8 @@ struct FeatureEditorSheet: View {
             return .cascadePad(sketchID: sketchID, length: num(lengthText, fallback: old))
         case .cascadePocket(_, let old):
             return .cascadePocket(sketchID: sketchID, depth: num(depthText, fallback: old))
+        case .importedSTEP(let name, let data):
+            return .importedSTEP(name: name, stepData: data)  // no editable fields
         case .pocket(_, let old):
             return .pocket(sketchID: sketchID, depth: num(depthText, fallback: old))
         case .revolve(_, _, let old):

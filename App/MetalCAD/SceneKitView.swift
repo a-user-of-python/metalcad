@@ -15,6 +15,14 @@ struct SceneKitView: UIViewRepresentable {
     var mesh: Mesh
     /// Display material; nil falls back to the library default.
     var material: Material? = nil
+    /// Stage 7b: per-triangle STEP surface colours aligned with
+    /// `mesh`'s triangles (nil entries = the part material). When
+    /// present, the geometry gains a vertex-colour source: the
+    /// part material colour is baked into the uncoloured corners
+    /// and each coloured face's own colour into its corners, so
+    /// the material's white diffuse shows both exactly — in ONE
+    /// geometry element, so hit-test face indices are unchanged.
+    var triangleColors: [CensusFaceColor?]? = nil
     /// True when `mesh` is an uncommitted DRAFT result. The preview
     /// REPLACES the committed model (Fusion-style): it is rendered as
     /// the one model mesh with a warm accent emissive tint, never as
@@ -362,16 +370,21 @@ struct SceneKitView: UIViewRepresentable {
 
         // Identity for "geometry must be rebuilt": mesh shape +
         // material + preview state + accent (the preview tint reads
-        // the accent, so a settings change re-tints a live preview).
+        // the accent, so a settings change re-tints a live preview)
+        // + the imported-colour fingerprint (Stage 7b).
         let mat = material ?? MaterialLibrary.defaultMaterial
-        let key = "\(mesh.triangleCount)|\(mesh.volume)|\(mat.id)|\(isPreview ? "preview" : "live")|\(accentKey)"
+        let colorKey = triangleColors.map { colors in
+            "col\(colors.reduce(0) { $0 + ($1?.hasColor == true ? 1 : 0) })"
+        } ?? "nocol"
+        let key = "\(mesh.triangleCount)|\(mesh.volume)|\(mat.id)|\(isPreview ? "preview" : "live")|\(accentKey)|\(colorKey)"
         if context.coordinator.geometryKey != key {
             context.coordinator.geometryKey = key
 
             context.coordinator.modelNode?.removeFromParentNode()
             let node = SCNNode(geometry: Self.makeGeometry(
                 mesh, material: mat,
-                previewAccent: isPreview ? accentUIColor : nil))
+                previewAccent: isPreview ? accentUIColor : nil,
+                triangleColors: triangleColors))
             view.scene?.rootNode.addChildNode(node)
             context.coordinator.modelNode = node
 
@@ -867,7 +880,8 @@ struct SceneKitView: UIViewRepresentable {
     /// (~0.35) so it still shades like the real part but is
     /// unmistakably "preview, not committed".
     static func makeGeometry(_ mesh: Mesh, material: Material,
-                             previewAccent: UIColor? = nil) -> SCNGeometry {
+                             previewAccent: UIColor? = nil,
+                             triangleColors: [CensusFaceColor?]? = nil) -> SCNGeometry {
         let triCount = mesh.triangleCount
         guard triCount > 0 else { return SCNGeometry() }
         let soup = mesh.displaySoup()
@@ -901,15 +915,45 @@ struct SceneKitView: UIViewRepresentable {
             data: norData, semantic: .normal, vectorCount: vertCount,
             usesFloatComponents: true, componentsPerVector: 3,
             bytesPerComponent: 4, dataOffset: 0, dataStride: 12)
+        // Stage 7b: imported STEP colours as a vertex-colour
+        // source. The part material's own colour is baked into
+        // every uncoloured corner, so with the material diffuse
+        // set to white both the material and the STEP colours
+        // show exactly. One element, sequential indices — picking
+        // is untouched.
+        var sources = [vertexSource, normalSource]
+        var useVertexColors = false
+        if let triangleColors, triangleColors.count == triCount,
+           triangleColors.contains(where: { $0?.hasColor == true }) {
+            var colors: [Float] = []
+            colors.reserveCapacity(vertCount * 4)
+            for t in 0..<triCount {
+                let c = triangleColors[t]
+                let r: Float, g: Float, b: Float
+                if let c, c.hasColor {
+                    r = Float(c.red); g = Float(c.green); b = Float(c.blue)
+                } else {
+                    r = Float(material.red); g = Float(material.green); b = Float(material.blue)
+                }
+                for _ in 0..<3 { colors.append(r); colors.append(g); colors.append(b); colors.append(1) }
+            }
+            let colData = colors.withUnsafeBufferPointer { Data(buffer: $0) }
+            sources.append(SCNGeometrySource(
+                data: colData, semantic: .color, vectorCount: vertCount,
+                usesFloatComponents: true, componentsPerVector: 4,
+                bytesPerComponent: 4, dataOffset: 0, dataStride: 16))
+            useVertexColors = true
+        }
         let element = SCNGeometryElement(
             data: idxData, primitiveType: .triangles,
             primitiveCount: triCount, bytesPerIndex: 4)
-        let geometry = SCNGeometry(sources: [vertexSource, normalSource], elements: [element])
+        let geometry = SCNGeometry(sources: sources, elements: [element])
         let scnMaterial = SCNMaterial()
         scnMaterial.lightingModel = .physicallyBased
-        scnMaterial.diffuse.contents = UIColor(
-            red: CGFloat(material.red), green: CGFloat(material.green),
-            blue: CGFloat(material.blue), alpha: 1)
+        scnMaterial.diffuse.contents = useVertexColors
+            ? UIColor.white
+            : UIColor(red: CGFloat(material.red), green: CGFloat(material.green),
+                      blue: CGFloat(material.blue), alpha: 1)
         scnMaterial.metalness.contents = NSNumber(value: material.metalness)
         scnMaterial.roughness.contents = NSNumber(value: material.roughness)
         scnMaterial.isDoubleSided = true

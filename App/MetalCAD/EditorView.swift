@@ -792,6 +792,40 @@ final class EditorModel: ObservableObject {
         }
     }
 
+    /// Save As ▸ STEP: the current part's exact engine solid
+    /// (Stage 7) — every body into one file, each solid carrying
+    /// the part's material colour via the XDE writer. Unlike
+    /// STL/OBJ this is not a mesh export: the kit re-evaluates
+    /// the feature tree and writes the B-rep. Failures surface as
+    /// their CADError (IO706 for write refusals, KN601 with no
+    /// engine) in the usual alert.
+    func exportSTEP() {
+        guard let part else {
+            actionError = .exportWriteFailed("there is no part to export yet")
+            return
+        }
+        let safeName = document.name.replacingOccurrences(of: "/", with: "-")
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(safeName).step")
+        do {
+            let result = try DocumentEngine.exportSTEP(part: part, to: url)
+            shareURL = url
+            actionError = nil
+            if !result.carriesColor {
+                // The solid is exact; only the colour was dropped
+                // (the kit logged the refusal). Not an alert — the
+                // export succeeded — but worth a log line here too.
+                MCLog.shared.warn(.io, "STEP exported without the material colour (plain writer fallback)",
+                                  context: ["part": part.name])
+            }
+        } catch let e as CADError {
+            actionError = e
+            MCLog.shared.log(error: e, category: .io)
+        } catch {
+            actionError = .unknown("\(error)")
+        }
+    }
+
     /// Save As ▸ OBJ: the welded result mesh as a Wavefront OBJ.
     func exportOBJ() {
         guard let mesh = rebuild?.mesh, mesh.triangleCount > 0 else {
@@ -1090,6 +1124,11 @@ struct EditorView: View {
                                   detail: "Binary mesh for 3D printing and slicers.")
                     }
                     .buttonStyle(.plain)
+                    Button { model.exportSTEP() } label: {
+                        saveAsRow("STEP (.step)", icon: "cube.transparent.fill",
+                                  detail: "The exact solid, with the part's material colour — opens in other CAD tools, and imports back here.")
+                    }
+                    .buttonStyle(.plain)
                     Button { model.exportOBJ() } label: {
                         saveAsRow("OBJ (.obj)", icon: "square.stack.3d.up.fill",
                                   detail: "Mesh for Blender and other 3D tools.")
@@ -1167,6 +1206,28 @@ struct EditorView: View {
 
     private var displayMesh: Mesh {
         sectionOn ? (sectionedMesh ?? baseMesh) : baseMesh
+    }
+
+    /// Stage 7b: per-triangle STEP colours aligned with the
+    /// rebuild mesh's triangles — only when the plain rebuild
+    /// mesh is what's on screen (no draft preview, no section
+    /// cut) and an imported body kept its colours. Bodies sit
+    /// back-to-back in the combined mesh, in `bodies` order.
+    private var triangleColors: [CensusFaceColor?]? {
+        guard model.previewMesh == nil, !sectionOn,
+              let r = model.rebuild, !r.bodyFaceColors.isEmpty else { return nil }
+        var out = [CensusFaceColor?](repeating: nil, count: r.mesh.triangleCount)
+        var offset = 0
+        for (i, bodyMesh) in r.bodies.enumerated() {
+            if let entry = r.bodyFaceColors.first(where: { $0.bodyIndex == i }) {
+                for (t, face) in entry.faceOfTriangle.enumerated()
+                where face < entry.faceColors.count && entry.faceColors[face].hasColor {
+                    out[offset + t] = entry.faceColors[face]
+                }
+            }
+            offset += bodyMesh.triangleCount
+        }
+        return out.contains { $0 != nil } ? out : nil
     }
 
     private var sectionNormal: Vec3 {
@@ -1546,6 +1607,7 @@ struct EditorView: View {
                     // the section-cut display mesh while active.
                     mesh: model.previewMesh ?? displayMesh,
                     material: model.part?.material,
+                    triangleColors: triangleColors,
                     isPreview: model.previewMesh != nil,
                     documentID: model.document.id,
                     accentUIColor: MCAccent.uiColor(hex: accentHex),
@@ -2618,6 +2680,7 @@ struct EditorView: View {
         case .booleanCutPlaceholder: return "scissors"
         case .cascadePad: return "cube"
         case .cascadePocket: return "cube.slash"
+        case .importedSTEP: return "square.and.arrow.down"
         }
     }
 
@@ -2739,6 +2802,8 @@ struct EditorView: View {
             return "Cascade Pad · \(mcFmt(len)) mm · OCCT"
         case .cascadePocket(_, let depth):
             return "Cascade Pocket · \(mcFmt(depth)) mm deep · OCCT"
+        case .importedSTEP(let name, let data):
+            return "Imported STEP · \(name) · \(max(1, data.count / 1024)) KB · OCCT"
         }
     }
 }

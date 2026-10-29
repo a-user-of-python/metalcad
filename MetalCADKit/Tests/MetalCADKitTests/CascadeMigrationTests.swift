@@ -256,7 +256,10 @@ final class StubCascadeProvider: CascadeKernelProvider {
         return try mesh(s).contains(point)
     }
 
-    func volume(_ s: Int) throws -> Double { try mesh(s).volume }
+    /// Stage 7: multiplies every reported volume — proves the
+    /// mass readout follows the PROVIDER's volume, not the mesh.
+    var volumeScale: Double = 1
+    func volume(_ s: Int) throws -> Double { try mesh(s).volume * volumeScale }
     func bounds(_ s: Int) throws -> (min: Vec3, max: Vec3) {
         let b = try mesh(s).bounds
         return (b.min, b.max)
@@ -321,7 +324,47 @@ final class StubCascadeProvider: CascadeKernelProvider {
     }
     func tessellate(_ s: Int, deflection: Double) throws -> Mesh { try mesh(s) }
     func exportSTEP(_ s: Int, path: String) throws { throw CADError.kernelOperationFailed("stub: no STEP") }
-    func importSTEP(path: String) throws -> Int { throw CADError.kernelOperationFailed("stub: no STEP") }
+
+    // MARK: Stage 7 — STEP import/export stand-ins
+    /// What `importSTEP` hands back (a 10 mm cube by default), the
+    /// solid count it reports, and the face colours it claims.
+    var stubImportMesh: Mesh? = nil
+    var stubImportSolidCount: Int = 1
+    var stubImportColors: [CensusFaceColor] = []
+    var failImport = false
+    var failXDE = false
+    var failBodiesExport = false
+    private(set) var importedHandles: Set<Int> = []
+    private(set) var xdeExports: [(ids: [Int], colors: [CensusFaceColor], name: String, path: String)] = []
+    private(set) var bodiesExports: [(ids: [Int], path: String)] = []
+
+    func importSTEP(path: String) throws -> (handle: Int, solidCount: Int) {
+        calls.append("importSTEP")
+        if failImport { throw CADError.importFileUnreadable("stub: unreadable") }
+        let m = try stubImportMesh ?? Tessellation.box(width: 10, depth: 10, height: 10)
+        let id = store(m)
+        importedHandles.insert(id)
+        return (id, stubImportSolidCount)
+    }
+
+    func exportSTEPBodies(_ ids: [Int], path: String) throws {
+        calls.append("exportSTEPBodies")
+        if failBodiesExport { throw CADError.stepWriteFailed("stub: bodies write refused") }
+        bodiesExports.append((ids, path))
+        try Data("stub step bodies".utf8).write(to: URL(fileURLWithPath: path))
+    }
+
+    func exportSTEPXDE(_ ids: [Int], colors: [CensusFaceColor], name: String, path: String) throws {
+        calls.append("exportSTEPXDE")
+        if failXDE { throw CADError.stepWriteFailed("stub: xde write refused") }
+        xdeExports.append((ids, colors, name, path))
+        try Data("stub step xde".utf8).write(to: URL(fileURLWithPath: path))
+    }
+
+    func faceColors(_ s: Int) throws -> [CensusFaceColor] {
+        importedHandles.contains(s) ? stubImportColors : []
+    }
+
     func release(_ s: Int) { registry[s] = nil; groupedCache[s] = nil }
     /// Test probe: handles the stub still holds (snapshot
     /// ownership shows up here — a retained final body stays

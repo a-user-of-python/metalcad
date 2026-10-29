@@ -605,16 +605,78 @@ final class CascadeKernelBridge: CascadeKernelProvider {
             var err: Int32 = 0
             let rc = mc_export_step(try shape(s), path, &err)
             guard rc == MC_OK.rawValue, err == MC_OK.rawValue else {
-                throw CADError.kernelOperationFailed(Self.lastError())
+                throw CADError.stepWriteFailed(Self.lastError())
             }
         }
     }
 
-    func importSTEP(path: String) throws -> Int {
+    func importSTEP(path: String) throws -> (handle: Int, solidCount: Int) {
         try locked {
             var err: Int32 = 0
             var solids: Int32 = 0
-            return try own(mc_import_step(path, &solids, &err))
+            let h = mc_import_step(path, &solids, &err)
+            guard let h else {
+                // The reader rejected the file (or found no shape
+                // in it): an import failure, MCAD-IO702 — not a
+                // kernel refusal.
+                throw CADError.importFileUnreadable(Self.lastError())
+            }
+            return (try own(h), Int(solids))
+        }
+    }
+
+    /// Multi-body STEP export (façade `mc_export_step_bodies`):
+    /// all bodies into one file as a compound of solids. Write
+    /// failures surface as MCAD-IO706 (the reserved STEP code),
+    /// not KN602.
+    func exportSTEPBodies(_ ids: [Int], path: String) throws {
+        try locked {
+            let handles: [UnsafeMutablePointer<MCFacadeShape>] = try ids.map { try shape($0) }
+            var err: Int32 = 0
+            let rc = mc_export_step_bodies(handles, Int32(ids.count), path, &err)
+            guard rc == MC_OK.rawValue, err == MC_OK.rawValue else {
+                throw CADError.stepWriteFailed(Self.lastError())
+            }
+        }
+    }
+
+    /// XDE STEP export (façade `mc_export_step_xde`): every solid
+    /// carries its body's colour (the part material colour) and
+    /// the document is labelled with the part name.
+    func exportSTEPXDE(_ ids: [Int], colors: [CensusFaceColor], name: String, path: String) throws {
+        try locked {
+            let handles: [UnsafeMutablePointer<MCFacadeShape>] = try ids.map { try shape($0) }
+            var rgb: [Double] = []
+            for c in colors { rgb += [c.red, c.green, c.blue] }
+            var err: Int32 = 0
+            let rc = mc_export_step_xde(handles, Int32(ids.count), rgb, name, path, &err)
+            guard rc == MC_OK.rawValue, err == MC_OK.rawValue else {
+                throw CADError.stepWriteFailed(Self.lastError())
+            }
+        }
+    }
+
+    /// Per-face STEP colours of a shape in census order (façade
+    /// `mc_shape_face_colors`). Only import handles carry colours;
+    /// anything else returns all-`hasColor == false`.
+    func faceColors(_ s: Int) throws -> [CensusFaceColor] {
+        try locked {
+            let h = try shape(s)
+            var faces: Int32 = 0
+            var err: Int32 = 0
+            guard mc_shape_counts(h, &faces, nil, nil, &err) == MC_OK.rawValue, faces > 0 else {
+                return []
+            }
+            var rgb = [Double](repeating: 0, count: 3 * Int(faces))
+            var has = [Int32](repeating: 0, count: Int(faces))
+            let rc = mc_shape_face_colors(h, &rgb, &has, &err)
+            guard rc == MC_OK.rawValue, err == MC_OK.rawValue else {
+                throw CADError.kernelOperationFailed(Self.lastError())
+            }
+            return (0..<Int(faces)).map { i in
+                CensusFaceColor(red: rgb[3 * i], green: rgb[3 * i + 1], blue: rgb[3 * i + 2],
+                                hasColor: has[i] != 0)
+            }
         }
     }
 

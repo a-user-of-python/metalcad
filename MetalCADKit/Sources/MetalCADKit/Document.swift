@@ -86,6 +86,14 @@ public enum FeatureKind: Codable, Equatable {
     // Full-OCCT migration (appended): the pocket counterpart of
     // cascadePad — a sketch prism cut by the engine.
     case cascadePocket(sketchID: String, depth: Double)
+    // Stage 7 (appended): an imported STEP file as a base feature.
+    // The STEP bytes travel inside the document (base64 in the
+    // JSON) so the document stays a single self-contained file;
+    // on rebuild the bytes are staged to a temp file and imported
+    // through the engine. As the first feature it seeds the body;
+    // appearing later it finishes the current body and starts a
+    // new one (the `.newBody` rule every base feature follows).
+    case importedSTEP(name: String, stepData: Data)
 }
 
 public struct Feature: Codable, Equatable, Identifiable {
@@ -146,6 +154,30 @@ public struct RebuildResult {
     /// resolves picked triangles through it. Releasing the result
     /// releases the engine handle (the snapshot's deinit).
     public var engineBody: EngineBodySnapshot? = nil
+    /// Stage 7b: STEP surface colours for bodies that came from an
+    /// `.importedSTEP` feature and reached the output UNMODIFIED
+    /// (the colours are census data of the imported handle; any
+    /// feature that replaces the handle invalidates them, and the
+    /// body then renders in the part material as usual).
+    public var bodyFaceColors: [BodyFaceColors] = []
+}
+
+/// Stage 7b: one output body's imported STEP colours — the census
+/// face of each of the body's triangles plus the colour table in
+/// census order. Rebuild-time only; never persisted.
+public struct BodyFaceColors: Equatable {
+    /// Index into `RebuildResult.bodies`.
+    public var bodyIndex: Int
+    /// Census face index per triangle of that body (the body's own
+    /// tessellation ranges, as in `EngineBodySnapshot`).
+    public var faceOfTriangle: [Int]
+    /// Colour per census face.
+    public var faceColors: [CensusFaceColor]
+    public init(bodyIndex: Int, faceOfTriangle: [Int], faceColors: [CensusFaceColor]) {
+        self.bodyIndex = bodyIndex
+        self.faceOfTriangle = faceOfTriangle
+        self.faceColors = faceColors
+    }
 }
 
 public enum DocumentEngine {
@@ -167,14 +199,63 @@ public enum DocumentEngine {
     public static var cascadeProvider: (any CascadeKernelProvider)?
 
     /// Linear deflection (mm) used when an engine solid is
-    /// tessellated for display during rebuild.
-    public static var previewDeflection: Double = 0.1
+    /// tessellated for display during rebuild. Stage 7 took this
+    /// from 0.1 to 0.02 (Sean's v1 fix list, item 6 — the preview
+    /// must not show visible triangles): the preview is smooth-
+    /// shaded (crease-averaged normals in the renderer) over this
+    /// finer tessellation. STL/OBJ export is untouched — it still
+    /// writes the welded rebuild mesh exactly as before.
+    public static var previewDeflection: Double = 0.02
 
-    /// Evaluate a part's feature tree into one accumulated mesh (v1: additive
-    /// mesh accumulation; exact boolean cut/fillet/shell return their codes).
-    /// Stops after the first failing feature, per ERRORS.md DC107.
-    public static func rebuild(part: Part, logger: MCLog = .shared) -> RebuildResult {
-        let start = Date()
+    /// Largest STEP payload an `.importedSTEP` feature may carry
+    /// inside a document (Stage 7). The bytes live in the
+    /// document's JSON, so an unbounded import would balloon every
+    /// save; past the cap the import fails MCAD-IO702 in plain
+    /// words instead.
+    public static var maxImportedSTEPBytes: Int = 25 * 1024 * 1024
+
+    /// The outcome of evaluating a part's feature list — the
+    /// shared core of `rebuild` (tessellate + release) and
+    /// `exportSTEP` (export + release). Stage 7 factored the walk
+    /// out so the two consumers share exactly one implementation
+    /// and can never drift. Engine handles in `engineBodies` /
+    /// `runningSolid` are NOT released by the evaluation:
+    /// ownership passes to the caller, which must release each
+    /// exactly once (or transfer the running solid to an
+    /// `EngineBodySnapshot`, which releases it on deinit).
+    struct FeatureEvaluation {
+        var statuses: [FeatureStatus] = []
+        var warnings: [CADError] = []
+        var firstError: CADError? = nil
+        /// Bodies completed as meshes during the walk (bodies the
+        /// engine no longer holds — see `meshBlocker`).
+        var meshBodies: [Mesh] = []
+        /// Completed engine body handles, in body order.
+        var engineBodies: [Int] = []
+        /// The final running body when it is an engine solid.
+        var runningSolid: Int? = nil
+        /// The final running body when it is a mesh.
+        var runningMesh = Mesh()
+        /// Cached display tessellation of `runningSolid` (filled
+        /// only when something asked for the mesh mid-walk), with
+        /// its census face ranges.
+        var runningSolidMesh: Mesh? = nil
+        var runningFaceOfTriangle: [Int] = []
+        /// STEP colours by engine handle, for handles that came
+        /// from `.importedSTEP` (Stage 7b). A body's colours are
+        /// valid only while that exact handle reaches the output
+        /// unmodified — any op replaces the handle, which retires
+        /// the entry by key mismatch.
+        var faceColorsByHandle: [Int: [CensusFaceColor]] = [:]
+        /// Name of the first feature that forced the running body
+        /// out of the engine into a mesh, if any — STEP export
+        /// names it in its refusal.
+        var meshBlocker: String? = nil
+    }
+
+    /// Walk a part's features once, stopping after the first
+    /// failing feature, per ERRORS.md DC107.
+    static func evaluateFeatures(part: Part, logger: MCLog) -> FeatureEvaluation {
         var body = Mesh()
         var bodies: [Mesh] = []  // completed bodies (v4 multi-body)
         var statuses: [FeatureStatus] = []
@@ -195,6 +276,8 @@ public enum DocumentEngine {
         var solidMesh: Mesh? = nil     // tessellation cache for `solid`
         var solidFaceOfTriangle: [Int] = []  // census ranges paired with `solidMesh`
         var solidBodies: [Int] = []    // completed engine bodies
+        var engineFaceColors: [Int: [CensusFaceColor]] = [:]  // Stage 7b, by handle
+        var meshBlocker: String? = nil  // first feature that materialised the body
 
         /// The running body as a mesh (tessellating the engine
         /// solid on first ask). The tessellation is taken WITH its
@@ -278,7 +361,7 @@ public enum DocumentEngine {
         /// body to a mesh before its legacy branch runs.
         func kindIsSolidAware(_ kind: FeatureKind) -> Bool {
             switch kind {
-            case .cascadePad, .cascadePocket,
+            case .cascadePad, .cascadePocket, .importedSTEP,
                  .pad, .pocket, .revolve, .primitive, .extrude, .extrude2,
                  .fillet, .chamfer, .shell, .chamfer2, .filletEdges, .chamferEdges,
                  .draftBody, .rib, .splitBody,
@@ -647,6 +730,10 @@ public enum DocumentEngine {
             }
             do {
                 if solid != nil && !kindIsSolidAware(feature.kind) {
+                    // This feature has no engine path: the body
+                    // leaves the engine here, and STEP export will
+                    // name this feature as its blocker.
+                    if meshBlocker == nil { meshBlocker = feature.name }
                     try materializeBody()
                 }
                 if case .linearPattern(let count, let spacing) = feature.kind {
@@ -1476,6 +1563,44 @@ public enum DocumentEngine {
                     logger.debug(.feature, "cascade pocket ok", context: ["feature": feature.name, "volume": "\(volume)"])
                     continue
                 }
+                if case .importedSTEP(let name, let stepData) = feature.kind {
+                    // Stage 7: a STEP file as a base feature. The
+                    // bytes live in the document; they are staged
+                    // to a temp file because the façade imports by
+                    // path. Base-feature semantics: `.newBody` —
+                    // first feature = the body; later = finish the
+                    // current body and start a new one with the
+                    // import. Engine-only (no provider → KN601).
+                    guard let p = provider else { throw CADError.kernelUnavailable }
+                    guard stepData.count <= DocumentEngine.maxImportedSTEPBytes else {
+                        throw CADError.importFileUnreadable(
+                            "that STEP file is \(stepData.count / (1024 * 1024)) MB — too large to keep inside a document (the limit is \(DocumentEngine.maxImportedSTEPBytes / (1024 * 1024)) MB)")
+                    }
+                    let staging = FileManager.default.temporaryDirectory
+                        .appendingPathComponent("metalcad-import-\(feature.id).step")
+                    do {
+                        try stepData.write(to: staging)
+                    } catch {
+                        throw CADError.importFileUnreadable("the imported STEP data could not be staged for reading")
+                    }
+                    defer { try? FileManager.default.removeItem(at: staging) }
+                    let imported = try p.importSTEP(path: staging.path)
+                    try booleanWithSolid(imported.handle, .newBody)
+                    let volume = try p.volume(solid!)
+                    // Stage 7b: keep the file's per-face colours
+                    // against the adopted handle. Any later feature
+                    // replaces the handle, retiring this entry.
+                    if let colors = try? p.faceColors(imported.handle),
+                       colors.contains(where: { $0.hasColor }) {
+                        engineFaceColors[imported.handle] = colors
+                    }
+                    statuses.append(FeatureStatus(featureID: feature.id, ok: true, errorCode: nil,
+                                                  message: "Imported STEP '\(name)' — \(imported.solidCount) solid\(imported.solidCount == 1 ? "" : "s"), OCCT volume \(String(format: "%.1f", volume)) mm³"))
+                    logger.debug(.feature, "imported STEP ok", context: [
+                        "feature": feature.name, "solids": "\(imported.solidCount)",
+                        "volume": "\(volume)"])
+                    continue
+                }
                 if case .pad(let sketchID, let length) = feature.kind, let p = provider {
                     // Engine path (Stage 2). Validation mirrors the
                     // legacy order (sketch, profiles, length). The
@@ -1775,57 +1900,192 @@ public enum DocumentEngine {
                 firstError = e
             }
         }
-        var allBodies = bodies
+        return FeatureEvaluation(
+            statuses: statuses, warnings: warnings, firstError: firstError,
+            meshBodies: bodies, engineBodies: solidBodies,
+            runningSolid: solid, runningMesh: body,
+            runningSolidMesh: solidMesh, runningFaceOfTriangle: solidFaceOfTriangle,
+            faceColorsByHandle: engineFaceColors, meshBlocker: meshBlocker)
+    }
+
+    /// Evaluate a part's feature tree into one accumulated mesh.
+    /// Stops after the first failing feature, per ERRORS.md DC107.
+    public static func rebuild(part: Part, logger: MCLog = .shared) -> RebuildResult {
+        let start = Date()
+        let ev = evaluateFeatures(part: part, logger: logger)
+        var firstError = ev.firstError
+        var allBodies = ev.meshBodies
         var engineBody: EngineBodySnapshot? = nil
+        var bodyFaceColors: [BodyFaceColors] = []
+        // Exact engine volume across the output bodies (Stage 7:
+        // mass from mc_volume, not from the tessellation). Set
+        // only when EVERY output body is an engine solid; a single
+        // mesh body retires it to nil and the tessellation-volume
+        // mass below stays the fallback (mesh-only and mixed
+        // parts — the pre-Stage-7 behaviour).
+        var engineVolume: Double? = nil
         // Engine bodies join the output through tessellation; every
         // handle is released exactly once, here or in materialize —
         // except the final running body's, whose ownership passes
         // to the result's Stage 6 snapshot when its tessellation
         // carried census face ranges (the snapshot releases it).
-        if let p = provider {
+        if let p = cascadeProvider {
             do {
-                for h in solidBodies {
-                    allBodies.append(try p.tessellate(h, deflection: DocumentEngine.previewDeflection))
+                var volumeSum = 0.0
+                var allEngine = ev.meshBodies.isEmpty
+                for h in ev.engineBodies {
+                    volumeSum += try p.volume(h)
+                    if let colors = ev.faceColorsByHandle[h] {
+                        // A completed imported body (Stage 7b):
+                        // tessellate WITH ranges so its colours
+                        // stay mapped to its triangles.
+                        let t = try p.tessellateWithFaceRanges(h, deflection: DocumentEngine.previewDeflection)
+                        if t.faceOfTriangle.count == t.mesh.triangleCount, !t.faceOfTriangle.isEmpty {
+                            bodyFaceColors.append(BodyFaceColors(
+                                bodyIndex: allBodies.count, faceOfTriangle: t.faceOfTriangle,
+                                faceColors: colors))
+                        }
+                        allBodies.append(t.mesh)
+                    } else {
+                        allBodies.append(try p.tessellate(h, deflection: DocumentEngine.previewDeflection))
+                    }
                     p.release(h)
                 }
-                if let h = solid {
+                if let h = ev.runningSolid {
+                    volumeSum += try p.volume(h)
                     let offset = allBodies.reduce(0) { $0 + $1.triangleCount }
-                    let finalMesh = try currentMesh()
+                    let finalMesh: Mesh
+                    let faceOfTriangle: [Int]
+                    if let cached = ev.runningSolidMesh {
+                        finalMesh = cached
+                        faceOfTriangle = ev.runningFaceOfTriangle
+                    } else {
+                        let t = try p.tessellateWithFaceRanges(h, deflection: DocumentEngine.previewDeflection)
+                        finalMesh = t.mesh
+                        faceOfTriangle = t.faceOfTriangle
+                    }
                     allBodies.append(finalMesh)
-                    if solidFaceOfTriangle.count == finalMesh.triangleCount,
-                       !solidFaceOfTriangle.isEmpty {
+                    if faceOfTriangle.count == finalMesh.triangleCount,
+                       !faceOfTriangle.isEmpty {
                         engineBody = EngineBodySnapshot(
                             provider: p, handle: h, mesh: finalMesh,
-                            triangleOffset: offset, faceOfTriangle: solidFaceOfTriangle)
+                            triangleOffset: offset, faceOfTriangle: faceOfTriangle)
+                        if let colors = ev.faceColorsByHandle[h] {
+                            bodyFaceColors.append(BodyFaceColors(
+                                bodyIndex: allBodies.count - 1, faceOfTriangle: faceOfTriangle,
+                                faceColors: colors))
+                        }
                     } else {
                         p.release(h)
                     }
-                } else if body.triangleCount > 0 {
-                    allBodies.append(body)
+                } else if ev.runningMesh.triangleCount > 0 {
+                    allBodies.append(ev.runningMesh)
+                    allEngine = false
+                }
+                if allEngine && (!ev.engineBodies.isEmpty || ev.runningSolid != nil) {
+                    engineVolume = volumeSum
                 }
             } catch let e as CADError {
-                for h in solidBodies { p.release(h) }
-                if let h = solid { p.release(h) }
+                for h in ev.engineBodies { p.release(h) }
+                if let h = ev.runningSolid { p.release(h) }
                 if firstError == nil { firstError = e }
-                if body.triangleCount > 0 { allBodies.append(body) }
+                if ev.runningMesh.triangleCount > 0 { allBodies.append(ev.runningMesh) }
+                engineVolume = nil
+                bodyFaceColors = []
             } catch {
-                for h in solidBodies { p.release(h) }
-                if let h = solid { p.release(h) }
+                for h in ev.engineBodies { p.release(h) }
+                if let h = ev.runningSolid { p.release(h) }
+                engineVolume = nil
+                bodyFaceColors = []
             }
-        } else if body.triangleCount > 0 {
-            allBodies.append(body)
+        } else if ev.runningMesh.triangleCount > 0 {
+            allBodies.append(ev.runningMesh)
         }
         var combined = Mesh()
         for b in allBodies { combined.append(b) }
-        let mass = combined.volume / 1000.0 * part.material.density  // mm^3 -> cm^3 * g/cm^3
+        let massVolume = engineVolume ?? combined.volume
+        let mass = massVolume / 1000.0 * part.material.density  // mm^3 -> cm^3 * g/cm^3
         logger.info(.perf, "rebuild done", context: [
             "ms": String(format: "%.1f", Date().timeIntervalSince(start) * 1000),
             "tris": "\(combined.triangleCount)",
             "bodies": "\(allBodies.count)",
             "ok": firstError == nil ? "1" : "0",
         ])
-        return RebuildResult(mesh: combined, bodies: allBodies, statuses: statuses, warnings: warnings,
-                             firstError: firstError, massGrams: mass, engineBody: engineBody)
+        return RebuildResult(mesh: combined, bodies: allBodies, statuses: ev.statuses, warnings: ev.warnings,
+                             firstError: firstError, massGrams: mass, engineBody: engineBody,
+                             bodyFaceColors: bodyFaceColors)
+    }
+
+    /// The result of a STEP export: the file written, the exact
+    /// engine volume of each exported body (in body order), and
+    /// whether the file carries the part's material colour (the
+    /// XDE write) or fell back to the plain compound writer.
+    public struct STEPExportResult {
+        public var url: URL
+        public var bodyVolumes: [Double]
+        public var carriesColor: Bool
+    }
+
+    /// Export a part as ONE STEP file through the engine
+    /// (Stage 7). Runs the shared `evaluateFeatures` walk and ends
+    /// it with the bodies' handles in hand instead of
+    /// tessellations: all bodies go into the file as a compound of
+    /// solids, each solid carrying the part's material colour
+    /// through the XDE writer (the plain compound writer is the
+    /// no-colour fallback if the XDE write is refused).
+    ///
+    /// Failures, honestly: no provider → MCAD-KN601; a feature
+    /// that fails to rebuild → that feature's own error; a body
+    /// the engine no longer holds (a feature with no engine path
+    /// materialised it) → MCAD-IO706 naming that feature; an empty
+    /// part → MCAD-IO706; a façade write refusal → MCAD-IO706 from
+    /// the bridge. Units are millimetres end to end; the file's
+    /// product name is the part name. Names and assembly structure
+    /// are NOT recoverable on re-import (the façade's §10 limit).
+    public static func exportSTEP(part: Part, to url: URL, logger: MCLog = .shared) throws -> STEPExportResult {
+        guard let p = cascadeProvider else { throw CADError.kernelUnavailable }
+        let ev = evaluateFeatures(part: part, logger: logger)
+        var handles = ev.engineBodies
+        if let h = ev.runningSolid { handles.append(h) }
+        defer { for h in handles { p.release(h) } }
+        if let e = ev.firstError { throw e }
+        if !ev.meshBodies.isEmpty || ev.runningMesh.triangleCount > 0 {
+            let blocker = ev.meshBlocker ?? "one of its features"
+            throw CADError.stepWriteFailed(
+                "\(blocker) builds a plain mesh, not an engine solid, and STEP export writes the part's exact solid — that feature has no engine path yet")
+        }
+        guard !handles.isEmpty else {
+            throw CADError.stepWriteFailed("there is no solid to export yet — the part is empty")
+        }
+        var volumes: [Double] = []
+        for h in handles {
+            do {
+                volumes.append(try p.volume(h))
+            } catch {
+                throw CADError.stepWriteFailed("the engine could not measure a body for export")
+            }
+        }
+        let m = part.material
+        let colors = handles.map { _ in
+            CensusFaceColor(red: m.red, green: m.green, blue: m.blue, hasColor: true)
+        }
+        do {
+            try p.exportSTEPXDE(handles, colors: colors, name: part.name, path: url.path)
+            logger.info(.io, "STEP exported (XDE, with material colour)", context: [
+                "part": part.name, "bodies": "\(handles.count)", "file": url.lastPathComponent])
+            return STEPExportResult(url: url, bodyVolumes: volumes, carriesColor: true)
+        } catch let xdeError {
+            logger.warn(.io, "XDE STEP export failed; retrying without colour",
+                        code: (xdeError as? CADError)?.code, context: ["part": part.name])
+            do {
+                try p.exportSTEPBodies(handles, path: url.path)
+            } catch {
+                throw xdeError
+            }
+            logger.info(.io, "STEP exported (plain compound, no colour)", context: [
+                "part": part.name, "bodies": "\(handles.count)", "file": url.lastPathComponent])
+            return STEPExportResult(url: url, bodyVolumes: volumes, carriesColor: false)
+        }
     }
 
     /// Chain a sketch's line entities into an ordered world-space polyline
@@ -2027,6 +2287,8 @@ public enum DocumentEngine {
             throw CADError.invariantBroken("cascade pad must be handled by rebuild, not evaluate")
         case .cascadePocket:
             throw CADError.invariantBroken("cascade pocket must be handled by rebuild, not evaluate")
+        case .importedSTEP:
+            throw CADError.invariantBroken("imported STEP must be handled by rebuild, not evaluate")
         }
     }
 

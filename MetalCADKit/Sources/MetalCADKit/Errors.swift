@@ -34,6 +34,7 @@ public enum CADError: Error, Equatable {
     case entityNotFound(Int)
     case degenerateEntity(Int)
     case profileOpen(gapA: Vec2, gapB: Vec2)
+    case profileGapHealed(gap: Double)
     case profileSelfIntersecting(at: Vec2)
     case profileNestedTooDeep(Int)
     case duplicateEntity(Int)
@@ -115,6 +116,7 @@ public enum CADError: Error, Equatable {
         case .entityNotFound: return "MCAD-SK202"
         case .degenerateEntity: return "MCAD-SK203"
         case .profileOpen: return "MCAD-SK204"
+        case .profileGapHealed: return "MCAD-SK213"
         case .profileSelfIntersecting: return "MCAD-SK205"
         case .profileNestedTooDeep: return "MCAD-SK206"
         case .duplicateEntity: return "MCAD-SK207"
@@ -175,6 +177,7 @@ public enum CADError: Error, Equatable {
         case .outOfMemory, .invariantBroken: return .fatal
         case .cancelledByUser, .documentVersionTooOld, .duplicateName,
              .parameterOutOfRange, .degenerateEntity, .profileNestedTooDeep,
+             .profileGapHealed,
              .duplicateEntity, .projectionSourceGone, .redundantConstraint,
              .solveTimeout, .filletRadiusTooLarge, .threadTooLong,
              .threadFitOutOfRange, .threadPresetUnknown,
@@ -209,6 +212,7 @@ public enum CADError: Error, Equatable {
         case .entityNotFound: return "That sketch item no longer exists."
         case .degenerateEntity: return "A sketch item became zero-size. It's flagged in the sketch health check."
         case .profileOpen: return "The outline isn't closed, so it can't make a solid. The gap is marked."
+        case .profileGapHealed(let gap): return "A small gap in the outline (\(String(format: "%.2f", gap)) mm) was closed for you — the corners nearly touched."
         case .profileSelfIntersecting: return "The outline crosses itself. Fix the crossing to continue."
         case .profileNestedTooDeep: return "Too many nested outline islands; the profile was simplified."
         case .duplicateEntity: return "Two sketch items exactly overlap."
@@ -273,7 +277,7 @@ public enum CADErrorCatalog {
         "MCAD-DC106","MCAD-DC107","MCAD-DC108","MCAD-DC109","MCAD-DC110",
         "MCAD-DC111","MCAD-DC112",
         "MCAD-SK201","MCAD-SK202","MCAD-SK203","MCAD-SK204","MCAD-SK205",
-        "MCAD-SK206","MCAD-SK207","MCAD-SK208","MCAD-SK209","MCAD-SK211","MCAD-SK212",
+        "MCAD-SK206","MCAD-SK207","MCAD-SK208","MCAD-SK209","MCAD-SK211","MCAD-SK212","MCAD-SK213",
         "MCAD-SV301","MCAD-SV302","MCAD-SV303","MCAD-SV304","MCAD-SV305","MCAD-SV306","MCAD-SV307",
         "MCAD-FT401","MCAD-FT402","MCAD-FT403","MCAD-FT404","MCAD-FT405","MCAD-FT406",
         "MCAD-FT407","MCAD-FT408","MCAD-FT409","MCAD-FT410","MCAD-FT411","MCAD-FT412",

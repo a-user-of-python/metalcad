@@ -1877,9 +1877,14 @@ struct EditorView: View {
                         activeTool = .extrude
                     }
                     actionBarButton("Pocket", icon: "arrow.down.square") {
+                        // The Cascade Pocket panel (hardening
+                        // round, 2026-10-29): the action bar's
+                        // Pocket is the engine cut on this sketch —
+                        // the same feature the ribbon's Cascade
+                        // Pocket creates — not the general Extrude
+                        // panel in cut mode.
                         model.pendingPanelSketchID = sketch.id
-                        model.pendingPanelOperation = "cut"
-                        activeTool = .extrude
+                        activeTool = .cascadePocket
                     }
                     actionBarButton("Revolve", icon: "rotate.3d") {
                         model.pendingPanelSketchID = sketch.id

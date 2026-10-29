@@ -173,6 +173,18 @@ public struct Sketch: Codable, Equatable, Identifiable {
         self.id = id; self.name = name; self.plane = plane
     }
 
+    /// Endpoint sewing tolerance (mm) for profile/path chaining.
+    /// Sketch entities carry INDEPENDENT endpoint copies (two lines
+    /// that share a corner store the corner twice), and the touch
+    /// editor's snap is best-effort within ~14 screen points — so a
+    /// hand-drawn joint can miss by a fraction of a millimetre:
+    /// far above the 1e-6 exact tier, far below anything visible
+    /// or measurable on the part. Joints within this tolerance are
+    /// sewn (the chain keeps one vertex; geometry moves by at most
+    /// the sewn distance, reported as MCAD-SK213). Joints beyond it
+    /// are a genuinely open profile (MCAD-SK204).
+    public static let sewTolerance = 0.5
+
     public mutating func allocateID() -> Int { defer { nextEntityID += 1 }; return nextEntityID }
     public func entity(_ id: Int) -> SketchEntity? { entities.first { $0.id == id } }
     public mutating func add(_ e: SketchEntity) { entities.append(e) }
@@ -255,46 +267,96 @@ public struct Sketch: Codable, Equatable, Identifiable {
                 }
             }
         }
-        // Chain segments into loops by endpoint matching.
-        let tol = 1e-6
+        // Chain segments into loops by endpoint matching, in two
+        // tiers. Tier 1 is exact (1e-6): snapped endpoints are
+        // bit-equal, and exactly-drawn geometry behaves exactly as
+        // it always has. Tier 2 sews at `sewTolerance`: a segment
+        // whose endpoint lands within sewing distance of a chain
+        // end joins there — the joint is the chain's vertex, the
+        // segment's near endpoint is sewn to it, and the largest
+        // sewn gap is reported (SK213) rather than failing every
+        // feature on the sketch with SK204. At each step the
+        // single nearest attachment wins, so exact joints always
+        // beat sewn ones. (Device failure, 2026-10-29: the old
+        // single 1e-6 tier rejected hand-drawn loops whose corners
+        // missed by ~0.02 mm — invisible, and inside the editor's
+        // own snap dead-zone.)
+        let exactTol = 1e-6
+        var maxWeld = 0.0
+        var warnings: [CADError] = []
         var used = [Bool](repeating: false, count: segments.count)
-        var unmatchedEndpoints: [Vec2] = []
+        // Unclosed chains, held for the disposition rules below.
+        var openChains: [(segs: Int, a: Vec2, b: Vec2)] = []
         for s in segments.indices where !used[s] {
             var chain: [Vec2] = [segments[s].a, segments[s].b]
             used[s] = true
-            var grew = true
-            while grew {
-                grew = false
+            while true {
+                var best: (idx: Int, dist: Double, point: Vec2, front: Bool)? = nil
                 for t in segments.indices where !used[t] {
-                    if segments[t].a.distance(to: chain.last!) < tol {
-                        chain.append(segments[t].b); used[t] = true; grew = true
-                    } else if segments[t].b.distance(to: chain.last!) < tol {
-                        chain.append(segments[t].a); used[t] = true; grew = true
-                    } else if segments[t].b.distance(to: chain.first!) < tol {
-                        chain.insert(segments[t].a, at: 0); used[t] = true; grew = true
-                    } else if segments[t].a.distance(to: chain.first!) < tol {
-                        chain.insert(segments[t].b, at: 0); used[t] = true; grew = true
-                    }
+                    let seg = segments[t]
+                    let dLA = seg.a.distance(to: chain.last!)
+                    if dLA <= Sketch.sewTolerance, best == nil || dLA < best!.dist { best = (t, dLA, seg.b, false) }
+                    let dLB = seg.b.distance(to: chain.last!)
+                    if dLB <= Sketch.sewTolerance, best == nil || dLB < best!.dist { best = (t, dLB, seg.a, false) }
+                    let dFA = seg.a.distance(to: chain.first!)
+                    if dFA <= Sketch.sewTolerance, best == nil || dFA < best!.dist { best = (t, dFA, seg.b, true) }
+                    let dFB = seg.b.distance(to: chain.first!)
+                    if dFB <= Sketch.sewTolerance, best == nil || dFB < best!.dist { best = (t, dFB, seg.a, true) }
                 }
+                guard let b = best else { break }
+                used[b.idx] = true
+                if b.dist > exactTol { maxWeld = max(maxWeld, b.dist) }
+                if b.front { chain.insert(b.point, at: 0) } else { chain.append(b.point) }
             }
-            if chain.count > 2 && chain.first!.distance(to: chain.last!) < tol {
-                chain.removeLast()
-                if chain.count >= 3 { loops.append(chain) }
+            if chain.count > 2 {
+                let closeDist = chain.first!.distance(to: chain.last!)
+                if closeDist <= Sketch.sewTolerance {
+                    if closeDist > exactTol { maxWeld = max(maxWeld, closeDist) }
+                    chain.removeLast()
+                    if chain.count >= 3 { loops.append(chain) }
+                } else {
+                    openChains.append((segs: chain.count - 1, a: chain.first!, b: chain.last!))
+                }
             } else {
-                unmatchedEndpoints.append(chain.first!)
-                unmatchedEndpoints.append(chain.last!)
+                openChains.append((segs: 1, a: chain.first!, b: chain.last!))
             }
         }
-        if !unmatchedEndpoints.isEmpty {
-            // Report the closest pair as the gap.
-            var best = (unmatchedEndpoints[0], unmatchedEndpoints[min(1, unmatchedEndpoints.count - 1)], Double.infinity)
-            for i in unmatchedEndpoints.indices {
-                for j in unmatchedEndpoints.indices where j > i {
-                    let d = unmatchedEndpoints[i].distance(to: unmatchedEndpoints[j])
-                    if d < best.2 { best = (unmatchedEndpoints[i], unmatchedEndpoints[j], d) }
+        if maxWeld > exactTol {
+            warnings.append(.profileGapHealed(gap: maxWeld))
+        }
+        // Disposition of unclosed chains (hardening, 2026-10-29).
+        // A lone segment far from everything is a reference line
+        // (revolve axis, centreline) — never an outline — and is
+        // dropped silently, as is a wide-open polyline sitting
+        // next to valid profiles (decoration). What throws SK204:
+        // (a) any dangling endpoint pair that NEARLY meets
+        // (<= 5 mm apart, across two chains or at one chain's own
+        // ends) — something almost connected but didn't, i.e. a
+        // broken outline; (b) when no closed profile exists at
+        // all, any multi-segment open chain — it can only be the
+        // user's outline attempt.
+        var dangling: [(chain: Int, p: Vec2)] = []
+        for (i, c) in openChains.enumerated() {
+            dangling.append((i, c.a)); dangling.append((i, c.b))
+        }
+        var nearPair: (a: Vec2, b: Vec2, d: Double)? = nil
+        for i in dangling.indices {
+            for j in dangling.indices where j > i {
+                // A lone segment's own two ends don't count.
+                if dangling[i].chain == dangling[j].chain,
+                   openChains[dangling[i].chain].segs == 1 { continue }
+                let d = dangling[i].p.distance(to: dangling[j].p)
+                if d <= 5, nearPair == nil || d < nearPair!.d {
+                    nearPair = (dangling[i].p, dangling[j].p, d)
                 }
             }
-            throw CADError.profileOpen(gapA: best.0, gapB: best.1)
+        }
+        if let np = nearPair {
+            throw CADError.profileOpen(gapA: np.a, gapB: np.b)
+        }
+        if loops.isEmpty, let worst = openChains.filter({ $0.segs >= 2 })
+            .min(by: { $0.a.distance(to: $0.b) < $1.a.distance(to: $1.b) }) {
+            throw CADError.profileOpen(gapA: worst.a, gapB: worst.b)
         }
         // Self-intersection check per loop.
         for loop in loops {
@@ -309,7 +371,6 @@ public struct Sketch: Codable, Equatable, Identifiable {
             }
         }
         // Normalize orientation (outer CCW) and assign holes by containment parity.
-        var warnings: [CADError] = []
         var normalized = loops.map { lp -> [Vec2] in polygonArea(lp) < 0 ? Array(lp.reversed()) : lp }
         // depth = number of other loops containing this one
         func depth(of idx: Int) -> Int {

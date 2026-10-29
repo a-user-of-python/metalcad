@@ -475,6 +475,16 @@ public enum DocumentEngine {
         /// with the local origin at `origin`.
         func axisPlacement(axis: Vec3, origin: Vec3) -> [Double] {
             let a = axis.normalized
+            // Identity fast path: a +Z shaft needs no rotation at
+            // all. Routing the tool through an unnecessary
+            // re-parameterising transform can make the boolean
+            // classifier treat a helical tool as disjoint from
+            // the wall it cuts (host-proven at M10x1.5 internal,
+            // hardening 2026-10-29: the transformed tool's cut
+            // removed exactly nothing; the raw tool cut fine).
+            if a.z > 1 - 1e-12 {
+                return basisMatrix(Vec3(1, 0, 0), Vec3(0, 1, 0), Vec3(0, 0, 1), origin)
+            }
             let helper = abs(a.y) < 0.9 ? Vec3(0, 1, 0) : Vec3(1, 0, 0)
             let u = (helper - a * helper.dot(a)).normalized
             let v = a.cross(u)
@@ -1437,7 +1447,61 @@ public enum DocumentEngine {
                             let toolRaw = try p.thread(spec: effSpec)
                             let tool = try p.transform(toolRaw, matrix: place)
                             p.release(toolRaw)
-                            let cut = try p.subtract(h, tool)
+                            let bodyVol = try p.volume(h)
+                            var cut = try p.subtract(h, tool)
+                            if try p.volume(cut) >= bodyVol - 1e-6 {
+                                // Verify-then-accept (hardening
+                                // 2026-10-29): the classifier
+                                // called this helical tool disjoint
+                                // and the cut removed nothing. Retry
+                                // with the tool split at its axial
+                                // mid-plane — the same point set in
+                                // two cuts, a different classifier
+                                // configuration. Still nothing ->
+                                // KN603, never a silent fake thread.
+                                p.release(cut)
+                                let bigR = effSpec.majorDiameter / 2 + 2
+                                let midW = effSpec.length / 2
+                                func frameBox(_ w0: Double, _ w1: Double) throws -> Int {
+                                    let raw = try p.primitive(kind: .box, params: [
+                                        "width": bigR * 2, "depth": bigR * 2, "height": w1 - w0])
+                                    // Local: box x/y centred, z from
+                                    // 0 -> shift to w0, then the
+                                    // placement frame (place ∘ L).
+                                    let L: [Double] = [1, 0, 0, 0,
+                                                       0, 1, 0, 0,
+                                                       0, 0, 1, w0]
+                                    var M = [Double](repeating: 0, count: 12)
+                                    for i in 0..<3 {
+                                        for j in 0..<3 {
+                                            M[i * 4 + j] = place[i * 4] * L[j] + place[i * 4 + 1] * L[4 + j] + place[i * 4 + 2] * L[8 + j]
+                                        }
+                                        M[i * 4 + 3] = place[i * 4] * L[3] + place[i * 4 + 1] * L[7] + place[i * 4 + 2] * L[11] + place[i * 4 + 3]
+                                    }
+                                    let moved = try p.transform(raw, matrix: M)
+                                    p.release(raw)
+                                    return moved
+                                }
+                                var acc = h
+                                var accOwned = false
+                                for (w0, w1) in [(-2.0, midW), (midW, effSpec.length + 2)] {
+                                    let fb = try frameBox(w0, w1)
+                                    let half = try p.intersect(tool, fb)
+                                    p.release(fb)
+                                    if try p.volume(half) > 1e-9 {
+                                        let next = try p.subtract(acc, half)
+                                        if accOwned { p.release(acc) }
+                                        acc = next; accOwned = true
+                                    }
+                                    p.release(half)
+                                }
+                                guard accOwned, try p.volume(acc) < bodyVol - 1e-6 else {
+                                    if accOwned { p.release(acc) }
+                                    p.release(tool)
+                                    throw CADError.kernelShapeInvalid("the internal thread cut removed no material")
+                                }
+                                cut = acc
+                            }
                             p.release(tool)
                             adoptSolid(p, cut)
                         }
@@ -1530,6 +1594,12 @@ public enum DocumentEngine {
                 if case .cascadePad(let sketchID, let length) = feature.kind {
                     guard length > 0 else { throw CADError.padLengthInvalid(length) }
                     guard let sketch = part.sketch(sketchID) else { throw CADError.nameNotFound("sketch") }
+                    // Surface the sketch's own profile warnings
+                    // (SK213 gap heals) — the bridge extracts again
+                    // internally and cannot return them.
+                    let (padProfiles, padW) = try sketch.extractProfiles()
+                    warnings += padW
+                    guard !padProfiles.isEmpty else { throw CADError.padNoProfile }
                     if let p = provider {
                         // Engine path: prism + exact composition.
                         let tool = try p.prismFromSketch(sketch, offset: 0, along: length)
@@ -1551,6 +1621,12 @@ public enum DocumentEngine {
                 if case .cascadePocket(let sketchID, let depth) = feature.kind {
                     guard depth > 0 else { throw CADError.holeSpecInvalid("pocket depth must be > 0") }
                     guard let sketch = part.sketch(sketchID) else { throw CADError.nameNotFound("sketch") }
+                    // Surface the sketch's own profile warnings
+                    // (SK213 gap heals) — the bridge extracts again
+                    // internally and cannot return them.
+                    let (pocketProfiles, pocketW) = try sketch.extractProfiles()
+                    warnings += pocketW
+                    guard !pocketProfiles.isEmpty else { throw CADError.padNoProfile }
                     guard let p = provider else { throw CADError.kernelUnavailable }
                     // Tool span mirrors the legacy pocket prism:
                     // from `depth` below the sketch plane to 1 mm
@@ -1855,20 +1931,37 @@ public enum DocumentEngine {
                                                              diameter: cbD, height: cbDepth + 1, above: 1))
                             }
                         case .countersink(let angle):
-                            let coneH = (diameter / 2) / tan(angle / 2 * .pi / 180)
-                            let coneRaw = try p.primitive(kind: .cone, params: ["diameter": diameter, "height": coneH])
+                            // The sink is the frustum from
+                            // 2x the hole diameter at the surface
+                            // narrowing to the hole diameter at
+                            // depth coneH — the full cone of apex
+                            // angle `angle` whose tip sits at
+                            // 2*coneH. (Hardening 2026-10-29: the
+                            // old tool was a cone of the HOLE's
+                            // diameter parked over the surface —
+                            // it lay entirely inside the drilled
+                            // cylinder and removed nothing at all,
+                            // on both kernels.) A 1 mm cap cylinder
+                            // of the surface diameter keeps the
+                            // cut's top face off the body surface.
+                            let coneH = (site.diameter / 2) / tan(angle / 2 * .pi / 180)
+                            let coneRaw = try p.primitive(kind: .cone, params: ["diameter": site.diameter * 2, "height": coneH * 2])
                             // The legacy cone (wide ring at local
                             // z = 0, apex at z = coneH) mapped by
                             // orientCylinder: local z lands at
                             // (1 − z) along the normal — a proper
                             // rotation (the y flip is invisible on
-                            // a surface of revolution).
+                            // a surface of revolution). Here the
+                            // base ring lands ON the surface and
+                            // the apex at depth 2*coneH.
                             let m = basisMatrix(sketch.plane.xAxis, sketch.plane.yAxis * -1,
                                                 sketch.plane.normal * -1,
-                                                center3 + sketch.plane.normal)
+                                                center3)
                             let cone = try p.transform(coneRaw, matrix: m)
                             p.release(coneRaw)
                             try addTool(cone)
+                            try addTool(try holeCylinder(p, plane: sketch.plane, center: center3,
+                                                         diameter: site.diameter * 2, height: 1, above: 1))
                         }
                     }
                     guard let toolSolid = tool else { throw CADError.holeSpecInvalid("the hole sketch needs a point or circle center") }
@@ -2098,15 +2191,21 @@ public enum DocumentEngine {
         guard !segments.isEmpty else { throw CADError.sweepPathInvalid("the path sketch needs connected lines") }
         var chain: [Vec2] = [segments[0].0, segments[0].1]
         var pool = Array(segments.dropFirst())
-        var grew = true
-        while grew {
-            grew = false
-            for i in pool.indices {
-                let (a, b) = pool[i]
-                if a.distance(to: chain.last!) < 1e-6 { chain.append(b); pool.remove(at: i); grew = true; break }
-                if b.distance(to: chain.last!) < 1e-6 { chain.append(a); pool.remove(at: i); grew = true; break }
-                if a.distance(to: chain.first!) < 1e-6 { chain.insert(b, at: 0); pool.remove(at: i); grew = true; break }
-                if b.distance(to: chain.first!) < 1e-6 { chain.insert(a, at: 0); pool.remove(at: i); grew = true; break }
+        // Two tiers, like profile extraction: exact joints first,
+        // then sewn joints at the sketch sewing tolerance — a
+        // hand-drawn path corner that missed its mate by a hair
+        // still chains (the joint is the chain's vertex).
+        for tol in [1e-6, Sketch.sewTolerance] {
+            var grew = true
+            while grew {
+                grew = false
+                for i in pool.indices {
+                    let (a, b) = pool[i]
+                    if a.distance(to: chain.last!) < tol { chain.append(b); pool.remove(at: i); grew = true; break }
+                    if b.distance(to: chain.last!) < tol { chain.append(a); pool.remove(at: i); grew = true; break }
+                    if a.distance(to: chain.first!) < tol { chain.insert(b, at: 0); pool.remove(at: i); grew = true; break }
+                    if b.distance(to: chain.first!) < tol { chain.insert(a, at: 0); pool.remove(at: i); grew = true; break }
+                }
             }
         }
         guard chain.count >= 2 else { throw CADError.sweepPathInvalid("path lines do not connect") }
@@ -2208,10 +2307,18 @@ public enum DocumentEngine {
                     }
                 case .countersink(let angle):
                     guard angle > 0, angle < 180 else { throw CADError.holeSpecInvalid("countersink angle 0-180") }
-                    let coneH = (diameter / 2) / tan(angle / 2 * .pi / 180)
-                    var cone = try Tessellation.cone(radius: diameter / 2, height: coneH, segments: 48)
-                    cone = orientCylinder(cone, plane: sketch.plane, center: center3, above: 1, depth: coneH + 1)
+                    // Same frustum as the engine path: full
+                    // cone of diameter 2x the hole, base ring ON
+                    // the surface, apex at depth 2*coneH, plus
+                    // the 1 mm cap cylinder (see the engine
+                    // branch; the old cone removed nothing).
+                    let coneH = (site.diameter / 2) / tan(angle / 2 * .pi / 180)
+                    var cone = try Tessellation.cone(radius: site.diameter, height: coneH * 2, segments: 48)
+                    cone = orientCylinder(cone, plane: sketch.plane, center: center3, above: 0, depth: coneH * 2)
                     tool.append(cone)
+                    var cap = try Tessellation.cylinder(radius: site.diameter, height: 1, segments: 48)
+                    cap = orientCylinder(cap, plane: sketch.plane, center: center3, above: 1, depth: 1)
+                    tool.append(cap)
                 }
             }
             return tool

@@ -62,6 +62,7 @@ model intact), **F** fatal (app protects data and restarts the document).
 - `MCAD-SK210` **TextProfileFailed** (E) — a font couldn't be outlined (later phase).
 - `MCAD-SK211` **ProjectionSourceGone** (W) — projected reference geometry lost its source edge/face; kept as frozen construction geometry.
 - `MCAD-SK212` **SketchEmpty** (W) — an operation was asked of an empty sketch.
+- `MCAD-SK213` **ProfileGapHealed** (W) — profile/path chaining sewed an endpoint gap of at most the sketch sewing tolerance (0.5 mm): a hand-drawn joint that nearly touched. The sewn distance is carried in the warning; gaps beyond the tolerance remain `MCAD-SK204`.
 
 ## SV — Solver
 - `MCAD-SV301` **SolverDidNotConverge** (E) — iterations exhausted; the sketch is left in its last valid state, never a half-solved one.

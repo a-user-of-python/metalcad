@@ -697,35 +697,97 @@ final class CascadeKernelBridge: CascadeKernelProvider {
         }
         guard !profiles.isEmpty else { throw CADError.padNoProfile }
 
-        // Group the non-construction entities into loops: a circle
-        // is a loop by itself; lines and arcs group by shared
-        // endpoints. Points and construction geometry never bound a
-        // profile (extractProfiles ignores them too).
-        var groups: [[SketchEntity]] = []
-        var chained: [SketchEntity] = []
+        // Group the non-construction entities into loops by
+        // CHAINING — the same sewing discipline as extractProfiles:
+        // a circle is a loop by itself; lines and arcs chain
+        // end-to-end at the sketch sewing tolerance, nearest
+        // attachment first. Chaining (not mere endpoint proximity)
+        // keeps two loops that pass near each other in separate
+        // groups, and yields each loop's entities IN ORDER with
+        // their traversal direction, which the welded serialization
+        // below relies on. Points and construction geometry never
+        // bound a profile (extractProfiles ignores them too).
+        struct Link {
+            var entity: SketchEntity
+            var flipped: Bool
+            // Mutable weld state: a line's stored endpoints, an
+            // arc's centre (its angles never change — a weld shifts
+            // the whole circle, both endpoints together).
+            var lineA: Vec2 = .zero
+            var lineB: Vec2 = .zero
+            var arcCenter: Vec2 = .zero
+            var isLine: Bool { if case .line = entity { return true }; return false }
+            var isArc: Bool { if case .arc = entity { return true }; return false }
+            var entry: Vec2 {
+                switch entity {
+                case .line: return flipped ? lineB : lineA
+                case .arc(_, _, let r, let a0, let a1, _):
+                    let a = flipped ? a1 : a0
+                    return arcCenter + Vec2(cos(a), sin(a)) * r
+                default: return .zero
+                }
+            }
+            var exit: Vec2 {
+                switch entity {
+                case .line: return flipped ? lineA : lineB
+                case .arc(_, _, let r, let a0, let a1, _):
+                    let a = flipped ? a0 : a1
+                    return arcCenter + Vec2(cos(a), sin(a)) * r
+                default: return .zero
+                }
+            }
+            mutating func setEntry(_ p: Vec2) {  // lines only
+                if flipped { lineB = p } else { lineA = p }
+            }
+            mutating func setExit(_ p: Vec2) {   // lines only
+                if flipped { lineA = p } else { lineB = p }
+            }
+        }
+        func makeLink(_ e: SketchEntity, flipped: Bool) -> Link {
+            var link = Link(entity: e, flipped: flipped)
+            switch e {
+            case .line(_, let a, let b, _): link.lineA = a; link.lineB = b
+            case .arc(_, let c, _, _, _, _): link.arcCenter = c
+            default: break
+            }
+            return link
+        }
+        var groups: [[Link]] = []
+        var rest: [SketchEntity] = []
         for e in sketch.entities where !e.isConstruction {
             switch e {
-            case .circle: groups.append([e])
-            case .line, .arc: chained.append(e)
+            case .circle: groups.append([makeLink(e, flipped: false)])
+            case .line, .arc: rest.append(e)
             case .point: break
             }
         }
-        var rest = chained
         while !rest.isEmpty {
-            var group = [rest.removeFirst()]
-            var grew = true
-            while grew {
-                grew = false
-                let ends = group.flatMap { endpoints(of: $0) }
-                var i = 0
-                while i < rest.count {
-                    let other = endpoints(of: rest[i])
-                    if ends.contains(where: { a in other.contains { $0.distance(to: a) <= 1e-6 } }) {
-                        group.append(rest.remove(at: i))
-                        grew = true
-                    } else {
-                        i += 1
-                    }
+            let first = rest.removeFirst()
+            let fe = endpoints(of: first)
+            var group = [makeLink(first, flipped: false)]
+            var head = fe[0], tail = fe[1]
+            while true {
+                var best: (idx: Int, dist: Double, flipped: Bool, atHead: Bool)? = nil
+                for (i, e) in rest.enumerated() {
+                    let ep = endpoints(of: e)
+                    let d0 = ep[0].distance(to: tail)
+                    if d0 <= Sketch.sewTolerance, best == nil || d0 < best!.dist { best = (i, d0, false, false) }
+                    let d1 = ep[1].distance(to: tail)
+                    if d1 <= Sketch.sewTolerance, best == nil || d1 < best!.dist { best = (i, d1, true, false) }
+                    let h0 = ep[0].distance(to: head)
+                    if h0 <= Sketch.sewTolerance, best == nil || h0 < best!.dist { best = (i, h0, true, true) }
+                    let h1 = ep[1].distance(to: head)
+                    if h1 <= Sketch.sewTolerance, best == nil || h1 < best!.dist { best = (i, h1, false, true) }
+                }
+                guard let b = best else { break }
+                let e = rest.remove(at: b.idx)
+                let ep = endpoints(of: e)
+                if b.atHead {
+                    group.insert(makeLink(e, flipped: b.flipped), at: 0)
+                    head = b.flipped ? ep[1] : ep[0]
+                } else {
+                    group.append(makeLink(e, flipped: b.flipped))
+                    tail = b.flipped ? ep[0] : ep[1]
                 }
             }
             groups.append(group)
@@ -733,20 +795,21 @@ final class CascadeKernelBridge: CascadeKernelProvider {
 
         // Assign each group to a kit profile loop (outer or hole) by
         // matching a group vertex against the loop's points — the
-        // kit loops are the same entities' flattened polylines, so
-        // entity endpoints appear in them exactly.
+        // kit loops are the same entities' flattened (and sewn)
+        // polylines, so a group endpoint sits within the sewing
+        // tolerance of a loop point.
         struct KitLoop { var profile: Int; var isHole: Bool; var points: [Vec2] }
         var kitLoops: [KitLoop] = []
         for (i, p) in profiles.enumerated() {
             kitLoops.append(KitLoop(profile: i, isHole: false, points: p.outer))
             for h in p.holes { kitLoops.append(KitLoop(profile: i, isHole: true, points: h)) }
         }
-        var outers: [Int: [SketchEntity]] = [:]
-        var holes: [Int: [[SketchEntity]]] = [:]
+        var outers: [Int: [Link]] = [:]
+        var holes: [Int: [[Link]]] = [:]
         for group in groups {
-            let samples = samplePoints(of: group)
+            let samples = samplePoints(of: group.map { $0.entity })
             guard let loop = kitLoops.first(where: { kl in
-                kl.points.contains { p in samples.contains { $0.distance(to: p) <= 1e-4 } }
+                kl.points.contains { p in samples.contains { $0.distance(to: p) <= Sketch.sewTolerance } }
             }) else {
                 throw CADError.kernelOperationFailed("One outline couldn't be matched to a closed profile. Check for gaps or duplicate lines.")
             }
@@ -754,6 +817,63 @@ final class CascadeKernelBridge: CascadeKernelProvider {
                 holes[loop.profile, default: []].append(group)
             } else {
                 outers[loop.profile, default: []].append(contentsOf: group)
+            }
+        }
+
+        // Serialize one chained loop with BIT-EXACT joints: the
+        // façade chains wire edges at 1e-6, so a sewn joint must
+        // arrive exact. Lines flex — either endpoint can be
+        // rewritten to the joint. An arc's endpoints are pinned to
+        // its circle, so at a line–arc joint the line is rewritten
+        // to the arc's stored endpoint. At an arc–arc joint (not
+        // producible from the sketch editor — its arcs are born in
+        // slots, between lines) the later arc's centre shifts by
+        // the residual, landing its entry exactly on the joint.
+        func serializeLoop(_ group: [Link], types: inout [Int32], data: inout [Double]) {
+            guard group.count > 1 else {
+                if let e = group.first?.entity { appendEntity(e, types: &types, data: &data) }
+                return
+            }
+            var links = group
+            var joint = links[0].exit
+            for i in 1..<links.count {
+                let target = links[i].entry
+                if target.distance(to: joint) > 1e-9 {
+                    if links[i].isLine {
+                        links[i].setEntry(joint)
+                    } else if links[i].isArc && links[i - 1].isLine {
+                        links[i - 1].setExit(target)
+                    } else if links[i].isArc {
+                        links[i].arcCenter = links[i].arcCenter + (joint - target)
+                    }
+                }
+                joint = links[i].exit
+            }
+            let anchor = links[0].entry
+            if joint.distance(to: anchor) > 1e-9 {
+                if links[0].isLine {
+                    links[0].setEntry(joint)
+                } else if links[links.count - 1].isLine {
+                    links[links.count - 1].setExit(anchor)
+                } else {
+                    links[0].arcCenter = links[0].arcCenter + (joint - anchor)
+                }
+            }
+            for link in links {
+                switch link.entity {
+                case .line(let id, _, _, let cons):
+                    appendEntity(.line(id: id, a: link.lineA, b: link.lineB, construction: cons),
+                                 types: &types, data: &data)
+                case .arc(let id, _, let r, let a0, let a1, let cons):
+                    appendEntity(.arc(id: id, center: link.arcCenter, radius: r,
+                                      startAngle: a0, endAngle: a1, construction: cons),
+                                 types: &types, data: &data)
+                case .circle(let id, let c, let r, let cons):
+                    appendEntity(.circle(id: id, center: c, radius: r, construction: cons),
+                                 types: &types, data: &data)
+                case .point:
+                    break
+                }
             }
         }
 
@@ -771,10 +891,10 @@ final class CascadeKernelBridge: CascadeKernelProvider {
             var types: [Int32] = []
             var data: [Double] = []
             var starts: [Int32] = [0]
-            for e in outer { appendEntity(e, types: &types, data: &data) }
+            serializeLoop(outer, types: &types, data: &data)
             starts.append(Int32(types.count))
             for hole in holes[i] ?? [] {
-                for e in hole { appendEntity(e, types: &types, data: &data) }
+                serializeLoop(hole, types: &types, data: &data)
                 starts.append(Int32(types.count))
             }
             guard let face = mc_face_from_sketch(origin, normal, xDir,

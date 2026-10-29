@@ -631,7 +631,9 @@ final class CascadeKernelBridge: CascadeKernelProvider {
     /// not KN602.
     func exportSTEPBodies(_ ids: [Int], path: String) throws {
         try locked {
-            let handles: [UnsafeMutablePointer<MCFacadeShape>] = try ids.map { try shape($0) }
+            // Optional elements: the façade's `const *const *`
+            // imports with a nullable inner pointer.
+            let handles: [UnsafeMutablePointer<MCFacadeShape>?] = try ids.map { try shape($0) }
             var err: Int32 = 0
             let rc = mc_export_step_bodies(handles, Int32(ids.count), path, &err)
             guard rc == MC_OK.rawValue, err == MC_OK.rawValue else {
@@ -645,7 +647,7 @@ final class CascadeKernelBridge: CascadeKernelProvider {
     /// the document is labelled with the part name.
     func exportSTEPXDE(_ ids: [Int], colors: [CensusFaceColor], name: String, path: String) throws {
         try locked {
-            let handles: [UnsafeMutablePointer<MCFacadeShape>] = try ids.map { try shape($0) }
+            let handles: [UnsafeMutablePointer<MCFacadeShape>?] = try ids.map { try shape($0) }
             var rgb: [Double] = []
             for c in colors { rgb += [c.red, c.green, c.blue] }
             var err: Int32 = 0

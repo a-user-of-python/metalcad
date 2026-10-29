@@ -1462,10 +1462,19 @@ final class CascadeMigrationTests: XCTestCase {
         XCTAssertEqual(back, doc)
         XCTAssertEqual(back.parts[0].sketches.last?.sourceFaceIndex, top)
 
-        // Pre-Stage-6 JSON: strip the key, decoding must yield nil.
-        var json = String(decoding: data, as: UTF8.self)
-        json = json.replacingOccurrences(of: "\"sourceFaceIndex\":\(top),", with: "")
-        let legacy = try JSONDecoder().decode(CADDocument.self, from: Data(json.utf8))
+        // Pre-Stage-6 JSON: remove the key STRUCTURALLY (the
+        // JSONSerialization round trip — string surgery on the
+        // encoder's output proved platform-fragile: Darwin's
+        // JSONEncoder text need not contain the exact substring),
+        // decoding must yield nil.
+        var root = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        var parts = root["parts"] as! [[String: Any]]
+        var sketches = parts[0]["sketches"] as! [[String: Any]]
+        sketches[sketches.count - 1].removeValue(forKey: "sourceFaceIndex")
+        parts[0]["sketches"] = sketches
+        root["parts"] = parts
+        let legacyData = try JSONSerialization.data(withJSONObject: root)
+        let legacy = try JSONDecoder().decode(CADDocument.self, from: legacyData)
         XCTAssertNil(legacy.parts[0].sketches.last?.sourceFaceIndex)
         XCTAssertEqual(legacy.parts[0].sketches.last?.plane, faceSketch.plane)
     }

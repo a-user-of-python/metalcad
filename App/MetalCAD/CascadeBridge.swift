@@ -793,30 +793,76 @@ final class CascadeKernelBridge: CascadeKernelProvider {
             groups.append(group)
         }
 
-        // Assign each group to a kit profile loop (outer or hole) by
-        // matching a group vertex against the loop's points — the
-        // kit loops are the same entities' flattened (and sewn)
-        // polylines, so a group endpoint sits within the sewing
-        // tolerance of a loop point.
+        // Assign each group to the kit profile loop (outer or hole)
+        // it actually traces. The kit loops are the same entities'
+        // flattened (and sewn) polylines, so a group's own flattened
+        // curve lies on its kit loop (within the sewing tolerance at
+        // welded joints, ~sagitta elsewhere). Matching is therefore
+        // scored over the WHOLE curve — the worst distance from any
+        // point of the group's polyline to the kit loop's polyline —
+        // and assigned best-first, exclusively: each group claims
+        // exactly one loop, each loop is claimed by exactly one
+        // group.
+        //
+        // (1.24 device failure, 2026-10-29: the previous matcher
+        // used ONE sample point per group — a circle contributed
+        // only its angle-0 point — and took the FIRST loop within
+        // sewTolerance. A hole circle whose wall to its outer was
+        // <= 0.5 mm matched the OUTER loop first, so both circles
+        // were serialized into one profile range and the façade
+        // refused it: "a circle entity must be the only entity of
+        // its profile" (KN602). Identical duplicate circles
+        // collapsed the same way. Whole-curve scoring separates
+        // them: the true loop scores ~0, a neighbour 0.3 mm away
+        // scores 0.3.)
         struct KitLoop { var profile: Int; var isHole: Bool; var points: [Vec2] }
         var kitLoops: [KitLoop] = []
         for (i, p) in profiles.enumerated() {
             kitLoops.append(KitLoop(profile: i, isHole: false, points: p.outer))
             for h in p.holes { kitLoops.append(KitLoop(profile: i, isHole: true, points: h)) }
         }
+        func loopScore(_ group: [Link], _ loopPoints: [Vec2]) -> Double {
+            var worst = 0.0
+            for link in group {
+                for s in link.entity.polyline(sagitta: 0.02) {
+                    var best = Double.greatestFiniteMagnitude
+                    for p in loopPoints { best = min(best, s.distance(to: p)) }
+                    if best > worst { worst = best }
+                }
+            }
+            return worst
+        }
+        var candidates: [(score: Double, group: Int, loop: Int)] = []
+        for (gi, group) in groups.enumerated() {
+            for (li, kl) in kitLoops.enumerated() {
+                let sc = loopScore(group, kl.points)
+                if sc <= Sketch.sewTolerance { candidates.append((sc, gi, li)) }
+            }
+        }
+        candidates.sort { $0.score < $1.score }
+        var groupLoop: [Int: Int] = [:]
+        var loopGroup: [Int: Int] = [:]
+        for c in candidates where groupLoop[c.group] == nil && loopGroup[c.loop] == nil {
+            groupLoop[c.group] = c.loop
+            loopGroup[c.loop] = c.group
+        }
         var outers: [Int: [Link]] = [:]
         var holes: [Int: [[Link]]] = [:]
-        for group in groups {
-            let samples = samplePoints(of: group.map { $0.entity })
-            guard let loop = kitLoops.first(where: { kl in
-                kl.points.contains { p in samples.contains { $0.distance(to: p) <= Sketch.sewTolerance } }
-            }) else {
-                throw CADError.kernelOperationFailed("One outline couldn't be matched to a closed profile. Check for gaps or duplicate lines.")
+        for (gi, group) in groups.enumerated() {
+            guard let li = groupLoop[gi] else {
+                // No kit loop claims this group: the kit's own
+                // disposition dropped these entities from every
+                // profile (a lone decoration line, an open chain).
+                // They bound no profile — skip them, exactly as
+                // extractProfiles did, instead of failing the whole
+                // feature on geometry the kit already judged.
+                continue
             }
+            let loop = kitLoops[li]
             if loop.isHole {
                 holes[loop.profile, default: []].append(group)
             } else {
-                outers[loop.profile, default: []].append(contentsOf: group)
+                outers[loop.profile] = group
             }
         }
 
@@ -897,6 +943,10 @@ final class CascadeKernelBridge: CascadeKernelProvider {
                 serializeLoop(hole, types: &types, data: &data)
                 starts.append(Int32(types.count))
             }
+            if ProcessInfo.processInfo.environment["MC_DEBUG_WIRE"] != nil {
+                print("WIRE types=\(types) starts=\(starts) origin=\(origin) normal=\(normal) xDir=\(xDir)")
+                print("WIRE data=\(data)")
+            }
             guard let face = mc_face_from_sketch(origin, normal, xDir,
                                                  types, data, Int32(types.count),
                                                  starts, Int32(starts.count - 1), &err) else {
@@ -914,15 +964,6 @@ final class CascadeKernelBridge: CascadeKernelProvider {
         case .arc: return [e.resolve(.start), e.resolve(.end)].compactMap { $0 }
         default: return []
         }
-    }
-
-    private func samplePoints(of group: [SketchEntity]) -> [Vec2] {
-        var pts: [Vec2] = []
-        for e in group {
-            pts += endpoints(of: e)
-            if case .circle(_, let c, let r, _) = e { pts.append(c + Vec2(r, 0)) }
-        }
-        return pts
     }
 
     /// One sketch entity -> one façade entity (6-double stride):
